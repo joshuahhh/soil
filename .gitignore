@@ -64,6 +64,11 @@ typings/
 downloaded_files/
 
 client/main
+client/main.html
+client/main.js
+client/main.wasm
+client/emscripten_build.log
+*.o
 *.exe
 *.dll
 *.idb

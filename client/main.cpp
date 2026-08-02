@@ -26,6 +26,13 @@ using namespace Eigen;
 
 SDL_Window* sdl_window;
 
+// initial camera state, overridable via command line: main [lat lon [altitude_m]]
+static Vector3d initial_eye = { 1329866.230289, -4643494.267515, 4154677.131562 }; // nyc
+static Vector3d initial_direction = { 0.219862, 0.419329, 0.312226 };
+
+// scroll wheel zooms by narrowing/widening the field of view
+static double camera_fov = 0.25 * M_PI;
+
 static rocktree_t *_planetoid = NULL;
 
 void loadPlanet() {
@@ -113,7 +120,9 @@ void drawPlanet(gl_ctx_t &ctx) {
 	auto key_left_pressed = state[SDL_SCANCODE_A];
 	auto key_down_pressed = state[SDL_SCANCODE_S];
 	auto key_right_pressed = state[SDL_SCANCODE_D];
-	auto key_boost_pressed = state[SDL_SCANCODE_LSHIFT] || state[SDL_SCANCODE_RSHIFT];
+	auto key_raise_pressed = state[SDL_SCANCODE_Q];
+	auto key_lower_pressed = state[SDL_SCANCODE_E];
+	auto key_slow_pressed = state[SDL_SCANCODE_LSHIFT] || state[SDL_SCANCODE_RSHIFT];
 	auto mouse_pressed = mouse_state & SDL_BUTTON(SDL_BUTTON_LEFT);
 
 	// from lat/lon
@@ -121,9 +130,8 @@ void drawPlanet(gl_ctx_t &ctx) {
 	//static auto ecef_norm = ecef.normalized();
 	//static Vector3d eye = (ecef_norm * (planet_radius + 10000));
 
-	// nyc
-	static Vector3d eye = { 1329866.230289, -4643494.267515, 4154677.131562 };
-	static Vector3d direction = { 0.219862, 0.419329, 0.312226 };		
+	static Vector3d eye = initial_eye;
+	static Vector3d direction = initial_direction;
 
 	// print position every 2 seconds
 	{
@@ -140,7 +148,7 @@ void drawPlanet(gl_ctx_t &ctx) {
 
 	// projection
 	float aspect_ratio = (float)width / (float)height;
-	float fov = 0.25f * (float)M_PI;
+	float fov = (float)camera_fov;
 	auto altitude = eye.norm() - planet_radius;
 	auto horizon = sqrt( altitude * (2*planet_radius + altitude) );
 	auto near = horizon > 370000 ? altitude / 2 : 50;
@@ -169,16 +177,20 @@ void drawPlanet(gl_ctx_t &ctx) {
 
 	// movement
 	auto speed_amp = fmin(2600, powf(fmax(0, (altitude - 500)/10000)+1, 1.337)) / 6;
-	auto mag = 100*(deltaTime/17.0)*(1+key_boost_pressed*4) * speed_amp;
-	auto sideways = direction.cross(up).normalized();	
-	auto forwards = direction * mag;
-	auto backwards = -direction * mag;
+	auto mag = 100*(deltaTime/17.0)*(key_slow_pressed ? 0.1 : 1.0) * speed_amp;
+	auto sideways = direction.cross(up).normalized();
+	auto horizontal = up.cross(sideways).normalized(); // view direction projected onto the horizontal plane
+	auto forwards = horizontal * mag;
+	auto backwards = -horizontal * mag;
 	auto left = -sideways * mag;
 	auto right = sideways * mag;
-	auto new_eye =  eye + key_up_pressed * forwards
+	Vector3d new_eye =  eye + key_up_pressed * forwards
 	                    + key_down_pressed * backwards
 	                    + key_left_pressed * left
-	                    + key_right_pressed * right;						
+	                    + key_right_pressed * right;
+	new_eye = new_eye.normalized() * eye.norm(); // WASD keeps elevation constant
+	auto vertical = up * mag;
+	new_eye += key_raise_pressed * vertical - key_lower_pressed * vertical;
 	auto pot_altitude = new_eye.norm() - planet_radius;
 	if (pot_altitude < 1000 * 1000 * 10) {
 		eye = new_eye;		
@@ -415,6 +427,10 @@ void mainloop(gl_ctx_t &ctx) {
 			case SDL_KEYDOWN:
 				if (sdl_event.key.keysym.sym == SDLK_ESCAPE) quit = true;
 				break;
+			case SDL_MOUSEWHEEL:
+				camera_fov *= pow(0.9, sdl_event.wheel.y);
+				camera_fov = fmax(1.0 * M_PI / 180.0, fmin(camera_fov, 100.0 * M_PI / 180.0));
+				break;
 		}
 	}
 
@@ -427,6 +443,21 @@ void mainloop(gl_ctx_t &ctx) {
 }
 
 int main(int argc, char* argv[]) {
+
+	if (argc == 3 || argc == 4) {
+		auto lat = atof(argv[1]) * M_PI / 180.0;
+		auto lon = atof(argv[2]) * M_PI / 180.0;
+		auto alt = argc == 4 ? atof(argv[3]) : 10000.0;
+		const double earth_radius = 6371010; // same as planetoid radius
+		Vector3d up = { cos(lat) * cos(lon), cos(lat) * sin(lon), sin(lat) };
+		Vector3d north = { -sin(lat) * cos(lon), -sin(lat) * sin(lon), cos(lat) };
+		auto tilt = 30 * M_PI / 180.0; // look north, tilted down towards the ground
+		initial_eye = up * (earth_radius + alt);
+		initial_direction = north * cos(tilt) - up * sin(tilt);
+	} else if (argc != 1) {
+		fprintf(stderr, "usage: %s [lat lon [altitude_m]]\n", argv[0]);
+		exit(1);
+	}
 
 	int video_width = 1024;
 	int video_height = 768;
