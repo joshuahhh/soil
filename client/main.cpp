@@ -1,4 +1,5 @@
 #include <fstream>
+#include <time.h>
 #include <sys/stat.h>
 #ifdef _WIN32
 	#include <direct.h>
@@ -32,6 +33,9 @@ static Vector3d initial_direction = { 0.219862, 0.419329, 0.312226 };
 
 // scroll wheel zooms by narrowing/widening the field of view
 static double camera_fov = 0.25 * M_PI;
+
+// set when V is pressed; the view is saved from drawPlanet, which owns the camera state
+static bool save_view_requested = false;
 
 static rocktree_t *_planetoid = NULL;
 
@@ -201,6 +205,21 @@ void drawPlanet(gl_ctx_t &ctx) {
 		eye = new_eye;		
 	}
 
+	if (save_view_requested) {
+		save_view_requested = false;
+		char filename[64];
+		sprintf(filename, "view_%ld.json", (long)time(NULL));
+		FILE* f = fopen(filename, "w");
+		if (f) {
+			fprintf(f, "{\n\t\"eye\": [%f, %f, %f],\n\t\"direction\": [%f, %f, %f],\n\t\"fov\": %f\n}\n",
+				eye.x(), eye.y(), eye.z(), direction.x(), direction.y(), direction.z(), camera_fov);
+			fclose(f);
+			printf("saved view to %s\n", filename);
+		} else {
+			fprintf(stderr, "could not save view to %s\n", filename);
+		}
+	}
+
 	auto view = lookAt(eye, eye + direction, up);
 	viewprojection = projection * view;
 
@@ -215,8 +234,8 @@ void drawPlanet(gl_ctx_t &ctx) {
 	//       and/or emscripten coroutine fetch semaphore
 	// todo: workers instead of shared mem https://emscripten.org/docs/api_reference/emscripten.h.html#worker-api
 
-	// downloaded nodes/bulks are kept for a while after leaving the view, so
-	// turning away and back doesn't re-download everything
+	// downloaded nodes are kept as an lru cache (see eviction below); stale
+	// bulk metadata is kept for a fixed grace period
 	auto now_ms = (double)SDL_GetTicks();
 	const double keep_ms = 20 * 1000;
 
@@ -285,7 +304,10 @@ void drawPlanet(gl_ctx_t &ctx) {
 					auto s = m(3, 3);
 					auto texels_per_meter = 1.0f / node->meters_per_texel;
 					auto wh = 768; // width < height ? width : height;
-					auto r = (2.0*(1.0/s)) * wh;
+					// zooming (narrowing the fov) magnifies the scene, so it
+					// needs proportionally finer tiles. 1 at the default fov
+					auto zoom = tan(0.125 * M_PI) / tan(camera_fov / 2.0);
+					auto r = (2.0*(1.0/s)) * wh * zoom;
 					if (texels_per_meter > r) continue;
 				}
 
@@ -330,7 +352,27 @@ void drawPlanet(gl_ctx_t &ctx) {
 		}
 	}
 
-	// unbuffer and obsolete nodes
+	// downloaded nodes form an lru cache with a byte quota: nothing is evicted
+	// until resident mesh/texture data exceeds the quota, then the least
+	// recently wanted nodes are dropped first. nodes in the current potential
+	// set are never evicted, even over quota
+	// ~100-150KB per resident node; native gets a generous quota (disk cache
+	// backstops evictions), wasm stays well under its 1GB total heap
+#ifdef EMSCRIPTEN
+	const size_t mem_quota = (size_t)256 << 20;
+#else
+	const size_t mem_quota = (size_t)1024 << 20;
+#endif
+	size_t resident_bytes = 0;
+	struct evict_t { double last_wanted_ms; size_t bytes; rocktree_t::node_t *n; };
+	std::vector<evict_t> evictable;
+	auto node_bytes = [](rocktree_t::node_t *n) {
+		auto bytes = sizeof(*n);
+		for (auto &m : n->meshes)
+			bytes += m.vertices.size() + m.indices.size() * sizeof(uint16_t) + m.texture.size();
+		return bytes;
+	};
+
 	std::vector<rocktree_t::bulk_t*> x = {current_bulk};
 	auto buf_cnt = 0, obs_n_cnt = 0, total_n = 0;
 	while(!x.empty()) {
@@ -345,27 +387,40 @@ void drawPlanet(gl_ctx_t &ctx) {
 		for (auto &kv : cur_bulk->nodes) {
 			auto n = kv.second.get();
 			if (n->dl_state != dl_state_downloaded) continue;
-			
+
 			// just count buffers
 			for (auto &m : n->meshes) { if (m.buffered) { buf_cnt++; break;}}
-			
+
 			total_n++;
+			auto bytes = node_bytes(n);
+			resident_bytes += bytes;
 			auto p = n->request.node_key().path();
 			auto has = potential_nodes.find(p) != potential_nodes.end();
-			if (!has && now_ms - n->last_wanted_ms > keep_ms) {
-				// node is obsolete
-				obs_n_cnt++;
+			if (!has) evictable.push_back({ n->last_wanted_ms, bytes, n });
+		}
+	}
 
-				// unbuffer
-				for (auto &mesh : n->meshes) {
-					if (mesh.buffered) unbufferMesh(mesh);
-				}
-				// clean up
-				n->_data = nullptr;
-				n->matrix_globe_from_mesh = Matrix4d::Zero();
-				n->meshes.clear();
-				n->setDeleted();
+	// evict least recently wanted nodes until back under quota
+	if (resident_bytes > mem_quota) {
+		std::sort(evictable.begin(), evictable.end(), [](const evict_t &a, const evict_t &b) {
+			return a.last_wanted_ms < b.last_wanted_ms;
+		});
+		for (auto &e : evictable) {
+			if (resident_bytes <= mem_quota) break;
+			auto n = e.n;
+			obs_n_cnt++;
+
+			// unbuffer
+			for (auto &mesh : n->meshes) {
+				if (mesh.buffered) unbufferMesh(mesh);
 			}
+			// clean up
+			n->_data = nullptr;
+			n->matrix_globe_from_mesh = Matrix4d::Zero();
+			n->meshes.clear();
+			n->setDeleted();
+
+			resident_bytes -= e.bytes;
 		}
 	}
 
@@ -400,8 +455,9 @@ void drawPlanet(gl_ctx_t &ctx) {
 		ms += deltaTime;
 		if (ms > 2000) {
 			ms = 0;
-			printf("buffered: %d, tot_n: %d, tot_b: %d, pot_n: %lu, pot_b: %lu, obs n: %d, obs b: %d\n", 
-				buf_cnt, total_n, total_b, potential_nodes.size(), potential_bulks.size(), obs_n_cnt, obs_b_cnt
+			printf("buffered: %d, tot_n: %d, tot_b: %d, pot_n: %lu, pot_b: %lu, obs n: %d, obs b: %d, mem: %zu MB\n",
+				buf_cnt, total_n, total_b, potential_nodes.size(), potential_bulks.size(), obs_n_cnt, obs_b_cnt,
+				resident_bytes >> 20
 			);
 		}
 	}
@@ -450,6 +506,7 @@ void mainloop(gl_ctx_t &ctx) {
 				break;
 			case SDL_KEYDOWN:
 				if (sdl_event.key.keysym.sym == SDLK_ESCAPE) quit = true;
+				if (sdl_event.key.keysym.sym == SDLK_v && !sdl_event.key.repeat) save_view_requested = true;
 				break;
 			case SDL_MOUSEWHEEL:
 				camera_fov *= pow(0.9, sdl_event.wheel.y);
@@ -468,7 +525,27 @@ void mainloop(gl_ctx_t &ctx) {
 
 int main(int argc, char* argv[]) {
 
-	if (argc == 3 || argc == 4) {
+	if (argc == 2) {
+		// restore a view saved with the S key
+		FILE* f = fopen(argv[1], "r");
+		if (!f) {
+			fprintf(stderr, "could not open view file %s\n", argv[1]);
+			exit(1);
+		}
+		char buf[512];
+		auto len = fread(buf, 1, sizeof(buf) - 1, f);
+		buf[len] = 0;
+		fclose(f);
+		double e0, e1, e2, d0, d1, d2, fov;
+		if (sscanf(buf, " { \"eye\" : [ %lf , %lf , %lf ] , \"direction\" : [ %lf , %lf , %lf ] , \"fov\" : %lf",
+				&e0, &e1, &e2, &d0, &d1, &d2, &fov) != 7) {
+			fprintf(stderr, "could not parse view file %s\n", argv[1]);
+			exit(1);
+		}
+		initial_eye = { e0, e1, e2 };
+		initial_direction = { d0, d1, d2 };
+		camera_fov = fov;
+	} else if (argc == 3 || argc == 4) {
 		auto lat = atof(argv[1]) * M_PI / 180.0;
 		auto lon = atof(argv[2]) * M_PI / 180.0;
 		auto alt = argc == 4 ? atof(argv[3]) : 10000.0;
@@ -479,7 +556,7 @@ int main(int argc, char* argv[]) {
 		initial_eye = up * (earth_radius + alt);
 		initial_direction = north * cos(tilt) - up * sin(tilt);
 	} else if (argc != 1) {
-		fprintf(stderr, "usage: %s [lat lon [altitude_m]]\n", argv[0]);
+		fprintf(stderr, "usage: %s [lat lon [altitude_m] | view.json]\n", argv[0]);
 		exit(1);
 	}
 
