@@ -37,6 +37,10 @@ static double camera_fov = 0.25 * M_PI;
 // set when V is pressed; the view is saved from drawPlanet, which owns the camera state
 static bool save_view_requested = false;
 
+// toggled with L: tint the parts of a mesh red where a finer tile is wanted
+// but not yet downloaded
+static bool debug_lod_mode = false;
+
 static rocktree_t *_planetoid = NULL;
 
 void loadPlanet() {
@@ -63,12 +67,15 @@ void initGL(gl_ctx_t &ctx) {
 		"uniform vec2 uv_offset;"
 		"uniform vec2 uv_scale;"
 		"uniform bool octant_mask[8];"
+		"uniform bool stale_mask[8];"
 		"attribute vec3 position;"
-		"attribute float octant;"	
-		"attribute vec2 texcoords;"		
+		"attribute float octant;"
+		"attribute vec2 texcoords;"
 		"varying vec2 v_texcoords;"
+		"varying float v_stale;"
 		"void main() {"
 		"	float mask = octant_mask[int(octant)] ? 0.0 : 1.0;"
+		"	v_stale = stale_mask[int(octant)] ? 1.0 : 0.0;"
 		"	v_texcoords = (texcoords + uv_offset) * uv_scale * mask;"
 		"	gl_Position = transform * vec4(position, 1.0) * mask;"
 		"}",
@@ -77,9 +84,13 @@ void initGL(gl_ctx_t &ctx) {
 		"precision mediump float;\n"
 		"#endif\n"
 		"uniform sampler2D texture;"
+		"uniform bool debug_lod;"
 		"varying vec2 v_texcoords;"
+		"varying float v_stale;"
 		"void main() {"
-		"	gl_FragColor = vec4(texture2D(texture, v_texcoords).rgb, 1.0);"
+		"	vec3 c = texture2D(texture, v_texcoords).rgb;"
+		"	if (debug_lod) c = mix(c, vec3(1.0, 0.0, 0.0), v_stale * 0.5);"
+		"	gl_FragColor = vec4(c, 1.0);"
 		"}"
 	);
 	glUseProgram(ctx.program);
@@ -87,6 +98,8 @@ void initGL(gl_ctx_t &ctx) {
 	ctx.uv_offset_loc = glGetUniformLocation(ctx.program, "uv_offset");
 	ctx.uv_scale_loc = glGetUniformLocation(ctx.program, "uv_scale");
 	ctx.octant_mask_loc = glGetUniformLocation(ctx.program, "octant_mask");
+	ctx.stale_mask_loc = glGetUniformLocation(ctx.program, "stale_mask");
+	ctx.debug_lod_loc = glGetUniformLocation(ctx.program, "debug_lod");
 	ctx.texture_loc = glGetUniformLocation(ctx.program, "texture");
 	ctx.position_loc = glGetAttribLocation(ctx.program, "position");
 	ctx.octant_loc = glGetAttribLocation(ctx.program, "octant");
@@ -465,6 +478,8 @@ void drawPlanet(gl_ctx_t &ctx) {
 	// 8-bit octant mask flags of nodes
 	std::map<std::string, uint8_t> mask_map;
 
+	glUniform1i(ctx.debug_lod_loc, debug_lod_mode);
+
 	for (auto kv = potential_nodes.rbegin(); kv != potential_nodes.rend(); ++kv) { // reverse order
 		auto full_path = kv->first;
 		auto node = kv->second;
@@ -481,6 +496,18 @@ void drawPlanet(gl_ctx_t &ctx) {
 		// skip if node is masked completely
 		if (mask_map[full_path] == 0xff) continue;
 
+		// octants where a finer tile is wanted but not drawn (still
+		// downloading). children are drawn before parents here, so mask_map
+		// for this node is already complete
+		uint8_t stale_mask = 0;
+		if (debug_lod_mode) {
+			for (auto o = 0; o < 8; o++) {
+				if (mask_map[full_path] & (1 << o)) continue;
+				if (potential_nodes.find(full_path + octs[o]) != potential_nodes.end())
+					stale_mask |= 1 << o;
+			}
+		}
+
 		// float transform matrix
 		Matrix4d transform = viewprojection * node->matrix_globe_from_mesh;
 		Matrix4f transform_float;
@@ -490,7 +517,7 @@ void drawPlanet(gl_ctx_t &ctx) {
 		glUniformMatrix4fv(ctx.transform_loc, 1, GL_FALSE, transform_float.data());
 		for (auto &mesh : node->meshes) {
 			if (!mesh.buffered) bufferMesh(mesh);
-			bindAndDrawMesh(mesh, mask_map[full_path], ctx);
+			bindAndDrawMesh(mesh, mask_map[full_path], stale_mask, ctx);
 		}
 		//bufs[full_path] = node;
 	}
@@ -507,6 +534,10 @@ void mainloop(gl_ctx_t &ctx) {
 			case SDL_KEYDOWN:
 				if (sdl_event.key.keysym.sym == SDLK_ESCAPE) quit = true;
 				if (sdl_event.key.keysym.sym == SDLK_v && !sdl_event.key.repeat) save_view_requested = true;
+				if (sdl_event.key.keysym.sym == SDLK_l && !sdl_event.key.repeat) {
+					debug_lod_mode = !debug_lod_mode;
+					printf("lod debug mode: %s\n", debug_lod_mode ? "on" : "off");
+				}
 				break;
 			case SDL_MOUSEWHEEL:
 				camera_fov *= pow(0.9, sdl_event.wheel.y);

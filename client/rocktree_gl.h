@@ -6,6 +6,8 @@ struct gl_ctx_t {
 	GLint uv_offset_loc;
 	GLint uv_scale_loc;
 	GLint octant_mask_loc;
+	GLint stale_mask_loc;
+	GLint debug_lod_loc;
 	GLint texture_loc;
 	GLint position_loc;
 	GLint octant_loc;
@@ -47,14 +49,19 @@ void bufferMesh(rocktree_t::node_t::mesh_t &mesh) {
 	mesh.buffered = true;
 }
 
-void bindAndDrawMesh(const rocktree_t::node_t::mesh_t &mesh, uint8_t octant_mask, const gl_ctx_t &ctx) {
+void bindAndDrawMesh(const rocktree_t::node_t::mesh_t &mesh, uint8_t octant_mask, uint8_t stale_mask, const gl_ctx_t &ctx) {
 	glUniform2fv(ctx.uv_offset_loc, 1, mesh.uv_offset.data());
 	glUniform2fv(ctx.uv_scale_loc, 1, mesh.uv_scale.data());
-	int v[8] = { 
+	int v[8] = {
 		(octant_mask >> 0) & 1, (octant_mask >> 1) & 1, (octant_mask >> 2) & 1, (octant_mask >> 3) & 1,
 		(octant_mask >> 4) & 1, (octant_mask >> 5) & 1, (octant_mask >> 6) & 1, (octant_mask >> 7) & 1
 	};
 	glUniform1iv(ctx.octant_mask_loc, 8, v);
+	int s[8] = {
+		(stale_mask >> 0) & 1, (stale_mask >> 1) & 1, (stale_mask >> 2) & 1, (stale_mask >> 3) & 1,
+		(stale_mask >> 4) & 1, (stale_mask >> 5) & 1, (stale_mask >> 6) & 1, (stale_mask >> 7) & 1
+	};
+	glUniform1iv(ctx.stale_mask_loc, 8, s);
 	glUniform1i(ctx.texture_loc, 0);
 	glBindTexture(GL_TEXTURE_2D, mesh.texture_buffer);
 	glBindBuffer(GL_ARRAY_BUFFER, mesh.vertex_buffer);
