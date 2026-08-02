@@ -151,7 +151,7 @@ void drawPlanet(gl_ctx_t &ctx) {
 	float fov = (float)camera_fov;
 	auto altitude = eye.norm() - planet_radius;
 	auto horizon = sqrt( altitude * (2*planet_radius + altitude) );
-	auto near = horizon > 370000 ? altitude / 2 : 50;
+	auto near = horizon > 370000 ? altitude / 2 : 1.0;
 	auto far = horizon;
 	if (near >= far) near = far - 1;
 	if (isnan(far) || far < near) far = near + 1;
@@ -466,6 +466,7 @@ int main(int argc, char* argv[]) {
 		fprintf(stderr, "Couldn't init SDL2: %s\n", SDL_GetError());
 		exit(1);
 	}
+	SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE, 24);
 #ifdef EMSCRIPTEN
 	SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK,
 		SDL_GL_CONTEXT_PROFILE_ES);
