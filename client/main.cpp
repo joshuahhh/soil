@@ -151,8 +151,13 @@ void drawPlanet(gl_ctx_t &ctx) {
 	float fov = (float)camera_fov;
 	auto altitude = eye.norm() - planet_radius;
 	auto horizon = sqrt( altitude * (2*planet_radius + altitude) );
+	// terrain of height h is visible up to horizon(h) beyond the viewer's own
+	// geometric horizon (e.g. mount rainier from seattle), so extend the far
+	// plane by the horizon distance of the tallest terrain on earth
+	const double highest_peak = 8849; // everest
+	auto peak_horizon = sqrt( highest_peak * (2*planet_radius + highest_peak) );
 	auto near = horizon > 370000 ? altitude / 2 : 1.0;
-	auto far = horizon;
+	auto far = horizon + peak_horizon;
 	if (near >= far) near = far - 1;
 	if (isnan(far) || far < near) far = near + 1;
 	projection = perspective(fov, aspect_ratio, near, far);
@@ -205,13 +210,15 @@ void drawPlanet(gl_ctx_t &ctx) {
 	std::vector<std::pair<std::string, rocktree_t::bulk_t *>> valid = { std::make_pair("", current_bulk) };
 	decltype(valid) next_valid;
 	std::map<std::string, rocktree_t::node_t *> potential_nodes;
-	//std::multimap<double, rocktree_t::node_t *> dist_nodes;
 
-	// todo: improve download order
 	// todo: abort emscripten_fetch_close() https://emscripten.org/docs/api_reference/fetch.html
-	//       and/or emscripten coroutine fetch semaphore	
-	// todo: purge branches less aggressively	
-	// todo: workers instead of shared mem https://emscripten.org/docs/api_reference/emscripten.h.html#worker-api	
+	//       and/or emscripten coroutine fetch semaphore
+	// todo: workers instead of shared mem https://emscripten.org/docs/api_reference/emscripten.h.html#worker-api
+
+	// downloaded nodes/bulks are kept for a while after leaving the view, so
+	// turning away and back doesn't re-download everything
+	auto now_ms = (double)SDL_GetTicks();
+	const double keep_ms = 20 * 1000;
 
 	std::map<std::string, rocktree_t::bulk_t *> potential_bulks;
 
@@ -286,9 +293,6 @@ void drawPlanet(gl_ctx_t &ctx) {
 
 				if (node->can_have_data) {
 					potential_nodes[nxt] = node;
-					//auto d = (node->obb.center - eye).squaredNorm();
-					//dist_nodes[d] = node;
-					//dist_nodes.insert(std::make_pair (d, node));
 				}
 			}
 		}
@@ -297,14 +301,32 @@ void drawPlanet(gl_ctx_t &ctx) {
 		next_valid.clear();		
 	}	
 
-	for (auto kv = potential_nodes.begin(); kv != potential_nodes.end(); ++kv) { // normal order
-	//for (auto kv = potential_nodes.rbegin(); kv != potential_nodes.rend(); ++kv) { // reverse order
-	//for (auto kv = dist_nodes.rbegin(); kv != dist_nodes.rend(); ++kv) { // reverse order
-	//for (auto kv = dist_nodes.begin(); kv != dist_nodes.end(); ++kv) { // normal order
-		auto node = kv->second;
-		if (node->dl_state == dl_state_stub) {
+	// download nodes in order of importance: coarse levels before fine ones
+	// (a coarse node covers a much larger area), then near before far within
+	// a level. only a limited number of requests may be in flight at once, so
+	// the order can adapt while the camera moves instead of everything being
+	// queued in path order the first frame it becomes visible
+	{
+		static std::atomic<int> nodes_in_flight(0);
+		const auto max_nodes_in_flight = 12;
+
+		struct candidate_t { size_t level; double dist; rocktree_t::node_t *node; };
+		std::vector<candidate_t> to_download;
+		for (auto &kv : potential_nodes) {
+			auto node = kv.second;
+			node->last_wanted_ms = now_ms;
+			if (node->dl_state != dl_state_stub) continue;
+			to_download.push_back({ kv.first.size(), (node->obb.center - eye).norm(), node });
+		}
+		std::sort(to_download.begin(), to_download.end(), [](const candidate_t &a, const candidate_t &b) {
+			return a.level != b.level ? a.level < b.level : a.dist < b.dist;
+		});
+		for (auto &c : to_download) {
+			if (nodes_in_flight >= max_nodes_in_flight) break;
+			auto node = c.node;
+			nodes_in_flight++;
 			node->setStartedDownloading();
-			getNode(node->request, node, [node](auto) {});
+			getNode(node->request, node, [node](auto) { nodes_in_flight--; });
 		}
 	}
 
@@ -330,7 +352,7 @@ void drawPlanet(gl_ctx_t &ctx) {
 			total_n++;
 			auto p = n->request.node_key().path();
 			auto has = potential_nodes.find(p) != potential_nodes.end();
-			if (!has) {
+			if (!has && now_ms - n->last_wanted_ms > keep_ms) {
 				// node is obsolete
 				obs_n_cnt++;
 
@@ -350,7 +372,7 @@ void drawPlanet(gl_ctx_t &ctx) {
 	// post order dfs purge obsolete bulks
 	auto total_b = 0, obs_b_cnt = 0;	
 	std::function<void(rocktree_t::bulk_t *)> po;
-	po = [&po, &potential_bulks, &obs_b_cnt, &total_b](rocktree_t::bulk_t * b){
+	po = [&po, &potential_bulks, &obs_b_cnt, &total_b, now_ms, keep_ms](rocktree_t::bulk_t * b){
 		for (auto &kv : b->bulks){
 			auto b = kv.second.get();
 			if (b->dl_state == dl_state_downloaded)
@@ -359,7 +381,9 @@ void drawPlanet(gl_ctx_t &ctx) {
 		total_b++;
 		auto p = b->request.node_key().path();
 		auto has = potential_bulks.find(p) != potential_bulks.end();
-		if (!has) {
+		if (has) {
+			b->last_wanted_ms = now_ms;
+		} else if (now_ms - b->last_wanted_ms > keep_ms) {
 			if (b->busy_ctr == 0) {
 				b->nodes.clear();
 				b->bulks.clear();

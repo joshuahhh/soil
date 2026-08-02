@@ -76,4 +76,4 @@ client/emscripten_build.log
 *.dSYM
 *.pb.h
 *.pb.cc
-client/cache
+cache/

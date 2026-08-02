@@ -70,19 +70,20 @@ void fetchData(const char* path, int i, void (*thunk)(int i, int error, uint8_t 
 	{
 		unsigned char* data; size_t len;
 		if (use_cache && readFile(cache_path, &data, &len)) {
+			printf("cache: %s\n", path);
 			thunk(i, 0, data, len);
 			free(data);
 			free(cache_path);
 			return;
-		}	
+		}
 	}
-	
+
 	const char* base_url = "http://kh.google.com/rt/earth/";
 	char* url = (char*)malloc(strlen(base_url) + strlen(path) + 1);
-	strcpy(url, base_url); strcat(url, path);	
+	strcpy(url, base_url); strcat(url, path);
 
-	//printf("GET %s\n", url);
-	http_t* request = http_get(url, NULL); 
+	printf("web:   %s\n", path);
+	http_t* request = http_get(url, NULL);
 	free(url);
 	if (!request) {
 		thunk(i, 1, NULL, 0);
@@ -96,7 +97,10 @@ void fetchData(const char* path, int i, void (*thunk)(int i, int error, uint8_t 
 		SDL_Delay(1);
 	} while (status == HTTP_STATUS_PENDING);
 
-	if (status == HTTP_STATUS_FAILED) {
+	// http.h reports e.g. 404/500 as COMPLETED, so check the status code
+	// ourselves — an error body must not be treated (or cached) as data
+	if (status == HTTP_STATUS_FAILED || request->status_code != 200) {
+		fprintf(stderr, "http error %d: %s\n", request->status_code, path);
 		http_release(request);
 		thunk(i, 1, NULL, 0);
 		free(cache_path);
@@ -126,23 +130,37 @@ void createDir(const char* path) {
 }
 
 bool readFile(const char* file_path, unsigned char** data, size_t* len) {
-	return false;
 	FILE* file = fopen(file_path, "rb");
 	if (!file) return false;
 	fseek(file, 0, SEEK_END);
 	*len = ftell(file);
+	if (*len == 0) { // treat empty files as a miss so they get refetched
+		fclose(file);
+		return false;
+	}
 	*data = (unsigned char*)malloc(*len);
 	fseek(file, 0, SEEK_SET);
-	fread(*data, *len, 1, file);
+	auto ok = fread(*data, *len, 1, file) == 1;
 	fclose(file);
-	return true;
+	if (!ok) free(*data);
+	return ok;
 }
 
 void writeFile(const char* file_path, unsigned char* data, size_t len) {
-	return;
-	FILE* file = fopen(file_path, "wb");
+	// write to a temp file and rename, so an interrupted write can't leave a
+	// truncated file that would be served as a valid cache entry forever
+	auto tmp_path = std::string(file_path) + ".tmp";
+	FILE* file = fopen(tmp_path.c_str(), "wb");
 	if (!file) return;
-	fwrite(data, len, 1, file);
+	auto ok = len == 0 || fwrite(data, len, 1, file) == 1;
 	fclose(file);
+	if (!ok) {
+		remove(tmp_path.c_str());
+		return;
+	}
+#ifdef _WIN32
+	remove(file_path); // windows rename() won't overwrite
+#endif
+	rename(tmp_path.c_str(), file_path);
 }
 #endif

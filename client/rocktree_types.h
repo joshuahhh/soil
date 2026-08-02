@@ -41,6 +41,8 @@ struct rocktree_t {
 			if (parent) parent->busy_ctr--;
 		}
 
+		double last_wanted_ms = 0; // last time this node was in the potential set (render thread only)
+
 		float meters_per_texel;
 		OrientedBoundingBox obb;
 
@@ -94,8 +96,10 @@ struct rocktree_t {
 			if (parent) parent->busy_ctr--;
 		}
 
+		double last_wanted_ms = 0; // last time this bulk was in the potential set (render thread only)
+
 		Vector3f head_node_center;
-		
+
 		std::unique_ptr<BulkMetadata> _metadata;
 		std::atomic<int> busy_ctr;
 
