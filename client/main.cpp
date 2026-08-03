@@ -43,6 +43,14 @@ static bool debug_lod_mode = false;
 
 static bool mouse_captured = true;
 
+// benchmark rig (see bench.sh): fixed view, log per-frame distance to the
+// fully loaded reference frame until the scene converges
+static bool bench_mode = false, bench_capture = false;
+static const char *bench_ref_path = nullptr, *bench_csv_path = nullptr;
+// true when the last frame drew everything the current view wants: no bulk
+// metadata or node data still missing/in flight for the potential set
+static bool scene_complete = false;
+
 static rocktree_t *_planetoid = NULL;
 
 void loadPlanet() {
@@ -260,6 +268,7 @@ void drawPlanet(gl_ctx_t &ctx) {
 	std::map<std::string, rocktree_t::bulk_t *> potential_bulks;
 
 	// node culling and level of detail using breadth-first search
+	bool all_loaded = true;
 	for (;;) {
 		for(auto cur2 : valid) {
 			auto cur = cur2.first;
@@ -276,7 +285,10 @@ void drawPlanet(gl_ctx_t &ctx) {
 					b->setStartedDownloading();
 					getBulk(b->request, b, [=](auto) {});			
 				}
-				if (b->dl_state != dl_state_downloaded) continue;
+				if (b->dl_state != dl_state_downloaded) {
+					all_loaded = false;
+					continue;
+				}
 				bulk = b;
 			}
 			potential_bulks[cur] = bulk;
@@ -358,6 +370,7 @@ void drawPlanet(gl_ctx_t &ctx) {
 		for (auto &kv : potential_nodes) {
 			auto node = kv.second;
 			node->last_wanted_ms = now_ms;
+			if (node->dl_state != dl_state_downloaded) all_loaded = false;
 			if (node->dl_state != dl_state_stub) continue;
 			auto radius = node->obb.extents.norm();
 			auto dist = fmax(0.0, (node->obb.center - eye).norm() - radius);
@@ -367,14 +380,20 @@ void drawPlanet(gl_ctx_t &ctx) {
 			// tiles containing the camera all have priority 0; coarse first there
 			return a.priority != b.priority ? a.priority < b.priority : a.level < b.level;
 		});
+		auto started = 0;
 		for (auto &c : to_download) {
 			if (nodes_in_flight >= max_nodes_in_flight) break;
 			auto node = c.node;
 			nodes_in_flight++;
+			started++;
 			node->setStartedDownloading();
 			getNode(node->request, node, [node](auto) { nodes_in_flight--; });
 		}
+		if (bench_mode && (to_download.size() > 0 || nodes_in_flight > 0))
+			printf("timing: sched at=%u stubs=%zu started=%d inflight=%d pot=%zu\n",
+				SDL_GetTicks(), to_download.size(), started, (int)nodes_in_flight, potential_nodes.size());
 	}
+	scene_complete = all_loaded;
 
 	// downloaded nodes form an lru cache with a byte quota: nothing is evicted
 	// until resident mesh/texture data exceeds the quota, then the least
@@ -535,6 +554,116 @@ void drawPlanet(gl_ctx_t &ctx) {
 }
 
 bool quit = false;
+
+#ifndef EMSCRIPTEN
+// rows are stored bottom-up (opengl order) in memory, flipped on disk so the
+// ppm views right side up
+static bool writePpm(const char *path, int w, int h, const uint8_t *rgb) {
+	FILE *f = fopen(path, "wb");
+	if (!f) return false;
+	fprintf(f, "P6\n%d %d\n255\n", w, h);
+	for (int y = h - 1; y >= 0; y--)
+		fwrite(rgb + (size_t)y * w * 3, 1, (size_t)w * 3, f);
+	fclose(f);
+	return true;
+}
+
+static uint8_t *readPpm(const char *path, int *w, int *h) {
+	FILE *f = fopen(path, "rb");
+	if (!f) return nullptr;
+	int maxval;
+	if (fscanf(f, "P6 %d %d %d", w, h, &maxval) != 3 || maxval != 255) {
+		fclose(f);
+		return nullptr;
+	}
+	fgetc(f); // the single whitespace byte after maxval
+	auto buf = (uint8_t *)malloc((size_t)*w * *h * 3);
+	auto ok = true;
+	for (int y = *h - 1; y >= 0; y--)
+		ok &= fread(buf + (size_t)y * *w * 3, 1, (size_t)*w * 3, f) == (size_t)*w * 3;
+	fclose(f);
+	if (!ok) {
+		free(buf);
+		return nullptr;
+	}
+	return buf;
+}
+
+// called once per frame after drawPlanet, before the buffer swap. capture
+// mode: wait for the scene to converge, save the frame as reference, quit.
+// measure mode: log rmse against the reference every frame until converged
+void benchFrame() {
+	static uint32_t start_ms = SDL_GetTicks();
+	static uint32_t first_complete_ms = 0;
+	static int complete_streak = 0;
+	static uint8_t *ref = nullptr;
+	static int ref_w = 0, ref_h = 0;
+	static FILE *csv = nullptr;
+	static std::vector<uint8_t> pixels;
+
+	auto elapsed = SDL_GetTicks() - start_ms;
+	int w, h;
+	SDL_GL_GetDrawableSize(sdl_window, &w, &h);
+	pixels.resize((size_t)w * h * 3);
+	glPixelStorei(GL_PACK_ALIGNMENT, 1);
+	glReadPixels(0, 0, w, h, GL_RGB, GL_UNSIGNED_BYTE, pixels.data());
+
+	if (!bench_capture) {
+		if (!ref) {
+			ref = readPpm(bench_ref_path, &ref_w, &ref_h);
+			if (!ref) {
+				fprintf(stderr, "bench: could not read reference %s\n", bench_ref_path);
+				exit(1);
+			}
+			csv = fopen(bench_csv_path, "w");
+			if (!csv) {
+				fprintf(stderr, "bench: could not open %s for writing\n", bench_csv_path);
+				exit(1);
+			}
+			fprintf(csv, "ms,rmse\n");
+		}
+		if (ref_w != w || ref_h != h) {
+			fprintf(stderr, "bench: window %dx%d doesn't match reference %dx%d "
+				"(don't resize the window between capture and bench runs)\n", w, h, ref_w, ref_h);
+			exit(1);
+		}
+		double sum = 0;
+		auto n = (size_t)w * h * 3;
+		for (size_t i = 0; i < n; i++) {
+			auto d = (double)pixels[i] - (double)ref[i];
+			sum += d * d;
+		}
+		fprintf(csv, "%u,%f\n", elapsed, sqrt(sum / n));
+	}
+
+	if (scene_complete) {
+		if (complete_streak++ == 0) first_complete_ms = elapsed;
+	} else {
+		complete_streak = 0;
+	}
+
+	// a few extra complete frames so lazily buffered meshes are all drawn and
+	// a spurious single complete frame doesn't end the run early
+	const auto settle_frames = 30;
+	const uint32_t timeout_ms = 180 * 1000;
+	if (complete_streak < settle_frames && elapsed < timeout_ms) return;
+
+	if (elapsed >= timeout_ms)
+		fprintf(stderr, "bench: timed out before the scene completed\n");
+	if (bench_capture) {
+		if (writePpm(bench_ref_path, w, h, pixels.data()))
+			printf("bench: reference %s (%dx%d), scene complete at %u ms\n",
+				bench_ref_path, w, h, first_complete_ms);
+		else
+			fprintf(stderr, "bench: could not write %s\n", bench_ref_path);
+	} else {
+		fclose(csv);
+		printf("bench: %s, scene complete at %u ms\n", bench_csv_path, first_complete_ms);
+	}
+	quit = true;
+}
+#endif
+
 void mainloop(gl_ctx_t &ctx) {
 	SDL_Event sdl_event;
 	while (SDL_PollEvent(&sdl_event)) {
@@ -577,10 +706,30 @@ void mainloop(gl_ctx_t &ctx) {
 	deltaTime = (double)((NOW - LAST)*1000 / (double)SDL_GetPerformanceFrequency());
 
 	drawPlanet(ctx);
+#ifndef EMSCRIPTEN
+	if (bench_mode) benchFrame();
+#endif
 	SDL_GL_SwapWindow(sdl_window);
 }
 
 int main(int argc, char* argv[]) {
+
+#ifndef EMSCRIPTEN
+	if (argc >= 2 && strncmp(argv[1], "--bench", 7) == 0) {
+		bench_mode = true;
+		bench_capture = strcmp(argv[1], "--bench-capture") == 0;
+		if (argc != (bench_capture ? 4 : 5)) {
+			fprintf(stderr, "usage: %s --bench-capture view.json ref.ppm\n"
+			                "       %s --bench view.json ref.ppm out.csv\n", argv[0], argv[0]);
+			exit(1);
+		}
+		bench_ref_path = argv[3];
+		if (!bench_capture) bench_csv_path = argv[4];
+		// let the view file fall through to the normal view-loading path
+		argv[1] = argv[2];
+		argc = 2;
+	}
+#endif
 
 	if (argc == 2) {
 		// restore a view saved with the S key
@@ -664,7 +813,9 @@ int main(int argc, char* argv[]) {
 	initGL(*ctx);
 	loadPlanet();
 
-	SDL_SetRelativeMouseMode(SDL_TRUE);
+	// benchmarks hold a fixed view; leave the cursor alone
+	if (bench_mode) mouse_captured = false;
+	else SDL_SetRelativeMouseMode(SDL_TRUE);
 
 #ifdef EMSCRIPTEN
 	emscripten_set_main_loop_arg([](void* _ctx){	

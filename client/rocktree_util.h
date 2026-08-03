@@ -139,19 +139,22 @@ void getBulk(BulkMetadataRequest req, rocktree_t::bulk_t *b, std::function<void(
 		} else {
 			auto vec = std::vector<uint8_t>(data, data+len);
 			
-			auto result = pool.enqueue([](auto b, auto cb, auto vec) { 
-				
+			auto result = pool.enqueue([](auto b, auto cb, auto vec) {
+
+				auto t0 = SDL_GetTicks();
 				BulkMetadata bulk;
-				
+
 				if (!bulk.ParseFromArray(vec.data(), vec.size())) {
 					printf("download failed\n");
 					b->setFailedDownloading();
 					cb(NULL);
 					return;
-				}			
-				
+				}
+
 				auto bu = std::make_unique<BulkMetadata>(bulk);
-				populateBulk(b, std::move(bu));	
+				populateBulk(b, std::move(bu));
+				printf("timing: decode bulk %s start=%u dur=%u\n",
+					b->request.node_key().path().c_str(), t0, SDL_GetTicks() - t0);
 				cb(NULL);
 
 			}, b, cb, vec);
@@ -205,18 +208,21 @@ void getNode(NodeDataRequest req, rocktree_t::node_t *n, std::function<void(std:
 		} else {			
 			auto vec = std::vector<uint8_t>(data, data+len);
 
-			auto result = pool.enqueue([](auto n, auto cb, auto vec) { 
+			auto result = pool.enqueue([](auto n, auto cb, auto vec) {
+				auto t0 = SDL_GetTicks();
 				NodeData node;
-				
+
 				if (!node.ParseFromArray(vec.data(), vec.size())) {
 					printf("download failed\n");
 					n->setFailedDownloading();
 					cb(NULL);
 					return;
-				}			
-				
+				}
+
 				auto nu = std::make_unique<NodeData>(node);
-				populateNode(n, std::move(nu));	
+				populateNode(n, std::move(nu));
+				printf("timing: decode node %s start=%u dur=%u\n",
+					n->request.node_key().path().c_str(), t0, SDL_GetTicks() - t0);
 				cb(NULL);
     		}, n, cb, vec);		
 		}

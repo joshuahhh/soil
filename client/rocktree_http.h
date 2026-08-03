@@ -70,7 +70,7 @@ void fetchData(const char* path, int i, void (*thunk)(int i, int error, uint8_t 
 	{
 		unsigned char* data; size_t len;
 		if (use_cache && readFile(cache_path, &data, &len)) {
-			printf("cache: %s\n", path);
+			printf("timing: cache %s at=%u\n", path, SDL_GetTicks());
 			thunk(i, 0, data, len);
 			free(data);
 			free(cache_path);
@@ -82,7 +82,7 @@ void fetchData(const char* path, int i, void (*thunk)(int i, int error, uint8_t 
 	char* url = (char*)malloc(strlen(base_url) + strlen(path) + 1);
 	strcpy(url, base_url); strcat(url, path);
 
-	printf("web:   %s\n", path);
+	printf("timing: web %s at=%u\n", path, SDL_GetTicks());
 	http_t* request = http_get(url, NULL);
 	free(url);
 	if (!request) {

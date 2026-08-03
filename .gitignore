@@ -79,3 +79,6 @@ client/emscripten_build.log
 cache/
 
 view_*.json
+
+# benchmark rig output (reference images, per-run csvs, graphs)
+client/bench/
