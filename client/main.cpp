@@ -336,25 +336,31 @@ void drawPlanet(gl_ctx_t &ctx) {
 		next_valid.clear();		
 	}	
 
-	// download nodes in order of importance: coarse levels before fine ones
-	// (a coarse node covers a much larger area), then near before far within
-	// a level. only a limited number of requests may be in flight at once, so
-	// the order can adapt while the camera moves instead of everything being
-	// queued in path order the first frame it becomes visible
+	// download nodes in order of importance: by apparent size on screen,
+	// biggest first. distance to the node's bounding sphere over its diameter
+	// is the inverse of angular size, so it ranks a fine tile right in front
+	// of the camera above a coarse tile at the horizon, while a huge coarse
+	// tile still wins over everything when nothing is loaded yet. only a
+	// limited number of requests may be in flight at once, so the order can
+	// adapt while the camera moves instead of everything being queued in path
+	// order the first frame it becomes visible
 	{
 		static std::atomic<int> nodes_in_flight(0);
 		const auto max_nodes_in_flight = 12;
 
-		struct candidate_t { size_t level; double dist; rocktree_t::node_t *node; };
+		struct candidate_t { double priority; size_t level; rocktree_t::node_t *node; };
 		std::vector<candidate_t> to_download;
 		for (auto &kv : potential_nodes) {
 			auto node = kv.second;
 			node->last_wanted_ms = now_ms;
 			if (node->dl_state != dl_state_stub) continue;
-			to_download.push_back({ kv.first.size(), (node->obb.center - eye).norm(), node });
+			auto radius = node->obb.extents.norm();
+			auto dist = fmax(0.0, (node->obb.center - eye).norm() - radius);
+			to_download.push_back({ dist / (2 * radius), kv.first.size(), node });
 		}
 		std::sort(to_download.begin(), to_download.end(), [](const candidate_t &a, const candidate_t &b) {
-			return a.level != b.level ? a.level < b.level : a.dist < b.dist;
+			// tiles containing the camera all have priority 0; coarse first there
+			return a.priority != b.priority ? a.priority < b.priority : a.level < b.level;
 		});
 		for (auto &c : to_download) {
 			if (nodes_in_flight >= max_nodes_in_flight) break;
