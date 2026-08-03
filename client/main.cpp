@@ -93,11 +93,22 @@ void initGL(gl_ctx_t &ctx) {
 		"attribute vec2 texcoords;"
 		"varying vec2 v_texcoords;"
 		"varying float v_stale;"
+		"varying float v_mask;"
 		"void main() {"
+		// masking: a triangle is dropped only when ALL its vertices are in
+		// masked octants (v_mask interpolates to 0 -> fragment discard).
+		// triangles straddling an octant boundary used to be collapsed
+		// entirely, retreating the surface a triangle-row from the boundary
+		// and opening hairline cracks the finer tile never covers; instead
+		// they are drawn, with masked vertices pushed slightly away in depth
+		// so the finer tile wins wherever they overlap it
 		"	float mask = octant_mask[int(octant)] ? 0.0 : 1.0;"
+		"	v_mask = mask;"
 		"	v_stale = stale_mask[int(octant)] ? 1.0 : 0.0;"
-		"	v_texcoords = (texcoords + uv_offset) * uv_scale * mask;"
-		"	gl_Position = transform * vec4(position, 1.0) * mask;"
+		"	v_texcoords = (texcoords + uv_offset) * uv_scale;"
+		"	vec4 p = transform * vec4(position, 1.0);"
+		"	p.z += (1.0 - mask) * 0.002 * p.w;"
+		"	gl_Position = p;"
 		"}",
 
 		"#ifdef GL_ES\n"
@@ -107,7 +118,9 @@ void initGL(gl_ctx_t &ctx) {
 		"uniform bool debug_lod;"
 		"varying vec2 v_texcoords;"
 		"varying float v_stale;"
+		"varying float v_mask;"
 		"void main() {"
+		"	if (v_mask < 0.004) discard;"
 		"	vec3 c = texture2D(texture, v_texcoords).rgb;"
 		"	if (debug_lod) c = mix(c, vec3(1.0, 0.0, 0.0), v_stale * 0.5);"
 		"	gl_FragColor = vec4(c, 1.0);"
