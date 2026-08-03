@@ -41,6 +41,8 @@ static bool save_view_requested = false;
 // but not yet downloaded
 static bool debug_lod_mode = false;
 
+static bool mouse_captured = true;
+
 static rocktree_t *_planetoid = NULL;
 
 void loadPlanet() {
@@ -131,7 +133,6 @@ void drawPlanet(gl_ctx_t &ctx) {
 	glClearColor((sky>>16 & 0xff) / 255.0f, (sky>>8 & 0xff) / 255.0f, (sky & 0xff) / 255.0f, 1.0f);
 	glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);	
 
-	auto mouse_state = SDL_GetMouseState(NULL, NULL);
 	auto state = SDL_GetKeyboardState(NULL);
 	auto key_up_pressed = state[SDL_SCANCODE_W];
 	auto key_left_pressed = state[SDL_SCANCODE_A];
@@ -140,7 +141,6 @@ void drawPlanet(gl_ctx_t &ctx) {
 	auto key_raise_pressed = state[SDL_SCANCODE_Q];
 	auto key_lower_pressed = state[SDL_SCANCODE_E];
 	auto key_slow_pressed = state[SDL_SCANCODE_LSHIFT] || state[SDL_SCANCODE_RSHIFT];
-	auto mouse_pressed = mouse_state & SDL_BUTTON(SDL_BUTTON_LEFT);
 
 	// from lat/lon
 	//static Vector3d ecef = { ...https://www.oc.nps.edu/oc2902w/coord/llhxyz.htm };
@@ -180,8 +180,8 @@ void drawPlanet(gl_ctx_t &ctx) {
 	projection = perspective(fov, aspect_ratio, near, far);
 	
 	// rotation
-	int mouse_x, mouse_y;
-	SDL_GetRelativeMouseState(&mouse_x, &mouse_y);
+	int mouse_x = 0, mouse_y = 0;
+	if (mouse_captured) SDL_GetRelativeMouseState(&mouse_x, &mouse_y);
 	double yaw = mouse_x * 0.001;
 	double pitch = -mouse_y * 0.001;
 	auto overhead = direction.dot(-up);
@@ -531,8 +531,23 @@ void mainloop(gl_ctx_t &ctx) {
 			case SDL_QUIT:
 				quit = true;
 				break;
+			case SDL_MOUSEBUTTONDOWN:
+				if (!mouse_captured) {
+					mouse_captured = true;
+					SDL_SetRelativeMouseMode(SDL_TRUE);
+					// discard motion accumulated while released so the camera doesn't jump
+					SDL_GetRelativeMouseState(NULL, NULL);
+				}
+				break;
 			case SDL_KEYDOWN:
-				if (sdl_event.key.keysym.sym == SDLK_ESCAPE) quit = true;
+				if (sdl_event.key.keysym.sym == SDLK_ESCAPE) {
+					if (mouse_captured) {
+						mouse_captured = false;
+						SDL_SetRelativeMouseMode(SDL_FALSE);
+					} else {
+						quit = true;
+					}
+				}
 				if (sdl_event.key.keysym.sym == SDLK_v && !sdl_event.key.repeat) save_view_requested = true;
 				if (sdl_event.key.keysym.sym == SDLK_l && !sdl_event.key.repeat) {
 					debug_lod_mode = !debug_lod_mode;
