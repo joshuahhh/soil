@@ -197,9 +197,14 @@ void drawPlanet(gl_ctx_t &ctx) {
 	auto rotation = quat.matrix();
 	direction = (rotation * direction).normalized();
 
-	// movement
-	auto speed_amp = fmin(2600, powf(fmax(0, (altitude - 500)/10000)+1, 1.337)) / 6;
-	auto mag = 100*(deltaTime/17.0)*(key_slow_pressed ? 0.1 : 1.0) * speed_amp;
+	// movement: speed proportional to altitude, so apparent (screen-space)
+	// motion is constant and approaching the ground eases in exponentially.
+	// altitude is a proxy for distance to the terrain being looked at; good
+	// enough until we track real terrain height under the camera
+	const auto altitude_per_second = 1.0;
+	const auto min_speed = 5.0; // m/s floor so we don't freeze at ground level
+	auto speed = fmax(min_speed, altitude * altitude_per_second);
+	auto mag = speed * (deltaTime/1000.0) * (key_slow_pressed ? 0.1 : 1.0);
 	auto sideways = direction.cross(up).normalized();
 	auto horizontal = up.cross(sideways).normalized(); // view direction projected onto the horizontal plane
 	auto forwards = horizontal * mag;
