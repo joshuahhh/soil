@@ -82,6 +82,11 @@ void loadPlanet() {
 void initGL(gl_ctx_t &ctx) {
 	glEnable(GL_DEPTH_TEST);
 	glEnable(GL_CULL_FACE);
+	// crack-fill boundary lines (see bindAndDrawMesh) can only land on
+	// background pixels, so width just sets how wide a slit they can plug
+	// (wider also costs more fill rate). webgl typically clamps this to 1
+	auto lw = getenv("EARTH_LINE_WIDTH");
+	glLineWidth(lw ? (float)atof(lw) : 2.0f);
 	ctx.program = makeShader(
 		"uniform mat4 transform;"
 		"uniform vec2 uv_offset;"
@@ -585,7 +590,8 @@ void drawPlanet(gl_ctx_t &ctx) {
 		mask_map[full_path.substr(0, level - 1)] |= 1 << octant;
 
 		// skip if node is masked completely
-		auto self_mask = mask_map[full_path];
+		static const bool no_mask_debug = getenv("EARTH_NO_MASK") != nullptr;
+		auto self_mask = no_mask_debug ? (uint8_t)0 : mask_map[full_path];
 		if (self_mask == 0xff) continue;
 
 		// octants where a finer tile is wanted but not drawn (still

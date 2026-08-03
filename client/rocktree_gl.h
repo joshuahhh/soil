@@ -36,7 +36,10 @@ void bufferMesh(rocktree_t::node_t::mesh_t &mesh) {
 	glBufferData(GL_ARRAY_BUFFER, mesh.vertices.size() * sizeof(unsigned char), mesh.vertices.data(), GL_STATIC_DRAW);
 	glGenBuffers(1, &mesh.index_buffer);
 	glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, mesh.index_buffer);
-	glBufferData(GL_ELEMENT_ARRAY_BUFFER, mesh.indices.size() * sizeof(unsigned short), mesh.indices.data(), GL_STATIC_DRAW);			
+	glBufferData(GL_ELEMENT_ARRAY_BUFFER, mesh.indices.size() * sizeof(unsigned short), mesh.indices.data(), GL_STATIC_DRAW);
+	glGenBuffers(1, &mesh.boundary_index_buffer);
+	glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, mesh.boundary_index_buffer);
+	glBufferData(GL_ELEMENT_ARRAY_BUFFER, mesh.boundary_indices.size() * sizeof(unsigned short), mesh.boundary_indices.data(), GL_STATIC_DRAW);
 
 	glGenTextures(1, &mesh.texture_buffer);
 	glBindTexture(GL_TEXTURE_2D, mesh.texture_buffer);
@@ -72,6 +75,15 @@ void bindAndDrawMesh(const rocktree_t::node_t::mesh_t &mesh, uint8_t octant_mask
 	
 	glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, mesh.index_buffer);
 	glDrawElements(GL_TRIANGLE_STRIP, mesh.indices.size(), GL_UNSIGNED_SHORT, NULL);
+
+	// crack fill: re-draw the mesh's boundary edges as lines. in the slit
+	// pixels along tile seams nothing has been drawn, so the lines win the
+	// depth test there and nowhere else
+	static const bool no_lines_debug = getenv("EARTH_NO_LINES") != nullptr;
+	if (!no_lines_debug && mesh.boundary_indices.size()) {
+		glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, mesh.boundary_index_buffer);
+		glDrawElements(GL_LINES, mesh.boundary_indices.size(), GL_UNSIGNED_SHORT, NULL);
+	}
 }
 
 void unbufferMesh(rocktree_t::node_t::mesh_t &mesh) {
@@ -81,6 +93,7 @@ void unbufferMesh(rocktree_t::node_t::mesh_t &mesh) {
 	
 	glDeleteTextures(1, &mesh.texture_buffer); // auto: glBindTexture(GL_TEXTURE_2D, 0);
 	glDeleteBuffers(1, &mesh.index_buffer); // auto: glBindBuffer(GL_ARRAY_BUFFER, 0);
+	glDeleteBuffers(1, &mesh.boundary_index_buffer);
 	glDeleteBuffers(1, &mesh.vertex_buffer); // auto: glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
 }
 

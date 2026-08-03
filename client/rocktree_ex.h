@@ -1,3 +1,5 @@
+#include <unordered_map>
+#include <algorithm>
 #include "crn/crn.h"
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"
@@ -92,7 +94,32 @@ void populateNode(rocktree_t::node_t *node, std::unique_ptr<NodeData> node_data)
 		unpackOctantMaskAndOctantCountsAndLayerBounds(mesh.layer_and_octant_counts(), m.indices.data(), m.indices.size(), m.vertices.data(), m.vertices.size(), layer_bounds);
 		assert(0 <= layer_bounds[3] && layer_bounds[3] <= m.indices.size());
 		//m.indices_len = layer_bounds[3]; // enable
-		m.indices.resize(layer_bounds[3]);
+		if (!getenv("EARTH_FULL_LAYERS")) m.indices.resize(layer_bounds[3]);
+
+		// collect the mesh's boundary: edges used by exactly one
+		// non-degenerate triangle of the strip. neighboring tiles quantize
+		// their vertices onto different grids, so hairline cracks open along
+		// tile seams; the renderer re-draws these edges as lines to fill
+		// whatever sub-pixel slits the triangles leave
+		{
+			std::unordered_map<uint32_t, int> edge_count;
+			auto idx = m.indices.data();
+			for (size_t i = 0; i + 2 < m.indices.size(); i++) {
+				auto a = idx[i], b = idx[i+1], c = idx[i+2];
+				if (a == b || b == c || a == c) continue;
+				uint32_t edges[3] = {
+					(uint32_t)std::min(a,b) << 16 | std::max(a,b),
+					(uint32_t)std::min(b,c) << 16 | std::max(b,c),
+					(uint32_t)std::min(a,c) << 16 | std::max(a,c),
+				};
+				for (auto e : edges) edge_count[e]++;
+			}
+			for (auto &kv : edge_count) {
+				if (kv.second != 1) continue;
+				m.boundary_indices.push_back(kv.first >> 16);
+				m.boundary_indices.push_back(kv.first & 0xffff);
+			}
+		}
 
 		auto textures = mesh.texture();
 		assert(textures.size() == 1);

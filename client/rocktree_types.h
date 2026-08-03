@@ -52,9 +52,12 @@ struct rocktree_t {
 		struct mesh_t {
 			std::vector<uint8_t> vertices;
 			std::vector<uint16_t> indices;
+			// edges belonging to exactly one triangle, drawn as GL_LINES to
+			// plug the hairline cracks that open along seams between tiles
+			std::vector<uint16_t> boundary_indices;
 			Vector2f uv_offset;
 			Vector2f uv_scale;
-			
+
 			std::vector<uint8_t> texture;
 			texture_format texture_format;
 			int texture_width;
@@ -62,6 +65,7 @@ struct rocktree_t {
 
 			GLuint vertex_buffer;
 			GLuint index_buffer;
+			GLuint boundary_index_buffer;
 			GLuint texture_buffer;
 			bool buffered;
 		};
