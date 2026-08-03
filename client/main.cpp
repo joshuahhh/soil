@@ -1,5 +1,7 @@
 #include <fstream>
 #include <time.h>
+#include <unordered_map>
+#include <unordered_set>
 #include <sys/stat.h>
 #ifdef _WIN32
 	#include <direct.h>
@@ -42,6 +44,10 @@ static bool save_view_requested = false;
 static bool debug_lod_mode = false;
 
 static bool mouse_captured = true;
+
+// --nograb: never capture the cursor and ignore camera input; for profiling
+// runs that shouldn't interfere with whatever else the machine is doing
+static bool no_grab = false;
 
 // benchmark rig (see bench.sh): fixed view, log per-frame distance to the
 // fully loaded reference frame until the scene converges
@@ -149,6 +155,9 @@ void drawPlanet(gl_ctx_t &ctx) {
 	auto key_raise_pressed = state[SDL_SCANCODE_Q];
 	auto key_lower_pressed = state[SDL_SCANCODE_E];
 	auto key_slow_pressed = state[SDL_SCANCODE_LSHIFT] || state[SDL_SCANCODE_RSHIFT];
+	if (no_grab)
+		key_up_pressed = key_left_pressed = key_down_pressed = key_right_pressed
+			= key_raise_pressed = key_lower_pressed = 0;
 
 	// from lat/lon
 	//static Vector3d ecef = { ...https://www.oc.nps.edu/oc2902w/coord/llhxyz.htm };
@@ -246,6 +255,15 @@ void drawPlanet(gl_ctx_t &ctx) {
 		}
 	}
 
+	// per-section frame timing and bfs work counters, reported every 2s
+	static double sec_bfs = 0, sec_dl = 0, sec_evict = 0, sec_draw = 0;
+	static long cnt_oct = 0, cnt_cull = 0, cnt_lod = 0;
+	static int sec_frames = 0;
+	auto ticks_ms = [] {
+		return (double)SDL_GetPerformanceCounter() * 1000.0 / (double)SDL_GetPerformanceFrequency();
+	};
+	auto t0 = ticks_ms();
+
 	auto view = lookAt(eye, eye + direction, up);
 	viewprojection = projection * view;
 
@@ -254,7 +272,9 @@ void drawPlanet(gl_ctx_t &ctx) {
 	const std::string octs[] = { "0", "1", "2", "3", "4", "5", "6", "7" };
 	std::vector<std::pair<std::string, rocktree_t::bulk_t *>> valid = { std::make_pair("", current_bulk) };
 	decltype(valid) next_valid;
-	std::map<std::string, rocktree_t::node_t *> potential_nodes;
+	// filled in bfs level order, so iterating it backwards visits children
+	// before parents (the order the draw loop's octant masking needs)
+	std::vector<std::pair<std::string, rocktree_t::node_t *>> potential_nodes;
 
 	// todo: abort emscripten_fetch_close() https://emscripten.org/docs/api_reference/fetch.html
 	//       and/or emscripten coroutine fetch semaphore
@@ -265,7 +285,10 @@ void drawPlanet(gl_ctx_t &ctx) {
 	auto now_ms = (double)SDL_GetTicks();
 	const double keep_ms = 20 * 1000;
 
-	std::map<std::string, rocktree_t::bulk_t *> potential_bulks;
+	// wanted bulks/nodes are marked by stamping last_wanted_ms with this
+	// frame's time during the walk; membership tests elsewhere (eviction,
+	// bulk purge) compare against the stamp instead of consulting a map
+	auto potential_bulk_count = 0;
 
 	// node culling and level of detail using breadth-first search
 	bool all_loaded = true;
@@ -280,7 +303,7 @@ void drawPlanet(gl_ctx_t &ctx) {
 				auto has_bulk = bulk_kv != bulk->bulks.end();
 				if (!has_bulk) continue;
 				auto b = bulk_kv->second.get();
-				potential_bulks[cur] = b;
+				b->last_wanted_ms = now_ms;
 				if (b->dl_state == dl_state_stub) {
 					b->setStartedDownloading();
 					getBulk(b->request, b, [=](auto) {});			
@@ -291,21 +314,25 @@ void drawPlanet(gl_ctx_t &ctx) {
 				}
 				bulk = b;
 			}
-			potential_bulks[cur] = bulk;
+			bulk->last_wanted_ms = now_ms;
+			potential_bulk_count++;
 						
 			for(auto o : octs) {
-				auto nxt = cur + o;				
+				cnt_oct++;
+				auto nxt = cur + o;
 				auto nxt_rel = nxt.substr (floor((nxt.size() - 1) / 4) * 4, 4);
 				auto node_kv = bulk->nodes.find(nxt_rel);
 				if (node_kv == bulk->nodes.end()) // node at "nxt" doesn't exist
-					continue;				
-				auto node = node_kv->second.get();						
+					continue;
+				auto node = node_kv->second.get();
 
 				// cull outside frustum using obb
 				// todo: check if it could cull more
+				cnt_cull++;
 				if (obb_frustum_outside == classifyObbFrustum(&node->obb, frustum_planes)) {
 					continue;
 				}
+				cnt_lod++;
 
 				// level of detail
 				/*{
@@ -344,14 +371,17 @@ void drawPlanet(gl_ctx_t &ctx) {
 				next_valid.push_back(std::make_pair(nxt, bulk));
 
 				if (node->can_have_data) {
-					potential_nodes[nxt] = node;
+					node->last_wanted_ms = now_ms;
+					potential_nodes.emplace_back(std::move(nxt), node);
 				}
 			}
 		}
 		if (next_valid.size() == 0) break;
 		valid = next_valid;
-		next_valid.clear();		
-	}	
+		next_valid.clear();
+	}
+	auto t1 = ticks_ms();
+	sec_bfs += t1 - t0;
 
 	// download nodes in order of importance: by apparent size on screen,
 	// biggest first. distance to the node's bounding sphere over its diameter
@@ -371,7 +401,6 @@ void drawPlanet(gl_ctx_t &ctx) {
 		std::vector<candidate_t> to_download;
 		for (auto &kv : potential_nodes) {
 			auto node = kv.second;
-			node->last_wanted_ms = now_ms;
 			if (node->dl_state != dl_state_downloaded) all_loaded = false;
 			if (node->dl_state != dl_state_stub) continue;
 			auto radius = node->obb.extents.norm();
@@ -396,6 +425,9 @@ void drawPlanet(gl_ctx_t &ctx) {
 				SDL_GetTicks(), to_download.size(), started, (int)nodes_in_flight, potential_nodes.size());
 	}
 	scene_complete = all_loaded;
+
+	auto t2 = ticks_ms();
+	sec_dl += t2 - t1;
 
 	// downloaded nodes form an lru cache with a byte quota: nothing is evicted
 	// until resident mesh/texture data exceeds the quota, then the least
@@ -439,9 +471,7 @@ void drawPlanet(gl_ctx_t &ctx) {
 			total_n++;
 			auto bytes = node_bytes(n);
 			resident_bytes += bytes;
-			auto p = n->request.node_key().path();
-			auto has = potential_nodes.find(p) != potential_nodes.end();
-			if (!has) evictable.push_back({ n->last_wanted_ms, bytes, n });
+			if (n->last_wanted_ms != now_ms) evictable.push_back({ n->last_wanted_ms, bytes, n });
 		}
 	}
 
@@ -472,18 +502,15 @@ void drawPlanet(gl_ctx_t &ctx) {
 	// post order dfs purge obsolete bulks
 	auto total_b = 0, obs_b_cnt = 0;	
 	std::function<void(rocktree_t::bulk_t *)> po;
-	po = [&po, &potential_bulks, &obs_b_cnt, &total_b, now_ms, keep_ms](rocktree_t::bulk_t * b){
+	po = [&po, &obs_b_cnt, &total_b, now_ms, keep_ms](rocktree_t::bulk_t * b){
 		for (auto &kv : b->bulks){
 			auto b = kv.second.get();
 			if (b->dl_state == dl_state_downloaded)
 				po(b);
 		}
 		total_b++;
-		auto p = b->request.node_key().path();
-		auto has = potential_bulks.find(p) != potential_bulks.end();
-		if (has) {
-			b->last_wanted_ms = now_ms;
-		} else if (now_ms - b->last_wanted_ms > keep_ms) {
+		// wanted bulks got last_wanted_ms stamped during this frame's bfs
+		if (now_ms - b->last_wanted_ms > keep_ms) {
 			if (b->busy_ctr == 0) {
 				b->nodes.clear();
 				b->bulks.clear();
@@ -500,33 +527,42 @@ void drawPlanet(gl_ctx_t &ctx) {
 		ms += deltaTime;
 		if (ms > 2000) {
 			ms = 0;
-			printf("buffered: %d, tot_n: %d, tot_b: %d, pot_n: %lu, pot_b: %lu, obs n: %d, obs b: %d, mem: %zu MB\n",
-				buf_cnt, total_n, total_b, potential_nodes.size(), potential_bulks.size(), obs_n_cnt, obs_b_cnt,
+			printf("buffered: %d, tot_n: %d, tot_b: %d, pot_n: %lu, pot_b: %d, obs n: %d, obs b: %d, mem: %zu MB\n",
+				buf_cnt, total_n, total_b, potential_nodes.size(), potential_bulk_count, obs_n_cnt, obs_b_cnt,
 				resident_bytes >> 20
 			);
 		}
 	}
 
+	auto t3 = ticks_ms();
+	sec_evict += t3 - t2;
+
 	// 8-bit octant mask flags of nodes
-	std::map<std::string, uint8_t> mask_map;
+	std::unordered_map<std::string, uint8_t> mask_map;
+
+	// potential-set membership by path, only needed for lod debug tinting
+	std::unordered_set<std::string> potential_set;
+	if (debug_lod_mode)
+		for (auto &kv : potential_nodes) potential_set.insert(kv.first);
 
 	glUniform1i(ctx.debug_lod_loc, debug_lod_mode);
 
-	for (auto kv = potential_nodes.rbegin(); kv != potential_nodes.rend(); ++kv) { // reverse order
-		auto full_path = kv->first;
+	// reverse level order: children before parents
+	for (auto kv = potential_nodes.rbegin(); kv != potential_nodes.rend(); ++kv) {
+		auto &full_path = kv->first;
 		auto node = kv->second;
-		auto level = strlen(full_path.c_str());
-		assert(level > 0);		
+		auto level = full_path.size();
+		assert(level > 0);
 		assert(node->can_have_data);
 		if (node->dl_state != dl_state_downloaded) continue;
 
 		// set octant mask of previous node
 		auto octant = (int)(full_path[level - 1] - '0');
-		auto prev = full_path.substr (0, level - 1);
-		mask_map[prev] |= 1 << octant;
+		mask_map[full_path.substr(0, level - 1)] |= 1 << octant;
 
 		// skip if node is masked completely
-		if (mask_map[full_path] == 0xff) continue;
+		auto self_mask = mask_map[full_path];
+		if (self_mask == 0xff) continue;
 
 		// octants where a finer tile is wanted but not drawn (still
 		// downloading). children are drawn before parents here, so mask_map
@@ -534,8 +570,8 @@ void drawPlanet(gl_ctx_t &ctx) {
 		uint8_t stale_mask = 0;
 		if (debug_lod_mode) {
 			for (auto o = 0; o < 8; o++) {
-				if (mask_map[full_path] & (1 << o)) continue;
-				if (potential_nodes.find(full_path + octs[o]) != potential_nodes.end())
+				if (self_mask & (1 << o)) continue;
+				if (potential_set.count(full_path + octs[o]))
 					stale_mask |= 1 << o;
 			}
 		}
@@ -549,9 +585,25 @@ void drawPlanet(gl_ctx_t &ctx) {
 		glUniformMatrix4fv(ctx.transform_loc, 1, GL_FALSE, transform_float.data());
 		for (auto &mesh : node->meshes) {
 			if (!mesh.buffered) bufferMesh(mesh);
-			bindAndDrawMesh(mesh, mask_map[full_path], stale_mask, ctx);
+			bindAndDrawMesh(mesh, self_mask, stale_mask, ctx);
 		}
 		//bufs[full_path] = node;
+	}
+
+	sec_draw += ticks_ms() - t3;
+	sec_frames++;
+	{
+		static double ms = 0;
+		ms += deltaTime;
+		if (ms > 2000 && sec_frames > 0) {
+			ms = 0;
+			printf("sections avg ms: bfs %.2f, dl %.2f, evict %.2f, draw %.2f (%d frames; per frame: oct %ld, cull %ld, lod %ld)\n",
+				sec_bfs / sec_frames, sec_dl / sec_frames, sec_evict / sec_frames, sec_draw / sec_frames,
+				sec_frames, cnt_oct / sec_frames, cnt_cull / sec_frames, cnt_lod / sec_frames);
+			sec_bfs = sec_dl = sec_evict = sec_draw = 0;
+			cnt_oct = cnt_cull = cnt_lod = 0;
+			sec_frames = 0;
+		}
 	}
 }
 
@@ -674,7 +726,7 @@ void mainloop(gl_ctx_t &ctx) {
 				quit = true;
 				break;
 			case SDL_MOUSEBUTTONDOWN:
-				if (!mouse_captured) {
+				if (!mouse_captured && !no_grab) {
 					mouse_captured = true;
 					SDL_SetRelativeMouseMode(SDL_TRUE);
 					// discard motion accumulated while released so the camera doesn't jump
@@ -707,6 +759,22 @@ void mainloop(gl_ctx_t &ctx) {
 	NOW = SDL_GetPerformanceCounter();
 	deltaTime = (double)((NOW - LAST)*1000 / (double)SDL_GetPerformanceFrequency());
 
+	// fps meter in the window title, averaged over half-second windows
+	{
+		static double window_ms = 0;
+		static int window_frames = 0;
+		window_ms += deltaTime;
+		window_frames++;
+		if (window_ms >= 500) {
+			char title[64];
+			snprintf(title, sizeof(title), "Earth Client — %.0f fps (%.1f ms)",
+				window_frames * 1000.0 / window_ms, window_ms / window_frames);
+			SDL_SetWindowTitle(sdl_window, title);
+			window_ms = 0;
+			window_frames = 0;
+		}
+	}
+
 	drawPlanet(ctx);
 #ifndef EMSCRIPTEN
 	if (bench_mode) benchFrame();
@@ -730,6 +798,15 @@ int main(int argc, char* argv[]) {
 		// let the view file fall through to the normal view-loading path
 		argv[1] = argv[2];
 		argc = 2;
+	}
+
+	// strip --nograb wherever it appears among the args
+	for (auto i = 1; i < argc; i++) {
+		if (strcmp(argv[i], "--nograb") != 0) continue;
+		no_grab = true;
+		for (auto j = i + 1; j < argc; j++) argv[j - 1] = argv[j];
+		argc--;
+		i--;
 	}
 #endif
 
@@ -815,8 +892,8 @@ int main(int argc, char* argv[]) {
 	initGL(*ctx);
 	loadPlanet();
 
-	// benchmarks hold a fixed view; leave the cursor alone
-	if (bench_mode) mouse_captured = false;
+	// benchmarks and --nograb runs hold a fixed view; leave the cursor alone
+	if (bench_mode || no_grab) mouse_captured = false;
 	else SDL_SetRelativeMouseMode(SDL_TRUE);
 
 #ifdef EMSCRIPTEN
