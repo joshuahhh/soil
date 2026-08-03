@@ -435,6 +435,12 @@ void drawPlanet(gl_ctx_t &ctx) {
 	// set are never evicted, even over quota
 	// ~100-150KB per resident node; native gets a generous quota (disk cache
 	// backstops evictions), wasm stays well under its 1GB total heap
+	//
+	// the sweep walks every node entry of every resident bulk (including
+	// stubs), which costs tens of ms in heavy views — and it only needs to be
+	// roughly current, so it runs every 15th frame
+	static int evict_tick = 0;
+	if (evict_tick++ % 15 == 0) {
 #ifdef EMSCRIPTEN
 	const size_t mem_quota = (size_t)256 << 20;
 #else
@@ -533,6 +539,7 @@ void drawPlanet(gl_ctx_t &ctx) {
 			);
 		}
 	}
+	} // end amortized eviction sweep
 
 	auto t3 = ticks_ms();
 	sec_evict += t3 - t2;
