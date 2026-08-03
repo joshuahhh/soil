@@ -316,7 +316,7 @@ void drawPlanet(gl_ctx_t &ctx) {
 					auto m = viewprojection * t;
 					auto s = m(3, 3);
 					auto texels_per_meter = 1.0f / node->meters_per_texel;
-					auto wh = 768; // width < height ? width : height;
+					auto wh = width < height ? width : height;
 					// zooming (narrowing the fov) magnifies the scene, so it
 					// needs proportionally finer tiles. 1 at the default fov
 					auto zoom = tan(0.125 * M_PI) / tan(camera_fov / 2.0);
