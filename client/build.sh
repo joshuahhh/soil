@@ -8,7 +8,8 @@ if [ "$1" == "emscripten" ]; then
 
 	emcc -Iinclude main.cpp -O2 -std=c++14 -I. -I./eigen/ \
 		-I$EMSCRIPTEN_PROTOBUF_SRC $EMSCRIPTEN_PROTOBUF_LIB crn/crn.o \
-		-s USE_SDL=2 -s FETCH=1 -s TOTAL_MEMORY=1073741824 -s USE_PTHREADS=1 -s PTHREAD_POOL_SIZE=4 \
+		-s USE_SDL=2 -s FETCH=1 -s TOTAL_MEMORY=1073741824 -s USE_PTHREADS=1 \
+		-s PTHREAD_POOL_SIZE="'navigator.hardwareConcurrency'" \
 		--shell-file shell.html \
 		-o main.html
 else

@@ -363,7 +363,9 @@ void drawPlanet(gl_ctx_t &ctx) {
 	// order the first frame it becomes visible
 	{
 		static std::atomic<int> nodes_in_flight(0);
-		const auto max_nodes_in_flight = 12;
+		// a slot is held from request through decode, so this needs to stay
+		// comfortably above the decode pool's thread count to keep it fed
+		const auto max_nodes_in_flight = 32;
 
 		struct candidate_t { double priority; size_t level; rocktree_t::node_t *node; };
 		std::vector<candidate_t> to_download;

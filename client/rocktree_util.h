@@ -105,7 +105,11 @@ void getPlanetoid(std::function<void(std::unique_ptr<PlanetoidMetadata>)> cb) {
 }
 
 #include "threads.h"
-ThreadPool pool(1);
+// decode pool: protobuf parse + mesh/texture decompression. populateNode /
+// populateBulk only write their own node/bulk and publish it with the atomic
+// dl_state store, so decodes of distinct nodes can run concurrently. decode
+// dominates warm-cache load time, so use most of the machine
+ThreadPool pool(std::max(2, (int)std::thread::hardware_concurrency() - 2));
 #ifndef EMSCRIPTEN
 ThreadPool webpool(4);
 #endif
