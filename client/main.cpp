@@ -49,6 +49,10 @@ static bool mouse_captured = true;
 // runs that shouldn't interfere with whatever else the machine is doing
 static bool no_grab = false;
 
+// --bg RRGGBB: override the sky/clear color, e.g. ff00ff to make cracks
+// (background leaking through geometry) unmistakable
+static int sky_color = 0x83b5fc;
+
 // benchmark rig (see bench.sh): fixed view, log per-frame distance to the
 // fully loaded reference frame until the scene converges
 static bool bench_mode = false, bench_capture = false;
@@ -143,7 +147,7 @@ void drawPlanet(gl_ctx_t &ctx) {
 	int width, height;
 	SDL_GL_GetDrawableSize(sdl_window, &width, &height);
 	glViewport(0, 0, width, height);
-	auto sky = 0x83b5fc;
+	auto sky = sky_color;
 	glClearColor((sky>>16 & 0xff) / 255.0f, (sky>>8 & 0xff) / 255.0f, (sky & 0xff) / 255.0f, 1.0f);
 	glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);	
 
@@ -792,6 +796,23 @@ void mainloop(gl_ctx_t &ctx) {
 int main(int argc, char* argv[]) {
 
 #ifndef EMSCRIPTEN
+	// strip --nograb and --bg RRGGBB wherever they appear among the args
+	// (before --bench parsing, which consumes argv positionally)
+	for (auto i = 1; i < argc; i++) {
+		auto eat = 0;
+		if (strcmp(argv[i], "--nograb") == 0) {
+			no_grab = true;
+			eat = 1;
+		} else if (strcmp(argv[i], "--bg") == 0 && i + 1 < argc) {
+			sky_color = (int)strtol(argv[i + 1], NULL, 16);
+			eat = 2;
+		}
+		if (!eat) continue;
+		for (auto j = i + eat; j < argc; j++) argv[j - eat] = argv[j];
+		argc -= eat;
+		i--;
+	}
+
 	if (argc >= 2 && strncmp(argv[1], "--bench", 7) == 0) {
 		bench_mode = true;
 		bench_capture = strcmp(argv[1], "--bench-capture") == 0;
@@ -805,15 +826,6 @@ int main(int argc, char* argv[]) {
 		// let the view file fall through to the normal view-loading path
 		argv[1] = argv[2];
 		argc = 2;
-	}
-
-	// strip --nograb wherever it appears among the args
-	for (auto i = 1; i < argc; i++) {
-		if (strcmp(argv[i], "--nograb") != 0) continue;
-		no_grab = true;
-		for (auto j = i + 1; j < argc; j++) argv[j - 1] = argv[j];
-		argc--;
-		i--;
 	}
 #endif
 
