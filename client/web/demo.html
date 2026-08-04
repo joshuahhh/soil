@@ -9,7 +9,7 @@
      build needs (expect one automatic reload on first visit). -->
 <meta charset="utf-8">
 <title>earth split-screen demo</title>
-<script>window.coi = { coepCredentialless: true };</script>
+<script>window.coi = { coepCredentialless: () => true };</script>
 <script src="coi-serviceworker.js"></script>
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
@@ -24,7 +24,7 @@
 </style>
 <div id="map"></div>
 <div id="right"><canvas id="globe" tabindex="0"></canvas></div>
-<div id="hint">drag to look &middot; WASD move &middot; Q/E up/down &middot; shift slow</div>
+<div id="hint">drag to look &middot; WASD move &middot; Q/E up/down &middot; shift slow &middot; click map to teleport</div>
 <script src="earth.js"></script>
 <script>
 (async () => {
@@ -49,18 +49,33 @@
 
   // the fetch hook: the renderer asks for a path, we answer with bytes.
   // planetoid metadata ('P...') is not cached, matching the native client
+  const stats = window.__stats = {
+    issued: 0, delivered: 0, failed: 0, inflight: 0,
+    idbHits: 0, netHits: 0, maxMs: 0, log: [],
+  };
   const fetchTile = async (path, id) => {
+    const t0 = performance.now();
+    stats.issued++;
+    stats.inflight++;
     try {
       let bytes = path[0] !== 'P' ? await idbGet(path) : undefined;
+      if (bytes) stats.idbHits++;
       if (!bytes) {
         const resp = await fetch('https://kh.google.com/rt/earth/' + path);
         if (!resp.ok) throw new Error('http ' + resp.status);
         bytes = new Uint8Array(await resp.arrayBuffer());
+        stats.netHits++;
         if (path[0] !== 'P') idbPut(path, bytes);
       }
+      stats.delivered++;
       Module.deliverFetch(id, true, bytes);
     } catch (e) {
+      stats.failed++;
+      stats.log.push(path + ' -> ' + e.message);
       Module.deliverFetch(id, false, null);
+    } finally {
+      stats.inflight--;
+      stats.maxMs = Math.max(stats.maxMs, performance.now() - t0);
     }
   };
 
@@ -81,8 +96,27 @@
   L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
     maxZoom: 19,
     attribution: '&copy; OpenStreetMap contributors',
+    // cors-mode tile requests satisfy the page's cross-origin-embedder-policy
+    // even in strict require-corp mode
+    crossOrigin: 'anonymous',
   }).addTo(map);
-  const marker = L.marker([START.lat, START.lon]).addTo(map);
+  // camera marker: a dot with a view cone that rotates with the heading
+  const camIcon = L.divIcon({
+    className: '',
+    html: '<svg id="camIcon" width="44" height="44" viewBox="-22 -22 44 44" style="display:block">' +
+      '<path d="M0,-3 L-13,-19 A21,21 0 0 1 13,-19 Z" fill="rgba(66,133,244,.4)"/>' +
+      '<circle r="5.5" fill="#4285f4" stroke="#fff" stroke-width="2.5"/></svg>',
+    iconSize: [44, 44],
+    iconAnchor: [22, 22],
+  });
+  const marker = L.marker([START.lat, START.lon], {
+    icon: camIcon,
+    interactive: false, // clicks pass through to the map (teleport)
+  }).addTo(map);
+  const setMarkerHeading = (deg) => {
+    const el = document.getElementById('camIcon');
+    if (el) el.style.transform = `rotate(${deg}deg)`;
+  };
 
   // --- input on the canvas -> built-in flying controls ----------------------
   const keys = {};
@@ -98,25 +132,92 @@
   canvas.addEventListener('pointerup', () => { dragging = false; });
   canvas.addEventListener('pointermove', (e) => {
     if (!dragging) return;
-    yaw += e.movementX * 0.003;
-    pitch -= e.movementY * 0.003;
+    // grab-the-world: dragging pulls the scene with the pointer
+    yaw -= e.movementX * 0.003;
+    pitch += e.movementY * 0.003;
   });
-
-  // --- two-way sync ---------------------------------------------------------
-  // map drag moves the camera; camera movement pans the map. the `syncing`
-  // flag breaks the feedback loop
-  let syncing = false;
-  let posed = false;
-  map.on('move', () => {
-    if (syncing || !view.ready()) return;
-    const c = map.getCenter();
+  // scroll on the 3d view zooms by narrowing/widening the fov, like the
+  // native app (which uses fov *= 0.9^wheel; setFov clamps to 1..100 deg)
+  canvas.addEventListener('wheel', (e) => {
+    e.preventDefault();
     const p = view.getPose();
-    syncing = true;
-    view.setPose(c.lat, c.lng, p.alt, p.heading, p.tilt);
-    syncing = false;
+    view.setFov(p.fov * Math.pow(0.9, -e.deltaY / 100));
+  }, { passive: false });
+
+  // --- sync -----------------------------------------------------------------
+  // the marker always shows where the camera is. the map is a free viewport:
+  // dragging it never touches the camera; clicking it teleports the camera
+  // there. while flying, the map follows the marker (smoothly easing over
+  // when follow mode re-engages); grabbing the map stops the following
+  let following = true;
+  let posed = false;
+  let zooming = false;
+
+  // locked mode zooms around the marker (= map center); free mode keeps
+  // leaflet's normal zoom-toward-pointer. leaflet reads these options live
+  const setZoomAnchor = (locked) => {
+    map.options.scrollWheelZoom = locked ? 'center' : true;
+    map.options.doubleClickZoom = locked ? 'center' : true;
+    map.options.touchZoom = locked ? 'center' : true;
+  };
+  setZoomAnchor(true);
+  map.on('zoomstart', () => { zooming = true; });
+  map.on('zoomend', () => { zooming = false; });
+
+  map.on('dragstart', () => { following = false; setZoomAnchor(false); });
+  map.on('click', (e) => {
+    if (!view.ready()) return;
+    const p = view.getPose();
+    view.setPose(e.latlng.lat, e.latlng.lng, p.alt, p.heading, p.tilt);
   });
 
-  let lastSynced = { lat: NaN, lon: NaN };
+  // per-frame exponential ease of the map center toward the marker: smooth
+  // when follow mode re-engages far away, and tight tracking during flight.
+  // no leaflet animations — they lock the map for their whole duration,
+  // which falls apart when the camera covers a large distance every frame.
+  // an exponential ease chasing a moving target always lags it by
+  // velocity*tau, so aim at the marker's position led by its (smoothed)
+  // velocity — steady fast flight then keeps the marker dead-center
+  const FOLLOW_TAU_MS = 120;
+  let followVel = null, prevMark = null;
+  const followMarker = (latlng, dt) => {
+    if (prevMark && dt > 0) {
+      const dlat = latlng.lat - prevMark.lat;
+      const dlng = latlng.lng - prevMark.lng;
+      if (Math.abs(dlat) > 0.05 || Math.abs(dlng) > 0.05) {
+        followVel = null; // teleport, not motion: don't feed it forward
+      } else {
+        const a = 1 - Math.exp(-dt / 200);
+        followVel = followVel ? {
+          lat: followVel.lat + (dlat / dt - followVel.lat) * a,
+          lng: followVel.lng + (dlng / dt - followVel.lng) * a,
+        } : { lat: dlat / dt, lng: dlng / dt };
+      }
+    }
+    prevMark = latlng;
+    const lead = followVel
+      ? { lat: followVel.lat * FOLLOW_TAU_MS, lng: followVel.lng * FOLLOW_TAU_MS }
+      : { lat: 0, lng: 0 };
+    const c = map.getCenter();
+    const k = 1 - Math.exp(-dt / FOLLOW_TAU_MS);
+    let nlat = c.lat + (latlng.lat + lead.lat - c.lat) * k;
+    let nlng = c.lng + (latlng.lng + lead.lng - c.lng) * k;
+    // monotonicity: the lead aims ahead of the marker, and when the camera
+    // slows it goes stale for a moment — never let the center actually pass
+    // the marker, or stopping visibly springs back. if this step would cross
+    // it, land exactly on it
+    if ((latlng.lat - c.lat) * (latlng.lat - nlat)
+      + (latlng.lng - c.lng) * (latlng.lng - nlng) < 0) {
+      nlat = latlng.lat;
+      nlng = latlng.lng;
+    }
+    map.panTo([nlat, nlng], { animate: false });
+  };
+
+  // for devtools poking and automated testing
+  window.__demo = { view, map, marker, isFollowing: () => following };
+
+  let lastSynced = { lat: 1e9, lon: 1e9 };
   let last = performance.now();
   const tick = (now) => {
     const dt = Math.min(100, now - last);
@@ -126,6 +227,13 @@
       // once the planet metadata is in, jump to the start pose
       posed = true;
       view.setPose(START.lat, START.lon, START.alt, 0, -25);
+    }
+
+    const flying = dragging || yaw !== 0 || pitch !== 0
+      || keys.KeyW || keys.KeyS || keys.KeyA || keys.KeyD || keys.KeyQ || keys.KeyE;
+    if (flying && !following) {
+      following = true;
+      setZoomAnchor(true);
     }
 
     view.fly(yaw, pitch,
@@ -138,13 +246,15 @@
 
     if (view.ready() && posed) {
       const p = view.getPose();
-      if (Math.abs(p.lat - lastSynced.lat) > 1e-6 || Math.abs(p.lon - lastSynced.lon) > 1e-6) {
+      setMarkerHeading(p.heading);
+      if (Math.abs(p.lat - lastSynced.lat) > 1e-7 || Math.abs(p.lon - lastSynced.lon) > 1e-7) {
         lastSynced = { lat: p.lat, lon: p.lon };
-        syncing = true;
         marker.setLatLng([p.lat, p.lon]);
-        map.panTo([p.lat, p.lon], { animate: false });
-        syncing = false;
       }
+      // runs every frame (not just on movement) so the ease finishes
+      // converging even after the camera stops. paused during zoom
+      // animations, which are already anchored on the marker in locked mode
+      if (following && !zooming) followMarker(L.latLng(p.lat, p.lon), dt);
     }
     requestAnimationFrame(tick);
   };
