@@ -1,0 +1,153 @@
+<!doctype html>
+<!-- split-screen demo: leaflet slippy map on the left, the earth renderer on
+     an ordinary canvas on the right, two-way synced. tiles are cached in
+     indexeddb via the js fetch hook.
+
+     serve this directory and open /demo.html, e.g.:
+       ./build.sh weblib && python3 -m http.server -d web 8000
+     coi-serviceworker injects the cross-origin-isolation headers the pthread
+     build needs (expect one automatic reload on first visit). -->
+<meta charset="utf-8">
+<title>earth split-screen demo</title>
+<script>window.coi = { coepCredentialless: true };</script>
+<script src="coi-serviceworker.js"></script>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<style>
+  html, body { margin: 0; height: 100%; }
+  body { display: flex; }
+  #map, #right { flex: 1; height: 100%; }
+  #globe { width: 100%; height: 100%; display: block; outline: none; }
+  #hint { position: fixed; right: 8px; top: 8px; z-index: 10; color: #fff;
+          background: rgba(0,0,0,.55); font: 12px sans-serif; padding: 6px 8px;
+          border-radius: 4px; }
+</style>
+<div id="map"></div>
+<div id="right"><canvas id="globe" tabindex="0"></canvas></div>
+<div id="hint">drag to look &middot; WASD move &middot; Q/E up/down &middot; shift slow</div>
+<script src="earth.js"></script>
+<script>
+(async () => {
+  // --- indexeddb byte cache -------------------------------------------------
+  const db = await new Promise((res, rej) => {
+    const r = indexedDB.open('earth-cache', 1);
+    r.onupgradeneeded = () => r.result.createObjectStore('tiles');
+    r.onsuccess = () => res(r.result);
+    r.onerror = () => rej(r.error);
+  });
+  const idbGet = (key) => new Promise((res) => {
+    const t = db.transaction('tiles').objectStore('tiles').get(key);
+    t.onsuccess = () => res(t.result);
+    t.onerror = () => res(undefined);
+  });
+  const idbPut = (key, bytes) => {
+    try { db.transaction('tiles', 'readwrite').objectStore('tiles').put(bytes, key); } catch (e) {}
+  };
+
+  // --- module + view --------------------------------------------------------
+  const Module = await createEarthModule();
+
+  // the fetch hook: the renderer asks for a path, we answer with bytes.
+  // planetoid metadata ('P...') is not cached, matching the native client
+  const fetchTile = async (path, id) => {
+    try {
+      let bytes = path[0] !== 'P' ? await idbGet(path) : undefined;
+      if (!bytes) {
+        const resp = await fetch('https://kh.google.com/rt/earth/' + path);
+        if (!resp.ok) throw new Error('http ' + resp.status);
+        bytes = new Uint8Array(await resp.arrayBuffer());
+        if (path[0] !== 'P') idbPut(path, bytes);
+      }
+      Module.deliverFetch(id, true, bytes);
+    } catch (e) {
+      Module.deliverFetch(id, false, null);
+    }
+  };
+
+  const canvas = document.getElementById('globe');
+  const resize = () => {
+    const dpr = window.devicePixelRatio || 1;
+    canvas.width = Math.round(canvas.clientWidth * dpr);
+    canvas.height = Math.round(canvas.clientHeight * dpr);
+  };
+  resize();
+  addEventListener('resize', resize);
+
+  const view = Module.createView('#globe', fetchTile);
+  const START = { lat: 40.7605, lon: -74.0135, alt: 2500 };
+
+  // --- leaflet --------------------------------------------------------------
+  const map = L.map('map').setView([START.lat, START.lon], 12);
+  L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    maxZoom: 19,
+    attribution: '&copy; OpenStreetMap contributors',
+  }).addTo(map);
+  const marker = L.marker([START.lat, START.lon]).addTo(map);
+
+  // --- input on the canvas -> built-in flying controls ----------------------
+  const keys = {};
+  canvas.addEventListener('keydown', (e) => { keys[e.code] = true; });
+  canvas.addEventListener('keyup', (e) => { keys[e.code] = false; });
+  canvas.addEventListener('blur', () => { for (const k in keys) keys[k] = false; });
+  let dragging = false, yaw = 0, pitch = 0;
+  canvas.addEventListener('pointerdown', (e) => {
+    dragging = true;
+    canvas.setPointerCapture(e.pointerId);
+    canvas.focus();
+  });
+  canvas.addEventListener('pointerup', () => { dragging = false; });
+  canvas.addEventListener('pointermove', (e) => {
+    if (!dragging) return;
+    yaw += e.movementX * 0.003;
+    pitch -= e.movementY * 0.003;
+  });
+
+  // --- two-way sync ---------------------------------------------------------
+  // map drag moves the camera; camera movement pans the map. the `syncing`
+  // flag breaks the feedback loop
+  let syncing = false;
+  let posed = false;
+  map.on('move', () => {
+    if (syncing || !view.ready()) return;
+    const c = map.getCenter();
+    const p = view.getPose();
+    syncing = true;
+    view.setPose(c.lat, c.lng, p.alt, p.heading, p.tilt);
+    syncing = false;
+  });
+
+  let lastSynced = { lat: NaN, lon: NaN };
+  let last = performance.now();
+  const tick = (now) => {
+    const dt = Math.min(100, now - last);
+    last = now;
+
+    if (view.ready() && !posed) {
+      // once the planet metadata is in, jump to the start pose
+      posed = true;
+      view.setPose(START.lat, START.lon, START.alt, 0, -25);
+    }
+
+    view.fly(yaw, pitch,
+      !!keys.KeyW, !!keys.KeyS, !!keys.KeyA, !!keys.KeyD,
+      !!keys.KeyQ, !!keys.KeyE,
+      !!(keys.ShiftLeft || keys.ShiftRight), dt);
+    yaw = 0;
+    pitch = 0;
+    view.frame(dt);
+
+    if (view.ready() && posed) {
+      const p = view.getPose();
+      if (Math.abs(p.lat - lastSynced.lat) > 1e-6 || Math.abs(p.lon - lastSynced.lon) > 1e-6) {
+        lastSynced = { lat: p.lat, lon: p.lon };
+        syncing = true;
+        marker.setLatLng([p.lat, p.lon]);
+        map.panTo([p.lat, p.lon], { animate: false });
+        syncing = false;
+      }
+    }
+    requestAnimationFrame(tick);
+  };
+  requestAnimationFrame(tick);
+})();
+</script>

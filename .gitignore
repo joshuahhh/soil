@@ -82,3 +82,9 @@ view_*.json
 
 # benchmark rig output (reference images, per-run csvs, graphs)
 client/bench/
+
+# web library build output (web/demo.html and web/coi-serviceworker.js are sources)
+client/web/earth.js
+client/web/earth.wasm
+client/web/earth.worker.js
+client/web/coi-serviceworker.js
