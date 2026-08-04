@@ -26,7 +26,7 @@
 <div id="right"><canvas id="globe" tabindex="0"></canvas></div>
 <div id="hint"></div>
 <script>
-  const hintText = 'WASD move · Q/E up/down · hold space: view-frame · arrows look · ' +
+  const hintText = 'WASD move · E/Q up/down · hold space: view-frame · arrows look · ' +
     'Z/X zoom · -/= speed · shift slow · click map to teleport';
   document.getElementById('hint').textContent = hintText;
 </script>
@@ -271,7 +271,7 @@
 
     view.fly(yaw, pitch,
       !!keys.KeyW, !!keys.KeyS, !!keys.KeyA, !!keys.KeyD,
-      !!keys.KeyQ, !!keys.KeyE,
+      !!keys.KeyE, !!keys.KeyQ,
       slow, !!keys.Space, gain, dt);
     yaw = 0;
     pitch = 0;

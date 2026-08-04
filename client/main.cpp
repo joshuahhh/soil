@@ -77,8 +77,8 @@ void updateFrame(render_ctx_t &ctx) {
 	in.left = state[SDL_SCANCODE_A];
 	in.back = state[SDL_SCANCODE_S];
 	in.right = state[SDL_SCANCODE_D];
-	in.raise = state[SDL_SCANCODE_Q];
-	in.lower = state[SDL_SCANCODE_E];
+	in.raise = state[SDL_SCANCODE_E]; // e = elevate, matching editor flycams
+	in.lower = state[SDL_SCANCODE_Q];
 	in.view_frame = state[SDL_SCANCODE_SPACE]; // hold: dolly/boom instead of cruise/pedestal
 	in.slow = state[SDL_SCANCODE_LSHIFT] || state[SDL_SCANCODE_RSHIFT];
 	in.speed_gain = speed_gain;
