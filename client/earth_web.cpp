@@ -35,22 +35,30 @@ using namespace Eigen;
 
 using emscripten::val;
 
-// fetches delegated to a js function (path, id); js answers by calling
-// Module.deliverFetch(id, ok, uint8array). single-threaded on the js main
-// thread, so no locking
+// fetches delegated to a js function (path, token); js answers by calling
+// Module.deliverFetch(token, ok, uint8array). single-threaded on the js main
+// thread, so no locking.
+//
+// the request ids passed into fetch() are NOT globally unique — getBulk,
+// getNode and getPlanetoid each run their own counter and only use the id to
+// find their own map entry — so the pending map is keyed by a token of our
+// own and remembers each request's (thunk, id) pair
 struct js_fetcher_t : fetcher_t {
 	val fn = val::undefined();
-	std::map<int, fetch_thunk_t> pending;
+	std::map<int, std::pair<fetch_thunk_t, int>> pending;
+	int next_token = 0;
 
 	void fetch(const char *path, int i, fetch_thunk_t thunk) override {
-		pending[i] = thunk;
-		fn(std::string(path), i);
+		auto token = next_token++;
+		pending[token] = { thunk, i };
+		fn(std::string(path), token);
 	}
 
-	void deliver(int i, bool ok, val bytes) {
-		auto it = pending.find(i);
+	void deliver(int token, bool ok, val bytes) {
+		auto it = pending.find(token);
 		if (it == pending.end()) return;
-		auto thunk = it->second;
+		auto thunk = it->second.first;
+		auto i = it->second.second;
 		pending.erase(it);
 		if (!ok) {
 			thunk(i, 1, nullptr, 0);
