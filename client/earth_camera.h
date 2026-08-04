@@ -76,9 +76,14 @@ void applyCameraInput(camera_t &cam, const camera_input_t &in, double planet_rad
 	// up is the vec from the planetoid's center towards the sky
 	auto up = cam.eye.normalized();
 
+	// zooming magnifies apparent motion, so rotation and the
+	// altitude-proportional speed scale down with it, keeping screen-space
+	// rates constant. 1 at the default 45-degree fov
+	auto zoom_scale = tan(cam.fov / 2.0) / tan(0.125 * M_PI);
+
 	// rotation
-	auto yaw = in.yaw;
-	auto pitch = in.pitch;
+	auto yaw = in.yaw * zoom_scale;
+	auto pitch = in.pitch * zoom_scale;
 	auto overhead = cam.direction.dot(-up);
 	if ((overhead > 0.99 && pitch < 0) || (overhead < -0.99 && pitch > 0))
 		pitch = 0;
@@ -99,7 +104,8 @@ void applyCameraInput(camera_t &cam, const camera_input_t &in, double planet_rad
 	const auto altitude_per_second = 1.0;
 	const auto min_speed = 5.0; // m/s floor so we don't freeze at ground level
 	auto altitude = cam.eye.norm() - planet_radius;
-	auto speed = fmax(min_speed, altitude * altitude_per_second);
+	// the floor stays absolute so zoomed-in ground-level flight can still move
+	auto speed = fmax(min_speed, altitude * altitude_per_second * zoom_scale);
 	auto mag = speed * (in.dt_ms / 1000.0) * (in.slow ? 0.1 : 1.0) * in.speed_gain;
 	auto sideways = cam.direction.cross(up).normalized();
 	auto horizontal = up.cross(sideways).normalized(); // view direction projected onto the horizontal plane
