@@ -100,7 +100,8 @@ fragment float4 fmain(VSOut v [[stage_in]], constant Uniforms &u [[buffer(0)]],
 }
 )MSL";
 
-void renderInit(render_ctx_t &ctx, SDL_Window *window) {
+void renderInit(render_ctx_t &ctx, void *window_) {
+	auto window = (SDL_Window *)window_;
 	ctx.device = MTLCreateSystemDefaultDevice();
 	if (!ctx.device) fprintf(stderr, "no metal device\n"), abort();
 	metal_device = ctx.device;
@@ -155,11 +156,11 @@ void renderInit(render_ctx_t &ctx, SDL_Window *window) {
 	ctx.sampler = [ctx.device newSamplerStateWithDescriptor:sd];
 }
 
-void renderDrawableSize(render_ctx_t &ctx, SDL_Window *window, int *w, int *h) {
-	SDL_Metal_GetDrawableSize(window, w, h);
+void renderDrawableSize(render_ctx_t &ctx, void *window, int *w, int *h) {
+	SDL_Metal_GetDrawableSize((SDL_Window *)window, w, h);
 }
 
-void renderFrameBegin(render_ctx_t &ctx, SDL_Window *window, int width, int height, int sky) {
+void renderFrameBegin(render_ctx_t &ctx, void *window, int width, int height, int sky) {
 	ctx.pool = [[NSAutoreleasePool alloc] init];
 	ctx.committed = false;
 
@@ -349,7 +350,7 @@ bool renderReadPixels(render_ctx_t &ctx, int w, int h, uint8_t *rgb) {
 	return true;
 }
 
-void renderPresent(render_ctx_t &ctx, SDL_Window *window) {
+void renderPresent(render_ctx_t &ctx, void *window) {
 	if (ctx.drawable) {
 		if (!ctx.committed) {
 			[ctx.cmdbuf presentDrawable:ctx.drawable];

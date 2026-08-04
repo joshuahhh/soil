@@ -28,6 +28,14 @@ using namespace geo_globetrotter_proto_rocktree;
 #include <algorithm>
 #include <chrono>
 
+
+// ms timestamp for the timing: log lines (sdl-free so the web library can
+// compile this header without sdl)
+static inline uint32_t timing_ms() {
+	using namespace std::chrono;
+	return (uint32_t)duration_cast<milliseconds>(steady_clock::now().time_since_epoch()).count();
+}
+
 BulkMetadataRequest createBulkMetadataRequest(const std::string base_path, std::string path, int epoch);
 NodeDataRequest createNodeDataRequest(const std::string base_path, BulkMetadata bulk, NodeMetadata node_meta);
 
@@ -149,7 +157,7 @@ void getBulk(BulkMetadataRequest req, rocktree_t::bulk_t *b, std::function<void(
 			
 			auto result = pool.enqueue([](auto b, auto cb, auto vec) {
 
-				auto t0 = SDL_GetTicks();
+				auto t0 = timing_ms();
 				BulkMetadata bulk;
 
 				if (!bulk.ParseFromArray(vec.data(), vec.size())) {
@@ -162,7 +170,7 @@ void getBulk(BulkMetadataRequest req, rocktree_t::bulk_t *b, std::function<void(
 				auto bu = std::make_unique<BulkMetadata>(bulk);
 				populateBulk(b, std::move(bu));
 				printf("timing: decode bulk %s start=%u dur=%u\n",
-					b->request.node_key().path().c_str(), t0, SDL_GetTicks() - t0);
+					b->request.node_key().path().c_str(), t0, timing_ms() - t0);
 				cb(NULL);
 
 			}, b, cb, vec);
@@ -217,7 +225,7 @@ void getNode(NodeDataRequest req, rocktree_t::node_t *n, std::function<void(std:
 			auto vec = std::vector<uint8_t>(data, data+len);
 
 			auto result = pool.enqueue([](auto n, auto cb, auto vec) {
-				auto t0 = SDL_GetTicks();
+				auto t0 = timing_ms();
 				NodeData node;
 
 				if (!node.ParseFromArray(vec.data(), vec.size())) {
@@ -230,7 +238,7 @@ void getNode(NodeDataRequest req, rocktree_t::node_t *n, std::function<void(std:
 				auto nu = std::make_unique<NodeData>(node);
 				populateNode(n, std::move(nu));
 				printf("timing: decode node %s start=%u dur=%u\n",
-					n->request.node_key().path().c_str(), t0, SDL_GetTicks() - t0);
+					n->request.node_key().path().c_str(), t0, timing_ms() - t0);
 				cb(NULL);
     		}, n, cb, vec);		
 		}

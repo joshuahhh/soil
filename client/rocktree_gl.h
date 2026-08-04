@@ -1,6 +1,7 @@
 #include <SDL_opengl.h>
 
 struct gl_ctx_t {
+	int width, height; // weblib: canvas drawable size, set by the shell
 	GLuint program;
 	GLint transform_loc;
 	GLint uv_offset_loc;
@@ -101,11 +102,20 @@ void unbufferMesh(rocktree_t::node_t::mesh_t &mesh) {
 // renderInit lives in main.cpp because the shader sources are there)
 typedef gl_ctx_t render_ctx_t;
 
-void renderDrawableSize(render_ctx_t &ctx, SDL_Window *window, int *w, int *h) {
-	SDL_GL_GetDrawableSize(window, w, h);
+#ifdef EARTH_WEBLIB
+// no sdl in the web library: the shell tracks the canvas drawable size in
+// the ctx and the browser presents implicitly when the frame callback returns
+void renderDrawableSize(render_ctx_t &ctx, void *window, int *w, int *h) {
+	*w = ctx.width;
+	*h = ctx.height;
 }
+#else
+void renderDrawableSize(render_ctx_t &ctx, void *window, int *w, int *h) {
+	SDL_GL_GetDrawableSize((SDL_Window *)window, w, h);
+}
+#endif
 
-void renderFrameBegin(render_ctx_t &ctx, SDL_Window *window, int width, int height, int sky) {
+void renderFrameBegin(render_ctx_t &ctx, void *window, int width, int height, int sky) {
 	glViewport(0, 0, width, height);
 	glClearColor((sky>>16 & 0xff) / 255.0f, (sky>>8 & 0xff) / 255.0f, (sky & 0xff) / 255.0f, 1.0f);
 	glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
@@ -127,8 +137,10 @@ bool renderReadPixels(render_ctx_t &ctx, int w, int h, uint8_t *rgb) {
 	return true;
 }
 
-void renderPresent(render_ctx_t &ctx, SDL_Window *window) {
-	SDL_GL_SwapWindow(window);
+void renderPresent(render_ctx_t &ctx, void *window) {
+#ifndef EARTH_WEBLIB
+	SDL_GL_SwapWindow((SDL_Window *)window);
+#endif
 }
 
 void checkCompileShaderError(GLuint shader) {
@@ -162,4 +174,73 @@ GLuint makeShader(const char* vert_src, const char* frag_src) {
 	glDeleteShader(vert_shader);
 	glDeleteShader(frag_shader);
 	return program;
+}
+// backend init; the metal equivalent is renderInit in rocktree_metal.h
+void renderInit(render_ctx_t &ctx, void *) {
+	glEnable(GL_DEPTH_TEST);
+	glEnable(GL_CULL_FACE);
+	// crack-fill boundary lines (see bindAndDrawMesh) can only land on
+	// background pixels, so width just sets how wide a slit they can plug
+	// (wider also costs more fill rate). webgl typically clamps this to 1
+	auto lw = getenv("EARTH_LINE_WIDTH");
+	glLineWidth(lw ? (float)atof(lw) : 2.0f);
+	ctx.program = makeShader(
+		"uniform mat4 transform;"
+		"uniform vec2 uv_offset;"
+		"uniform vec2 uv_scale;"
+		"uniform bool octant_mask[8];"
+		"uniform bool stale_mask[8];"
+		"attribute vec3 position;"
+		"attribute float octant;"
+		"attribute vec2 texcoords;"
+		"varying vec2 v_texcoords;"
+		"varying float v_stale;"
+		"varying float v_mask;"
+		"void main() {"
+		// masking: a triangle is dropped only when ALL its vertices are in
+		// masked octants (v_mask interpolates to 0 -> fragment discard).
+		// triangles straddling an octant boundary used to be collapsed
+		// entirely, retreating the surface a triangle-row from the boundary
+		// and opening hairline cracks the finer tile never covers; instead
+		// they are drawn, with masked vertices pushed slightly away in depth
+		// so the finer tile wins wherever they overlap it
+		"	float mask = octant_mask[int(octant)] ? 0.0 : 1.0;"
+		"	v_mask = mask;"
+		"	v_stale = stale_mask[int(octant)] ? 1.0 : 0.0;"
+		"	v_texcoords = (texcoords + uv_offset) * uv_scale;"
+		"	vec4 p = transform * vec4(position, 1.0);"
+		"	p.z += (1.0 - mask) * 0.002 * p.w;"
+		"	gl_Position = p;"
+		"}",
+
+		"#ifdef GL_ES\n"
+		"precision mediump float;\n"
+		"#endif\n"
+		"uniform sampler2D texture;"
+		"uniform bool debug_lod;"
+		"varying vec2 v_texcoords;"
+		"varying float v_stale;"
+		"varying float v_mask;"
+		"void main() {"
+		"	if (v_mask < 0.004) discard;"
+		"	vec3 c = texture2D(texture, v_texcoords).rgb;"
+		"	if (debug_lod) c = mix(c, vec3(1.0, 0.0, 0.0), v_stale * 0.5);"
+		"	gl_FragColor = vec4(c, 1.0);"
+		"}"
+	);
+	glUseProgram(ctx.program);
+	ctx.transform_loc = glGetUniformLocation(ctx.program, "transform");
+	ctx.uv_offset_loc = glGetUniformLocation(ctx.program, "uv_offset");
+	ctx.uv_scale_loc = glGetUniformLocation(ctx.program, "uv_scale");
+	ctx.octant_mask_loc = glGetUniformLocation(ctx.program, "octant_mask");
+	ctx.stale_mask_loc = glGetUniformLocation(ctx.program, "stale_mask");
+	ctx.debug_lod_loc = glGetUniformLocation(ctx.program, "debug_lod");
+	ctx.texture_loc = glGetUniformLocation(ctx.program, "texture");
+	ctx.position_loc = glGetAttribLocation(ctx.program, "position");
+	ctx.octant_loc = glGetAttribLocation(ctx.program, "octant");
+	ctx.texcoords_loc = glGetAttribLocation(ctx.program, "texcoords");
+
+	glEnableVertexAttribArray(ctx.position_loc);
+	glEnableVertexAttribArray(ctx.octant_loc);
+	glEnableVertexAttribArray(ctx.texcoords_loc);
 }
