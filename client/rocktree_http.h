@@ -1,3 +1,15 @@
+// fetch backend interface: resolve a resource path ("BulkMetadata/pb=...",
+// "NodeData/pb=...", "PlanetoidMetadata") to bytes, calling thunk when done
+// (from any thread). the built-in backends below are the default; shells can
+// swap in their own (e.g. the web library delegates to a js function so the
+// host app controls caching and transport)
+typedef void (*fetch_thunk_t)(int i, int error, uint8_t *d, size_t l);
+struct fetcher_t {
+	virtual void fetch(const char *path, int i, fetch_thunk_t thunk) = 0;
+	virtual ~fetcher_t() {}
+};
+fetcher_t *earth_fetcher = nullptr; // set below; shells may override
+
 #ifdef EMSCRIPTEN
 #include <emscripten/fetch.h>
 
@@ -22,26 +34,30 @@ void downloadFailed(emscripten_fetch_t *fetch) {
   emscripten_fetch_close(fetch);
 }
 
-void fetchData(const char* path, int i, void (*thunk)(int i, int error, uint8_t *d, size_t l)) {
-	const char* base_url = "https://kh.google.com/rt/earth/";
-	char* url = (char*)malloc(strlen(base_url) + strlen(path) + 1);
-	strcpy(url, base_url); strcat(url, path);
+// direct browser fetch of kh.google.com, no cache of our own (the browser's
+// http cache applies)
+struct emscripten_fetcher_t : fetcher_t {
+	void fetch(const char *path, int i, fetch_thunk_t thunk) override {
+		const char* base_url = "https://kh.google.com/rt/earth/";
+		char* url = (char*)malloc(strlen(base_url) + strlen(path) + 1);
+		strcpy(url, base_url); strcat(url, path);
 
-	emscripten_fetch_attr_t attr;
-	emscripten_fetch_attr_init(&attr);
+		emscripten_fetch_attr_t attr;
+		emscripten_fetch_attr_init(&attr);
 
-	auto xx = new x();
-	xx->i = i;
-	xx->thunk = thunk;
-	attr.userData = (void*)xx;
+		auto xx = new x();
+		xx->i = i;
+		xx->thunk = thunk;
+		attr.userData = (void*)xx;
 
-	strcpy(attr.requestMethod, "GET");
-	attr.attributes = EMSCRIPTEN_FETCH_LOAD_TO_MEMORY;
-	attr.onsuccess = downloadSucceeded;
-	attr.onerror = downloadFailed;
-	emscripten_fetch(&attr, url);
-	return;	
-}
+		strcpy(attr.requestMethod, "GET");
+		attr.attributes = EMSCRIPTEN_FETCH_LOAD_TO_MEMORY;
+		attr.onsuccess = downloadSucceeded;
+		attr.onerror = downloadFailed;
+		emscripten_fetch(&attr, url);
+	}
+};
+static emscripten_fetcher_t default_fetcher;
 #else
 
 #define HTTP_IMPLEMENTATION
@@ -55,9 +71,16 @@ void createDir(const char* path);
 bool readFile(const char* file_path, unsigned char** data, size_t* len);
 void writeFile(const char* file_path, unsigned char* data, size_t len);
 
-void fetchData(const char* path, int i, void (*thunk)(int i, int error, uint8_t *d, size_t l)) {
-	
-	std::call_once(cache_init_once_flag, [](){		
+// disk cache in ./cache backed by plain http; runs synchronously on the
+// calling (webpool) thread
+struct http_cache_fetcher_t : fetcher_t {
+	void fetch(const char *path, int i, fetch_thunk_t thunk) override;
+};
+static http_cache_fetcher_t default_fetcher;
+
+void http_cache_fetcher_t::fetch(const char* path, int i, fetch_thunk_t thunk) {
+
+	std::call_once(cache_init_once_flag, [](){
 		createDir(cache_pfx);
 		createDir((std::string(cache_pfx) + "BulkMetadata").c_str());
 		createDir((std::string(cache_pfx) + "NodeData").c_str());
@@ -164,3 +187,9 @@ void writeFile(const char* file_path, unsigned char* data, size_t len) {
 	rename(tmp_path.c_str(), file_path);
 }
 #endif
+
+// route requests through the active backend
+void fetchData(const char* path, int i, fetch_thunk_t thunk) {
+	if (!earth_fetcher) earth_fetcher = &default_fetcher;
+	earth_fetcher->fetch(path, i, thunk);
+}
