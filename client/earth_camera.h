@@ -55,11 +55,20 @@ geo_pose_t cameraToPose(const camera_t &cam, double planet_radius) {
 
 // one frame of the built-in flying controls; shells translate their native
 // input events into this and hosts that drive the camera themselves (e.g. a
-// synced 2d map) skip it entirely
+// synced 2d map) skip it entirely.
+//
+// two movement frames share these keys (see applyCameraInput): the ground
+// frame (cruise holds altitude, pedestal is along gravity-up) and, with
+// view_frame set, the view frame (dolly along the boresight, boom along
+// view-up). truck (left/right) is identical in both because roll is never
+// introduced, so camera-right is always horizontal
 struct camera_input_t {
-	double yaw = 0, pitch = 0; // radians this frame
+	double yaw = 0, pitch = 0; // pan/tilt radians this frame
 	bool forward = false, back = false, left = false, right = false;
-	bool raise = false, lower = false, slow = false;
+	bool raise = false, lower = false;
+	bool view_frame = false;
+	bool slow = false;        // momentary precision (x0.1)
+	double speed_gain = 1.0;  // sticky multiplier owned by the shell
 	double dt_ms = 0;
 };
 
@@ -91,17 +100,27 @@ void applyCameraInput(camera_t &cam, const camera_input_t &in, double planet_rad
 	const auto min_speed = 5.0; // m/s floor so we don't freeze at ground level
 	auto altitude = cam.eye.norm() - planet_radius;
 	auto speed = fmax(min_speed, altitude * altitude_per_second);
-	auto mag = speed * (in.dt_ms / 1000.0) * (in.slow ? 0.1 : 1.0);
+	auto mag = speed * (in.dt_ms / 1000.0) * (in.slow ? 0.1 : 1.0) * in.speed_gain;
 	auto sideways = cam.direction.cross(up).normalized();
 	auto horizontal = up.cross(sideways).normalized(); // view direction projected onto the horizontal plane
-	Vector3d new_eye = cam.eye
-		+ (in.forward ? 1 : 0) * horizontal * mag
-		- (in.back ? 1 : 0) * horizontal * mag
-		- (in.left ? 1 : 0) * sideways * mag
-		+ (in.right ? 1 : 0) * sideways * mag;
-	new_eye = new_eye.normalized() * cam.eye.norm(); // WASD keeps elevation constant
-	auto vertical = up * mag;
-	new_eye += (in.raise ? 1 : 0) * vertical - (in.lower ? 1 : 0) * vertical;
+
+	auto fwd = (in.forward ? 1.0 : 0.0) - (in.back ? 1.0 : 0.0);
+	auto vert = (in.raise ? 1.0 : 0.0) - (in.lower ? 1.0 : 0.0);
+	auto lat = (in.right ? 1.0 : 0.0) - (in.left ? 1.0 : 0.0);
+
+	// truck: shared between frames, holds altitude
+	Vector3d new_eye = cam.eye + lat * sideways * mag;
+	if (!in.view_frame) {
+		// ground frame: cruise holds altitude, pedestal climbs along up
+		new_eye += fwd * horizontal * mag;
+		new_eye = new_eye.normalized() * cam.eye.norm();
+		new_eye += vert * up * mag;
+	} else {
+		// view frame: dolly along the boresight, boom along view-up
+		new_eye = new_eye.normalized() * cam.eye.norm();
+		auto view_up = sideways.cross(cam.direction).normalized();
+		new_eye += fwd * cam.direction * mag + vert * view_up * mag;
+	}
 	auto pot_altitude = new_eye.norm() - planet_radius;
 	if (pot_altitude < 1000 * 1000 * 10) {
 		cam.eye = new_eye;

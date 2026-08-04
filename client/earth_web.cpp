@@ -12,7 +12,7 @@
 //     Module.deliverFetch(id, true, bytesUint8Array);
 //   });
 //   view.setPose(lat, lon, alt, heading, tilt);   // degrees/meters
-//   view.fly(yaw, pitch, fwd, back, left, right, up, down, slow, dtMs);
+//   view.fly(yaw, pitch, fwd, back, left, right, up, down, slow, viewFrame, gain, dtMs);
 //   view.frame(dtMs);                              // from requestAnimationFrame
 
 #include <fstream>
@@ -149,9 +149,11 @@ struct EarthView {
 	}
 
 	// built-in flying controls; the host translates its pointer/keyboard
-	// events into this (yaw/pitch in radians for this frame)
+	// events into this (yaw/pitch in radians for this frame). view_frame
+	// switches forward/back and raise/lower from ground-frame cruise/pedestal
+	// to view-frame dolly/boom; gain is the host's sticky speed multiplier
 	void fly(double yaw, double pitch, bool forward, bool back, bool left, bool right,
-			bool raise, bool lower, bool slow, double dt_ms) {
+			bool raise, bool lower, bool slow, bool view_frame, double gain, double dt_ms) {
 		if (!earth.ready()) return;
 		camera_input_t in;
 		in.yaw = yaw;
@@ -163,6 +165,8 @@ struct EarthView {
 		in.raise = raise;
 		in.lower = lower;
 		in.slow = slow;
+		in.view_frame = view_frame;
+		in.speed_gain = gain;
 		in.dt_ms = dt_ms;
 		applyCameraInput(camera, in, planetRadius());
 	}

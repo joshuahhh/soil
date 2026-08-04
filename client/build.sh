@@ -11,7 +11,7 @@ if [ "$1" == "weblib" ]; then
 	emcc -Iinclude earth_web.cpp -O2 -std=c++17 -Wno-deprecated-declarations -I. -I./eigen/ \
 		-I$EMSCRIPTEN_PROTOBUF_SRC $EMSCRIPTEN_PROTOBUF_LIB crn/crn.o \
 		-DEARTH_WEBLIB \
-		-s MALLOC=mimalloc \
+		-s MALLOC=mimalloc -Wno-pthreads-mem-growth \
 		-s USE_SDL=2 -s FETCH=1 -s USE_PTHREADS=1 \
 		-s INITIAL_MEMORY=536870912 -s ALLOW_MEMORY_GROWTH=1 -s MAXIMUM_MEMORY=4294967296 \
 		-s PTHREAD_POOL_SIZE="'navigator.hardwareConcurrency'" \
@@ -25,7 +25,7 @@ elif [ "$1" == "emscripten" ]; then
 
 	emcc -Iinclude main.cpp -O2 -std=c++17 -Wno-deprecated-declarations -I. -I./eigen/ \
 		-I$EMSCRIPTEN_PROTOBUF_SRC $EMSCRIPTEN_PROTOBUF_LIB crn/crn.o \
-		-s MALLOC=mimalloc -s USE_SDL=2 -s FETCH=1 -s USE_PTHREADS=1 -s INITIAL_MEMORY=536870912 -s ALLOW_MEMORY_GROWTH=1 -s MAXIMUM_MEMORY=4294967296 \
+		-s MALLOC=mimalloc -Wno-pthreads-mem-growth -s USE_SDL=2 -s FETCH=1 -s USE_PTHREADS=1 -s INITIAL_MEMORY=536870912 -s ALLOW_MEMORY_GROWTH=1 -s MAXIMUM_MEMORY=4294967296 \
 		-s PTHREAD_POOL_SIZE="'navigator.hardwareConcurrency'" \
 		--shell-file shell.html \
 		-o main.html

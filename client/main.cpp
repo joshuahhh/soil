@@ -40,6 +40,9 @@ static camera_t camera = {
 
 static earth_core_t earth;
 
+// sticky movement-speed multiplier, halved/doubled with -/=
+static double speed_gain = 1.0;
+
 // toggled with L: tint the parts of a mesh red where a finer tile is wanted
 // but not yet downloaded
 static bool debug_lod_mode = false;
@@ -76,13 +79,28 @@ void updateFrame(render_ctx_t &ctx) {
 	in.right = state[SDL_SCANCODE_D];
 	in.raise = state[SDL_SCANCODE_Q];
 	in.lower = state[SDL_SCANCODE_E];
+	in.view_frame = state[SDL_SCANCODE_SPACE]; // hold: dolly/boom instead of cruise/pedestal
 	in.slow = state[SDL_SCANCODE_LSHIFT] || state[SDL_SCANCODE_RSHIFT];
-	if (no_grab)
-		in.forward = in.left = in.back = in.right = in.raise = in.lower = false;
+	in.speed_gain = speed_gain;
 	int mouse_x = 0, mouse_y = 0;
 	if (mouse_captured) SDL_GetRelativeMouseState(&mouse_x, &mouse_y);
 	in.yaw = mouse_x * 0.001;
 	in.pitch = -mouse_y * 0.001;
+	// arrows pan/tilt at fixed angular rates so the mouse is optional
+	auto rot = (in.slow ? 0.1 : 1.0) * (deltaTime / 1000.0);
+	if (state[SDL_SCANCODE_RIGHT]) in.yaw += 1.2 * rot;
+	if (state[SDL_SCANCODE_LEFT]) in.yaw -= 1.2 * rot;
+	if (state[SDL_SCANCODE_UP]) in.pitch += 0.9 * rot;
+	if (state[SDL_SCANCODE_DOWN]) in.pitch -= 0.9 * rot;
+	// z/x zoom by narrowing/widening the fov, like the scroll wheel
+	if (state[SDL_SCANCODE_Z] != state[SDL_SCANCODE_X]) {
+		camera.fov *= pow(0.9, (deltaTime / 150.0) * (state[SDL_SCANCODE_Z] ? 1 : -1));
+		camera.fov = fmax(1.0 * M_PI / 180.0, fmin(camera.fov, 100.0 * M_PI / 180.0));
+	}
+	if (no_grab) {
+		in.forward = in.left = in.back = in.right = in.raise = in.lower = false;
+		in.yaw = in.pitch = 0;
+	}
 	in.dt_ms = deltaTime;
 	applyCameraInput(camera, in, earth.radius());
 
@@ -253,6 +271,14 @@ void mainloop(render_ctx_t &ctx) {
 					} else {
 						fprintf(stderr, "could not save view to %s\n", filename);
 					}
+				}
+				if (sdl_event.key.keysym.sym == SDLK_MINUS && !sdl_event.key.repeat) {
+					speed_gain = fmax(1.0 / 16.0, speed_gain / 2.0);
+					printf("speed gain: x%g\n", speed_gain);
+				}
+				if (sdl_event.key.keysym.sym == SDLK_EQUALS && !sdl_event.key.repeat) {
+					speed_gain = fmin(16.0, speed_gain * 2.0);
+					printf("speed gain: x%g\n", speed_gain);
 				}
 				if (sdl_event.key.keysym.sym == SDLK_l && !sdl_event.key.repeat) {
 					debug_lod_mode = !debug_lod_mode;

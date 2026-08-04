@@ -24,7 +24,12 @@
 </style>
 <div id="map"></div>
 <div id="right"><canvas id="globe" tabindex="0"></canvas></div>
-<div id="hint">drag to look &middot; WASD move &middot; Q/E up/down &middot; shift slow &middot; click map to teleport</div>
+<div id="hint"></div>
+<script>
+  const hintText = 'WASD move · Q/E up/down · hold space: view-frame · arrows look · ' +
+    'Z/X zoom · -/= speed · shift slow · click map to teleport';
+  document.getElementById('hint').textContent = hintText;
+</script>
 <script src="earth.js"></script>
 <script>
 (async () => {
@@ -119,8 +124,23 @@
   };
 
   // --- input on the canvas -> built-in flying controls ----------------------
+  // ground frame: WASD cruise/truck, Q/E pedestal. hold Space for the view
+  // frame: W/S dolly along the view, Q/E boom along view-up. arrows pan/tilt
+  // so no mouse is needed. Z/X zoom (fov). -/= sticky speed gain. shift slow
   const keys = {};
-  canvas.addEventListener('keydown', (e) => { keys[e.code] = true; });
+  const handled = new Set(['KeyW','KeyA','KeyS','KeyD','KeyQ','KeyE','KeyZ','KeyX',
+    'Space','ArrowLeft','ArrowRight','ArrowUp','ArrowDown','Minus','Equal']);
+  let gain = 1;
+  const gainBadge = () => {
+    document.getElementById('hint').textContent =
+      hintText + (gain !== 1 ? `  [speed x${gain >= 1 ? gain : '1/' + (1/gain)}]` : '');
+  };
+  canvas.addEventListener('keydown', (e) => {
+    if (handled.has(e.code)) e.preventDefault();
+    keys[e.code] = true;
+    if (e.code === 'Minus' && !e.repeat) { gain = Math.max(1/16, gain/2); gainBadge(); }
+    if (e.code === 'Equal' && !e.repeat) { gain = Math.min(16, gain*2); gainBadge(); }
+  });
   canvas.addEventListener('keyup', (e) => { keys[e.code] = false; });
   canvas.addEventListener('blur', () => { for (const k in keys) keys[k] = false; });
   let dragging = false, yaw = 0, pitch = 0;
@@ -229,6 +249,19 @@
       view.setPose(START.lat, START.lon, START.alt, 0, -25);
     }
 
+    const slow = !!(keys.ShiftLeft || keys.ShiftRight);
+    // arrows pan/tilt at fixed angular rates (rad/s), shift-slowed
+    const rot = (slow ? 0.1 : 1) * dt / 1000;
+    if (keys.ArrowRight) yaw += 1.2 * rot;
+    if (keys.ArrowLeft) yaw -= 1.2 * rot;
+    if (keys.ArrowUp) pitch += 0.9 * rot;
+    if (keys.ArrowDown) pitch -= 0.9 * rot;
+    // z/x zoom like the wheel
+    if (!!keys.KeyZ !== !!keys.KeyX) {
+      const p = view.getPose();
+      view.setFov(p.fov * Math.pow(0.9, (dt / 150) * (keys.KeyZ ? 1 : -1)));
+    }
+
     const flying = dragging || yaw !== 0 || pitch !== 0
       || keys.KeyW || keys.KeyS || keys.KeyA || keys.KeyD || keys.KeyQ || keys.KeyE;
     if (flying && !following) {
@@ -239,7 +272,7 @@
     view.fly(yaw, pitch,
       !!keys.KeyW, !!keys.KeyS, !!keys.KeyA, !!keys.KeyD,
       !!keys.KeyQ, !!keys.KeyE,
-      !!(keys.ShiftLeft || keys.ShiftRight), dt);
+      slow, !!keys.Space, gain, dt);
     yaw = 0;
     pitch = 0;
     view.frame(dt);
