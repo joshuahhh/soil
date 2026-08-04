@@ -19,14 +19,23 @@ else
 
 	CFLAGS="--std=c++17 -O2 -g -I. `pkg-config --cflags sdl2 protobuf` -I./eigen/"
 	LDFLAGS="`pkg-config --libs sdl2 protobuf` crn/crn.o"
-	if [ `uname` = "Darwin" ]; then		
-		CFLAGS="$CFLAGS `pkg-config --cflags glew`"
-		LDFLAGS="$LDFLAGS `pkg-config --static --libs glew` -framework OpenGL"
-		echo "$CFLAGS"
-		echo "$LDFLAGS"
+	if [ `uname` = "Darwin" ]; then
+		if [ "$1" == "gl" ]; then
+			# legacy OpenGL backend, kept for A/B comparison ("./build.sh gl")
+			echo build: native gl
+			CFLAGS="$CFLAGS -DEARTH_USE_GL `pkg-config --cflags glew`"
+			LDFLAGS="$LDFLAGS `pkg-config --static --libs glew` -framework OpenGL"
+			c++ $CFLAGS main.cpp $LDFLAGS -o main
+		else
+			# metal backend (default on macOS); the renderer header is
+			# objective-c++, so compile the single TU as such
+			echo build: native metal
+			LDFLAGS="$LDFLAGS -framework Metal -framework QuartzCore -framework Foundation"
+			c++ -fno-objc-arc $CFLAGS -x objective-c++ main.cpp -x none $LDFLAGS -o main
+		fi
 	else
 		CFLAGS="$CFLAGS -Igl2/include"
 		LDFLAGS="$LDFLAGS -lGL -lm -ldl"
+		c++ $CFLAGS main.cpp $LDFLAGS -o main
 	fi
-	c++ $CFLAGS main.cpp $LDFLAGS -o main
 fi

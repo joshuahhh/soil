@@ -1,5 +1,16 @@
 #include <SDL_opengl.h>
 
+// renderer backend: Metal natively on macOS (Apple's OpenGL is deprecated,
+// frozen at 2.1 compat, and has high per-draw-call overhead), OpenGL
+// everywhere else (including the emscripten/WebGL build). build with
+// -DEARTH_USE_GL to force the GL backend on macOS for A/B comparison
+#if defined(__APPLE__) && !defined(EMSCRIPTEN) && !defined(EARTH_USE_GL)
+#define EARTH_METAL 1
+typedef void* render_handle_t; // retained id<MTLBuffer> / id<MTLTexture>
+#else
+typedef GLuint render_handle_t;
+#endif
+
 enum dl_state : int {
 	dl_state_stub = 1,
 	dl_state_downloading = 2,
@@ -63,10 +74,10 @@ struct rocktree_t {
 			int texture_width;
 			int texture_height;
 
-			GLuint vertex_buffer;
-			GLuint index_buffer;
-			GLuint boundary_index_buffer;
-			GLuint texture_buffer;
+			render_handle_t vertex_buffer;
+			render_handle_t index_buffer;
+			render_handle_t boundary_index_buffer;
+			render_handle_t texture_buffer;
 			bool buffered;
 		};
 		std::vector<mesh_t> meshes;

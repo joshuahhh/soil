@@ -97,6 +97,40 @@ void unbufferMesh(rocktree_t::node_t::mesh_t &mesh) {
 	glDeleteBuffers(1, &mesh.vertex_buffer); // auto: glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
 }
 
+// backend-neutral wrappers (the metal backend provides the same functions;
+// renderInit lives in main.cpp because the shader sources are there)
+typedef gl_ctx_t render_ctx_t;
+
+void renderDrawableSize(render_ctx_t &ctx, SDL_Window *window, int *w, int *h) {
+	SDL_GL_GetDrawableSize(window, w, h);
+}
+
+void renderFrameBegin(render_ctx_t &ctx, SDL_Window *window, int width, int height, int sky) {
+	glViewport(0, 0, width, height);
+	glClearColor((sky>>16 & 0xff) / 255.0f, (sky>>8 & 0xff) / 255.0f, (sky & 0xff) / 255.0f, 1.0f);
+	glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+}
+
+void renderSetDebugLod(render_ctx_t &ctx, bool debug_lod) {
+	glUniform1i(ctx.debug_lod_loc, debug_lod);
+}
+
+void renderSetTransform(render_ctx_t &ctx, const float *m16) {
+	glUniformMatrix4fv(ctx.transform_loc, 1, GL_FALSE, m16);
+}
+
+void renderFrameEnd(render_ctx_t &ctx) {}
+
+bool renderReadPixels(render_ctx_t &ctx, int w, int h, uint8_t *rgb) {
+	glPixelStorei(GL_PACK_ALIGNMENT, 1);
+	glReadPixels(0, 0, w, h, GL_RGB, GL_UNSIGNED_BYTE, rgb);
+	return true;
+}
+
+void renderPresent(render_ctx_t &ctx, SDL_Window *window) {
+	SDL_GL_SwapWindow(window);
+}
+
 void checkCompileShaderError(GLuint shader) {
 	GLint is_compiled = 0;
 	glGetShaderiv(shader, GL_COMPILE_STATUS, &is_compiled);

@@ -79,7 +79,9 @@ void loadPlanet() {
 	});
 }
 
-void initGL(gl_ctx_t &ctx) {
+#ifndef EARTH_METAL
+// gl backend init; the metal equivalent is renderInit in rocktree_metal.h
+void renderInit(render_ctx_t &ctx, SDL_Window *) {
 	glEnable(GL_DEPTH_TEST);
 	glEnable(GL_CULL_FACE);
 	// crack-fill boundary lines (see bindAndDrawMesh) can only land on
@@ -147,12 +149,13 @@ void initGL(gl_ctx_t &ctx) {
 	glEnableVertexAttribArray(ctx.octant_loc);
 	glEnableVertexAttribArray(ctx.texcoords_loc);
 }
+#endif
 
 Uint64 NOW = SDL_GetPerformanceCounter();
 Uint64 LAST = 0;
 double deltaTime = 0;
 
-void drawPlanet(gl_ctx_t &ctx) {
+void drawPlanet(render_ctx_t &ctx) {
 	auto planetoid = _planetoid;
 	if (!planetoid) return;
 	if (!planetoid->downloaded) return;
@@ -163,11 +166,8 @@ void drawPlanet(gl_ctx_t &ctx) {
 	Matrix4d projection, viewprojection;
 
 	int width, height;
-	SDL_GL_GetDrawableSize(sdl_window, &width, &height);
-	glViewport(0, 0, width, height);
-	auto sky = sky_color;
-	glClearColor((sky>>16 & 0xff) / 255.0f, (sky>>8 & 0xff) / 255.0f, (sky & 0xff) / 255.0f, 1.0f);
-	glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);	
+	renderDrawableSize(ctx, sdl_window, &width, &height);
+	renderFrameBegin(ctx, sdl_window, width, height, sky_color);
 
 	auto state = SDL_GetKeyboardState(NULL);
 	auto key_up_pressed = state[SDL_SCANCODE_W];
@@ -574,7 +574,7 @@ void drawPlanet(gl_ctx_t &ctx) {
 	if (debug_lod_mode)
 		for (auto &kv : potential_nodes) potential_set.insert(kv.first);
 
-	glUniform1i(ctx.debug_lod_loc, debug_lod_mode);
+	renderSetDebugLod(ctx, debug_lod_mode);
 
 	// reverse level order: children before parents
 	for (auto kv = potential_nodes.rbegin(); kv != potential_nodes.rend(); ++kv) {
@@ -612,13 +612,14 @@ void drawPlanet(gl_ctx_t &ctx) {
 		for(auto i = 0; i < 16; ++i) transform_float.data()[i] = (float)(transform.data()[i]);
 
 		// buffer, bind, draw
-		glUniformMatrix4fv(ctx.transform_loc, 1, GL_FALSE, transform_float.data());
+		renderSetTransform(ctx, transform_float.data());
 		for (auto &mesh : node->meshes) {
 			if (!mesh.buffered) bufferMesh(mesh);
 			bindAndDrawMesh(mesh, self_mask, stale_mask, ctx);
 		}
 		//bufs[full_path] = node;
 	}
+	renderFrameEnd(ctx);
 
 	sec_draw += ticks_ms() - t3;
 	sec_frames++;
@@ -676,7 +677,7 @@ static uint8_t *readPpm(const char *path, int *w, int *h) {
 // called once per frame after drawPlanet, before the buffer swap. capture
 // mode: wait for the scene to converge, save the frame as reference, quit.
 // measure mode: log rmse against the reference every frame until converged
-void benchFrame() {
+void benchFrame(render_ctx_t &ctx) {
 	static uint32_t start_ms = SDL_GetTicks();
 	static uint32_t first_complete_ms = 0;
 	static int complete_streak = 0;
@@ -687,10 +688,9 @@ void benchFrame() {
 
 	auto elapsed = SDL_GetTicks() - start_ms;
 	int w, h;
-	SDL_GL_GetDrawableSize(sdl_window, &w, &h);
+	renderDrawableSize(ctx, sdl_window, &w, &h);
 	pixels.resize((size_t)w * h * 3);
-	glPixelStorei(GL_PACK_ALIGNMENT, 1);
-	glReadPixels(0, 0, w, h, GL_RGB, GL_UNSIGNED_BYTE, pixels.data());
+	if (!renderReadPixels(ctx, w, h, pixels.data())) return;
 
 	if (!bench_capture) {
 		if (!ref) {
@@ -748,7 +748,7 @@ void benchFrame() {
 }
 #endif
 
-void mainloop(gl_ctx_t &ctx) {
+void mainloop(render_ctx_t &ctx) {
 	SDL_Event sdl_event;
 	while (SDL_PollEvent(&sdl_event)) {
 		switch (sdl_event.type) {
@@ -807,9 +807,9 @@ void mainloop(gl_ctx_t &ctx) {
 
 	drawPlanet(ctx);
 #ifndef EMSCRIPTEN
-	if (bench_mode) benchFrame();
+	if (bench_mode) benchFrame(ctx);
 #endif
-	SDL_GL_SwapWindow(sdl_window);
+	renderPresent(ctx, sdl_window);
 }
 
 int main(int argc, char* argv[]) {
@@ -890,6 +890,16 @@ int main(int argc, char* argv[]) {
 		fprintf(stderr, "Couldn't init SDL2: %s\n", SDL_GetError());
 		exit(1);
 	}
+#ifdef EARTH_METAL
+	sdl_window = SDL_CreateWindow("Earth Client",
+		SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
+		video_width, video_height,
+		SDL_WINDOW_METAL | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI);
+	if (!sdl_window) {
+		fprintf(stderr, "Couldn't create window: %s\n", SDL_GetError());
+		exit(1);
+	}
+#else
 	SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE, 24);
 #ifdef EMSCRIPTEN
 	SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK,
@@ -901,10 +911,10 @@ int main(int argc, char* argv[]) {
 		SDL_GL_CONTEXT_PROFILE_COMPATIBILITY);
 	SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 2);
 	SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 1);
-#endif	
-	sdl_window = SDL_CreateWindow("Earth Client", 
-		SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 
-		video_width, video_height, 
+#endif
+	sdl_window = SDL_CreateWindow("Earth Client",
+		SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
+		video_width, video_height,
 		SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI);
 	if (!sdl_window) {
 		fprintf(stderr, "Couldn't create window: %s\n", SDL_GetError());
@@ -924,10 +934,11 @@ int main(int argc, char* argv[]) {
 		exit(1);
 	}
 #endif
+#endif
 
-	auto ctx = new gl_ctx_t();
+	auto ctx = new render_ctx_t();
 
-	initGL(*ctx);
+	renderInit(*ctx, sdl_window);
 	loadPlanet();
 
 	// benchmarks and --nograb runs hold a fixed view; leave the cursor alone
@@ -935,15 +946,17 @@ int main(int argc, char* argv[]) {
 	else SDL_SetRelativeMouseMode(SDL_TRUE);
 
 #ifdef EMSCRIPTEN
-	emscripten_set_main_loop_arg([](void* _ctx){	
-		auto ctx = (gl_ctx_t *)_ctx;
+	emscripten_set_main_loop_arg([](void* _ctx){
+		auto ctx = (render_ctx_t *)_ctx;
 		mainloop(*ctx);
 	}, (void *)ctx, 0, 1);
 #else
 	while (!quit) mainloop(*ctx);
 #endif
 
+#ifndef EARTH_METAL
 	SDL_GL_DeleteContext(gl_context);
+#endif
 	SDL_DestroyWindow(sdl_window);
 	SDL_Quit();
 	delete ctx;
