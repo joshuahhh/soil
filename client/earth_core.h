@@ -98,13 +98,10 @@ struct earth_core_t {
 		// before parents (the order the draw loop's octant masking needs)
 		std::vector<std::pair<std::string, rocktree_t::node_t *>> potential_nodes;
 
-		// downloaded nodes are kept as an lru cache (see eviction below); stale
-		// bulk metadata is kept for a generous grace period: it's small, and
-		// purging it makes the lod walk unable to reach still-resident meshes
-		// when the camera looks back, flashing the scene coarse until the
-		// metadata re-downloads
+		// downloaded nodes and bulk metadata are both lru caches with byte
+		// quotas (see the eviction sweep below); nothing is ever dropped on
+		// a clock
 		auto now_ms = ticksMs();
-		const double keep_ms = 300 * 1000;
 
 		// wanted bulks/nodes are marked by stamping last_wanted_ms with this
 		// frame's time during the walk; membership tests elsewhere (eviction,
@@ -257,10 +254,33 @@ struct earth_core_t {
 			return bytes;
 		};
 
+		// bulk metadata (the octree index) is also an lru cache with its own
+		// byte budget — never purged on a clock. a bulk is only purgeable
+		// once it has no downloading/downloaded children (busy_ctr == 0), so
+		// purges cascade bottom-up under sustained pressure
+#ifdef EMSCRIPTEN
+		const size_t bulk_quota = (size_t)256 << 20;
+#else
+		const size_t bulk_quota = (size_t)512 << 20;
+#endif
+		size_t bulk_bytes_total = 0;
+		struct purge_t { double last_wanted_ms; size_t bytes; rocktree_t::bulk_t *b; };
+		std::vector<purge_t> purgeable;
+		auto bulk_bytes = [](rocktree_t::bulk_t *b) {
+			// rough: map/protobuf overhead per child entry
+			return sizeof(*b) + b->nodes.size() * (sizeof(rocktree_t::node_t) + 256)
+				+ b->bulks.size() * 128;
+		};
+
 		std::vector<rocktree_t::bulk_t*> x = {current_bulk};
-		auto buf_cnt = 0, obs_n_cnt = 0, total_n = 0;
+		auto buf_cnt = 0, obs_n_cnt = 0, obs_b_cnt = 0, total_n = 0, total_b = 0;
 		while(!x.empty()) {
 			auto cur_bulk = x[0]; x.erase(x.begin());
+			total_b++;
+			auto bbytes = bulk_bytes(cur_bulk);
+			bulk_bytes_total += bbytes;
+			if (cur_bulk->parent && cur_bulk->last_wanted_ms != now_ms && cur_bulk->busy_ctr == 0)
+				purgeable.push_back({ cur_bulk->last_wanted_ms, bbytes, cur_bulk });
 			// prepare next iteration
 			for (auto &kv : cur_bulk->bulks) {
 				auto b = kv.second.get();
@@ -306,27 +326,24 @@ struct earth_core_t {
 			}
 		}
 
-		// post order dfs purge obsolete bulks
-		auto total_b = 0, obs_b_cnt = 0;
-		std::function<void(rocktree_t::bulk_t *)> po;
-		po = [&po, &obs_b_cnt, &total_b, now_ms, keep_ms](rocktree_t::bulk_t * b){
-			for (auto &kv : b->bulks){
-				auto b = kv.second.get();
-				if (b->dl_state == dl_state_downloaded)
-					po(b);
+		// purge least recently wanted bulks until metadata is back under its
+		// budget. clearing the child maps only ever destroys stubs: a bulk
+		// with any downloading or downloaded child has busy_ctr > 0 and was
+		// not collected above
+		if (bulk_bytes_total > bulk_quota) {
+			std::sort(purgeable.begin(), purgeable.end(), [](const purge_t &a, const purge_t &b) {
+				return a.last_wanted_ms < b.last_wanted_ms;
+			});
+			for (auto &e : purgeable) {
+				if (bulk_bytes_total <= bulk_quota) break;
+				auto b = e.b;
+				obs_b_cnt++;
+				b->nodes.clear();
+				b->bulks.clear();
+				b->setDeleted();
+				bulk_bytes_total -= e.bytes;
 			}
-			total_b++;
-			// wanted bulks got last_wanted_ms stamped during this frame's bfs
-			if (now_ms - b->last_wanted_ms > keep_ms) {
-				if (b->busy_ctr == 0) {
-					b->nodes.clear();
-					b->bulks.clear();
-					b->setDeleted();
-				}
-			}
-		};
-
-		po(current_bulk);
+		}
 
 		// log stuff about buffers
 		stats_report_ms += dt_ms;
