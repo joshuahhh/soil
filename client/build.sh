@@ -11,6 +11,7 @@ if [ "$1" == "weblib" ]; then
 	emcc -Iinclude earth_web.cpp -O2 -std=c++17 -Wno-deprecated-declarations -I. -I./eigen/ \
 		-I$EMSCRIPTEN_PROTOBUF_SRC $EMSCRIPTEN_PROTOBUF_LIB crn/crn.o \
 		-DEARTH_WEBLIB \
+		-s MALLOC=mimalloc \
 		-s USE_SDL=2 -s FETCH=1 -s TOTAL_MEMORY=1073741824 -s USE_PTHREADS=1 \
 		-s PTHREAD_POOL_SIZE="'navigator.hardwareConcurrency'" \
 		--bind -s MODULARIZE=1 -s EXPORT_NAME=createEarthModule \
@@ -23,7 +24,7 @@ elif [ "$1" == "emscripten" ]; then
 
 	emcc -Iinclude main.cpp -O2 -std=c++17 -Wno-deprecated-declarations -I. -I./eigen/ \
 		-I$EMSCRIPTEN_PROTOBUF_SRC $EMSCRIPTEN_PROTOBUF_LIB crn/crn.o \
-		-s USE_SDL=2 -s FETCH=1 -s TOTAL_MEMORY=1073741824 -s USE_PTHREADS=1 \
+		-s MALLOC=mimalloc -s USE_SDL=2 -s FETCH=1 -s TOTAL_MEMORY=1073741824 -s USE_PTHREADS=1 \
 		-s PTHREAD_POOL_SIZE="'navigator.hardwareConcurrency'" \
 		--shell-file shell.html \
 		-o main.html
