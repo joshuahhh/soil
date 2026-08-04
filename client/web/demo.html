@@ -94,10 +94,32 @@
   addEventListener('resize', resize);
 
   const view = Module.createView('#globe', fetchTile);
-  const START = { lat: 40.7605, lon: -74.0135, alt: 2500 };
+
+  // view state (camera pose, fov, speed gain, map zoom) persists in
+  // localstorage so a reload puts you back where you were
+  const DEFAULT_VIEW = { lat: 40.7605, lon: -74.0135, alt: 2500, heading: 0, tilt: -25, fov: 45, zoom: 12, gain: 1 };
+  const START = (() => {
+    try {
+      const v = JSON.parse(localStorage.getItem('earth-view'));
+      if (v && Number.isFinite(v.lat) && Number.isFinite(v.lon) && Number.isFinite(v.alt))
+        return { ...DEFAULT_VIEW, ...v };
+    } catch (e) {}
+    return DEFAULT_VIEW;
+  })();
+  const saveView = () => {
+    if (!view.ready()) return;
+    const p = view.getPose();
+    try {
+      localStorage.setItem('earth-view', JSON.stringify({
+        lat: p.lat, lon: p.lon, alt: p.alt, heading: p.heading, tilt: p.tilt,
+        fov: p.fov, zoom: map.getZoom(), gain,
+      }));
+    } catch (e) {}
+  };
+  addEventListener('beforeunload', saveView);
 
   // --- leaflet --------------------------------------------------------------
-  const map = L.map('map').setView([START.lat, START.lon], 12);
+  const map = L.map('map').setView([START.lat, START.lon], START.zoom);
   L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
     maxZoom: 19,
     attribution: '&copy; OpenStreetMap contributors',
@@ -130,7 +152,7 @@
   const keys = {};
   const handled = new Set(['KeyW','KeyA','KeyS','KeyD','KeyQ','KeyE','KeyZ','KeyX',
     'Space','ArrowLeft','ArrowRight','ArrowUp','ArrowDown','Minus','Equal']);
-  let gain = 1;
+  let gain = 1; // re-initialized from the saved view once it loads
   const gainBadge = () => {
     document.getElementById('hint').textContent =
       hintText + (gain !== 1 ? `  [speed x${gain >= 1 ? gain : '1/' + (1/gain)}]` : '');
@@ -238,15 +260,19 @@
   window.__demo = { view, map, marker, isFollowing: () => following };
 
   let lastSynced = { lat: 1e9, lon: 1e9 };
+  let saveTimer = 0;
   let last = performance.now();
   const tick = (now) => {
     const dt = Math.min(100, now - last);
     last = now;
 
     if (view.ready() && !posed) {
-      // once the planet metadata is in, jump to the start pose
+      // once the planet metadata is in, jump to the start (or saved) pose
       posed = true;
-      view.setPose(START.lat, START.lon, START.alt, 0, -25);
+      view.setPose(START.lat, START.lon, START.alt, START.heading, START.tilt);
+      view.setFov(START.fov);
+      gain = START.gain;
+      gainBadge();
     }
 
     const slow = !!(keys.ShiftLeft || keys.ShiftRight);
@@ -288,6 +314,12 @@
       // converging even after the camera stops. paused during zoom
       // animations, which are already anchored on the marker in locked mode
       if (following && !zooming) followMarker(L.latLng(p.lat, p.lon), dt);
+
+      saveTimer += dt;
+      if (saveTimer > 1000) {
+        saveTimer = 0;
+        saveView();
+      }
     }
     requestAnimationFrame(tick);
   };
