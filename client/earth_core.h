@@ -99,9 +99,12 @@ struct earth_core_t {
 		std::vector<std::pair<std::string, rocktree_t::node_t *>> potential_nodes;
 
 		// downloaded nodes are kept as an lru cache (see eviction below); stale
-		// bulk metadata is kept for a fixed grace period
+		// bulk metadata is kept for a generous grace period: it's small, and
+		// purging it makes the lod walk unable to reach still-resident meshes
+		// when the camera looks back, flashing the scene coarse until the
+		// metadata re-downloads
 		auto now_ms = ticksMs();
-		const double keep_ms = 20 * 1000;
+		const double keep_ms = 300 * 1000;
 
 		// wanted bulks/nodes are marked by stamping last_wanted_ms with this
 		// frame's time during the walk; membership tests elsewhere (eviction,
@@ -237,7 +240,10 @@ struct earth_core_t {
 		// roughly current, so it runs every 15th frame
 		if (evict_tick++ % 15 == 0) {
 #ifdef EMSCRIPTEN
-		const size_t mem_quota = (size_t)256 << 20;
+		// the wasm heap is a fixed 1GB; leave headroom for decode buffers
+		// and the module itself. too small a quota makes looking around
+		// evict whatever was just behind you
+		const size_t mem_quota = (size_t)512 << 20;
 #else
 		const size_t mem_quota = (size_t)1024 << 20;
 #endif
