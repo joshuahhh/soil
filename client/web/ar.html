@@ -159,6 +159,7 @@
   };
   resize();
   addEventListener('resize', resize);
+  if (new URLSearchParams(location.search).has('jpg')) Module.forceJpgTextures();
   const view = Module.createView('#globe', fetchTile);
 
   // --- sensor state ---------------------------------------------------------

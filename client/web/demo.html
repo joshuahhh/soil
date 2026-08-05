@@ -93,6 +93,7 @@
   resize();
   addEventListener('resize', resize);
 
+  if (new URLSearchParams(location.search).has('jpg')) Module.forceJpgTextures();
   const view = Module.createView('#globe', fetchTile);
 
   // view state (camera pose, fov, speed gain, map zoom) persists in

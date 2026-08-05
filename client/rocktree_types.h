@@ -11,6 +11,11 @@ typedef void* render_handle_t; // retained id<MTLBuffer> / id<MTLTexture>
 typedef GLuint render_handle_t;
 #endif
 
+// whether the gpu can take dxt1 uploads. set by the render backend at init;
+// without it (android gpus, generally) node requests ask for jpg textures
+// instead — an unsupported compressed upload samples as solid black
+static bool texture_s3tc_supported = true;
+
 enum dl_state : int {
 	dl_state_stub = 1,
 	dl_state_downloading = 2,

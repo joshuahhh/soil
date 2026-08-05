@@ -194,6 +194,11 @@ void deliverFetch(int i, bool ok, val bytes) {
 	js_fetcher.deliver(i, ok, bytes);
 }
 
+// pretend the gpu lacks s3tc (jpg textures); call before createView
+void forceJpgTextures() {
+	texture_s3tc_supported = false;
+}
+
 EMSCRIPTEN_BINDINGS(earth) {
 	emscripten::class_<EarthView>("EarthView")
 		.function("frame", &EarthView::frame)
@@ -207,4 +212,5 @@ EMSCRIPTEN_BINDINGS(earth) {
 		.function("fly", &EarthView::fly);
 	emscripten::function("createView", &createView, emscripten::allow_raw_pointers());
 	emscripten::function("deliverFetch", &deliverFetch);
+	emscripten::function("forceJpgTextures", &forceJpgTextures);
 }

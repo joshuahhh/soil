@@ -177,6 +177,10 @@ GLuint makeShader(const char* vert_src, const char* frag_src) {
 }
 // backend init; the metal equivalent is renderInit in rocktree_metal.h
 void renderInit(render_ctx_t &ctx, void *) {
+	auto exts = (const char *)glGetString(GL_EXTENSIONS);
+	texture_s3tc_supported = texture_s3tc_supported && exts && strstr(exts, "s3tc");
+	if (!texture_s3tc_supported)
+		printf("no s3tc on this gpu; using jpg textures\n");
 	glEnable(GL_DEPTH_TEST);
 	glEnable(GL_CULL_FACE);
 	// crack-fill boundary lines (see bindAndDrawMesh) can only land on

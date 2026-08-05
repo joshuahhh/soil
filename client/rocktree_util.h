@@ -60,16 +60,19 @@ NodeDataRequest createNodeDataRequest(const std::string base_path, BulkMetadata 
 	//assert(node_meta.has_epoch());
 	NodeDataRequest req;
 
-	// set texture format based on supported formats
+	// set texture format based on supported formats. crn/dxt1 preferred
+	// (smaller, gpu-native) unless the render backend reported no s3tc
 	req.set_texture_format(([&]() {
-		static Texture_Format supported[] = { Texture_Format_CRN_DXT1, Texture_Format_JPG };	
-		
+		static Texture_Format with_s3tc[] = { Texture_Format_CRN_DXT1, Texture_Format_JPG };
+		static Texture_Format without_s3tc[] = { Texture_Format_JPG, Texture_Format_CRN_DXT1 };
+		auto supported = texture_s3tc_supported ? with_s3tc : without_s3tc;
+
 		int available = node_meta.has_available_texture_formats()
 			? node_meta.available_texture_formats()
 			: bulk.default_available_texture_formats();
 
-		for (auto s : supported) {
-			if (available & (1 << (s - 1))) return s;
+		for (auto i = 0; i < 2; i++) {
+			if (available & (1 << (supported[i] - 1))) return supported[i];
 		}
 		return supported[0];
 	})());
