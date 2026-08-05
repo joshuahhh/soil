@@ -14,6 +14,10 @@
 //   view.setPose(lat, lon, alt, heading, tilt);   // degrees/meters
 //   view.fly(yaw, pitch, fwd, back, left, right, up, down, slow, viewFrame, gain, dtMs);
 //   view.frame(dtMs);                              // from requestAnimationFrame
+//   view.setOrtho(on);                             // orthographic projection
+//   view.orbit(headingDeg, tiltDeg);               // revolve around the screen-center point
+//   view.zoomOrtho(factor);                        // ortho zoom (boresight dolly), >1 zooms in
+//   view.pickCenter();                             // {lat,lon,alt,dist,src} under the crosshair, or null
 
 #include <fstream>
 #include <time.h>
@@ -148,6 +152,75 @@ struct EarthView {
 		camera.fov = fmax(1.0, fmin(deg, 100.0)) * M_PI / 180.0;
 	}
 
+	// orthographic projection; the view extent follows the fov at the
+	// terrain distance, so the fov zoom controls keep working
+	void setOrtho(bool on) { camera.ortho = on; clampOrthoTilt(camera); }
+	bool getOrtho() { return camera.ortho; }
+
+	// ortho zoom: dolly along the boresight, which scales the derived view
+	// extent by exactly 1/factor while the screen center stays put. leaves
+	// the fov alone (it stays whatever perspective mode had), and altitude
+	// tracks the zoom, so toggling back to perspective looks right
+	void zoomOrtho(double factor) {
+		if (!earth.ready() || !(factor > 0)) return;
+		auto dist = centerDistance(camera, planetRadius());
+		auto new_dist = fmax(1.0, dist / factor);
+		camera.eye += camera.direction * (dist - new_dist);
+	}
+
+	// ortho drag pan: grab-the-ground — translate the camera, holding
+	// altitude, so the terrain under the pointer follows it. deltas in css
+	// pixels of a viewport viewport_h pixels high. horizontal drags map to
+	// screen-right meters directly; vertical drags divide by sin(tilt),
+	// the foreshortening of ground distance in an oblique view
+	void panOrtho(double dx_px, double dy_px, double viewport_h) {
+		if (!earth.ready() || viewport_h <= 0) return;
+		auto dist = centerDistance(camera, planetRadius());
+		auto half_extent = fmax(1.0, dist * tan(camera.fov / 2.0));
+		auto mpp = 2.0 * half_extent / viewport_h; // meters per pixel
+		auto up = camera.eye.normalized();
+		Vector3d sideways = camera.direction.cross(up);
+		if (sideways.norm() < 1e-9) return; // looking straight down the axis
+		sideways.normalize();
+		Vector3d horizontal = up.cross(sideways).normalized();
+		auto sin_tilt = fmax(0.05, fabs(camera.direction.dot(up)));
+		Vector3d new_eye = camera.eye - sideways * (dx_px * mpp)
+			+ horizontal * (dy_px * mpp / sin_tilt);
+		camera.eye = new_eye.normalized() * camera.eye.norm(); // hold altitude
+	}
+
+	// revolve the camera around whatever is at the center of the screen
+	// (raycast against the drawn terrain, sphere fallback). heading turns
+	// about the pivot's local up (positive increases heading); tilt swings
+	// about the horizontal screen-right axis through the pivot (positive
+	// tilts toward the horizon, clamped by the tilt limits)
+	void orbit(double heading_deg, double tilt_deg) {
+		if (!earth.ready()) return;
+		Vector3d pivot;
+		if (!earth.raycast(camera.eye, camera.direction, pivot)) return;
+		if (heading_deg != 0) orbitCamera(camera, pivot, -heading_deg * M_PI / 180.0);
+		if (tilt_deg != 0) orbitCameraTilt(camera, pivot, tilt_deg * M_PI / 180.0);
+	}
+
+	// what the camera is looking at, in degrees/meters; null when the view
+	// misses the planet. src tells whether the hit came from real terrain
+	// triangles ('mesh') or the sea-level sphere fallback ('sphere'), dist
+	// is meters from the eye — both for the pick debug overlay and tests
+	val pickCenter() {
+		Vector3d hit;
+		if (!earth.ready()) return val::null();
+		auto res = earth.raycast(camera.eye, camera.direction, hit);
+		if (res == earth_core_t::raycast_miss) return val::null();
+		auto r = hit.norm();
+		val o = val::object();
+		o.set("lat", asin(hit.z() / r) * 180.0 / M_PI);
+		o.set("lon", atan2(hit.y(), hit.x()) * 180.0 / M_PI);
+		o.set("alt", r - planetRadius());
+		o.set("dist", (hit - camera.eye).norm());
+		o.set("src", res == earth_core_t::raycast_mesh ? std::string("mesh") : std::string("sphere"));
+		return o;
+	}
+
 	// built-in flying controls; the host translates its pointer/keyboard
 	// events into this (yaw/pitch in radians for this frame). view_frame
 	// switches forward/back and raise/lower from ground-frame cruise/pedestal
@@ -207,6 +280,12 @@ EMSCRIPTEN_BINDINGS(earth) {
 		.function("getPose", &EarthView::getPose)
 		.function("setPose", &EarthView::setPose)
 		.function("setFov", &EarthView::setFov)
+		.function("setOrtho", &EarthView::setOrtho)
+		.function("getOrtho", &EarthView::getOrtho)
+		.function("orbit", &EarthView::orbit)
+		.function("zoomOrtho", &EarthView::zoomOrtho)
+		.function("panOrtho", &EarthView::panOrtho)
+		.function("pickCenter", &EarthView::pickCenter)
 		.function("setSkyColor", &EarthView::setSkyColor)
 		.function("setDebugLod", &EarthView::setDebugLod)
 		.function("fly", &EarthView::fly);

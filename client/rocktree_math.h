@@ -51,6 +51,21 @@ Matrix4d perspective (double fov_rad, double aspect_ratio, double near, double f
     return res;
 }
 
+Matrix4d orthographic (double half_width, double half_height, double near, double far)
+{
+    assert(half_width > 0);
+    assert(half_height > 0);
+    assert(far > near);
+
+    Matrix4d res = Matrix4d::Zero();
+    res(0,0) = 1.0 / half_width;
+    res(1,1) = 1.0 / half_height;
+    res(2,2) = - 2.0 / (far - near);
+    res(2,3) = - (far + near) / (far - near);
+    res(3,3) = 1.0;
+    return res;
+}
+
 Matrix4d lookAt(Vector3d eye, Vector3d center, Vector3d up) {
 
     auto f = (center - eye).normalized();

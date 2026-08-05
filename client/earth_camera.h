@@ -7,6 +7,10 @@ struct camera_t {
 	Vector3d eye;       // ecef meters
 	Vector3d direction; // unit
 	double fov;         // vertical, radians
+	// orthographic projection: the view extent follows what the fov would
+	// show at the terrain distance, so mode switches keep the apparent
+	// scale and the fov zoom controls keep working
+	bool ortho = false;
 };
 
 // geodetic pose on the spherical planetoid — the vocabulary a 2d map speaks.
@@ -51,6 +55,64 @@ geo_pose_t cameraToPose(const camera_t &cam, double planet_radius) {
 	auto horizontal = cam.direction - up * vertical;
 	p.heading = horizontal.norm() > 1e-9 ? atan2(horizontal.dot(east), horizontal.dot(north)) : 0;
 	return p;
+}
+
+// distance along the boresight to the reference sphere, with the altitude as
+// a fallback when the view misses it (looking at the sky). the anchor both
+// for the ortho view extent and for ortho zooming, so the two stay in step
+double centerDistance(const camera_t &cam, double planet_radius) {
+	auto od = cam.eye.dot(cam.direction);
+	auto disc = od * od - (cam.eye.dot(cam.eye) - planet_radius * planet_radius);
+	auto altitude = cam.eye.norm() - planet_radius;
+	auto dist = disc > 0 ? -od - sqrt(disc) : altitude;
+	if (!(dist > 0)) dist = fmax(1.0, altitude);
+	return dist;
+}
+
+// near the horizon an orthographic view stops being meaningful: the parallel
+// beam grazes the planet and the derived view extent blows up. keep the tilt
+// at least this far below the horizon while in ortho mode
+static const double ortho_min_tilt = -10.0 * M_PI / 180.0;
+
+void clampOrthoTilt(camera_t &cam) {
+	if (!cam.ortho) return;
+	auto up = cam.eye.normalized();
+	auto vertical = cam.direction.dot(up);
+	if (vertical <= sin(ortho_min_tilt)) return; // already steep enough
+	Vector3d horizontal = cam.direction - up * vertical;
+	if (horizontal.norm() < 1e-9) return;
+	horizontal.normalize();
+	cam.direction = horizontal * cos(ortho_min_tilt) + up * sin(ortho_min_tilt);
+}
+
+// revolve the camera around a pivot point (typically what's at the center of
+// the screen), turning about the pivot's local up. that axis passes through
+// the planet center, so the orbit preserves altitude exactly, and the pivot
+// itself is invariant: whatever was at the screen center stays there
+void orbitCamera(camera_t &cam, const Vector3d &pivot, double angle) {
+	AngleAxisd rot(angle, pivot.normalized());
+	cam.eye = rot * cam.eye;
+	cam.direction = (rot * cam.direction).normalized();
+}
+
+// revolve the camera around the pivot in the tilt direction: rotation about
+// the horizontal screen-right axis through the pivot, so whatever is at the
+// screen center stays there while the view swings between overhead and
+// oblique. the angle is clamped against the tilt limits (straight down, and
+// the ortho horizon floor) before applying, so hitting a limit stops the
+// orbit instead of un-pinning the pivot
+void orbitCameraTilt(camera_t &cam, const Vector3d &pivot, double angle) {
+	auto up = cam.eye.normalized();
+	Vector3d right = cam.direction.cross(up);
+	if (right.norm() < 1e-9) return; // looking straight down: right is undefined
+	right.normalize();
+	auto tilt = asin(fmax(-1.0, fmin(1.0, cam.direction.dot(up))));
+	auto shallowest = cam.ortho ? ortho_min_tilt : 0.0;
+	const auto steepest = -0.495 * M_PI; // matches the overhead pitch guard
+	angle = fmax(steepest, fmin(tilt + angle, shallowest)) - tilt;
+	AngleAxisd rot(angle, right);
+	cam.eye = pivot + rot * (cam.eye - pivot);
+	cam.direction = (rot * cam.direction).normalized();
 }
 
 // one frame of the built-in flying controls; shells translate their native
@@ -131,4 +193,6 @@ void applyCameraInput(camera_t &cam, const camera_input_t &in, double planet_rad
 	if (pot_altitude < 1000 * 1000 * 10) {
 		cam.eye = new_eye;
 	}
+
+	clampOrthoTilt(cam);
 }

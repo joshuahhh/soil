@@ -22,6 +22,12 @@ struct earth_core_t {
 	// needs to stay comfortably above the decode pool's thread count
 	std::atomic<int> nodes_in_flight{0};
 
+	// nodes actually drawn last frame with their octant masks, kept for the
+	// center-pick raycast. refreshed every updateAndDraw; valid to use
+	// between frames because eviction and bulk purge only run inside
+	// updateAndDraw (shells are single-threaded around the frame loop)
+	std::vector<std::pair<rocktree_t::node_t*, uint8_t>> drawn_nodes;
+
 	// per-section frame timing and bfs work counters, reported every 2s
 	double sec_bfs = 0, sec_dl = 0, sec_evict = 0, sec_draw = 0;
 	long cnt_oct = 0, cnt_cull = 0, cnt_lod = 0;
@@ -57,6 +63,105 @@ struct earth_core_t {
 
 	double radius() const { return planetoid->radius; }
 
+	// --- picking --------------------------------------------------------
+
+	// ray/obb slab test in the box frame (orientation columns are the box
+	// axes). true if the ray enters before t_max; entry t may be 0 when the
+	// origin is inside the box
+	static bool rayHitsObb(const Vector3d &origin, const Vector3d &dir,
+			const OrientedBoundingBox &obb, double t_max) {
+		Vector3d o = obb.orientation.transpose() * (origin - obb.center);
+		Vector3d d = obb.orientation.transpose() * dir;
+		double t0 = 0, t1 = t_max;
+		for (int i = 0; i < 3; i++) {
+			if (fabs(d[i]) < 1e-12) {
+				if (fabs(o[i]) > obb.extents[i]) return false;
+				continue;
+			}
+			auto ta = (-obb.extents[i] - o[i]) / d[i];
+			auto tb = ( obb.extents[i] - o[i]) / d[i];
+			if (ta > tb) std::swap(ta, tb);
+			t0 = fmax(t0, ta);
+			t1 = fmin(t1, tb);
+			if (t0 > t1) return false;
+		}
+		return true;
+	}
+
+	// möller–trumbore over the node's triangle strips, in mesh space. the
+	// ray is transformed without normalizing the direction, so t keeps its
+	// world-space meaning and stays comparable across nodes. mirrors the
+	// shader's octant masking: a triangle is skipped only when all three
+	// vertices are in masked octants (that surface is covered by a drawn
+	// finer node — hitting it instead would pick a point slightly off the
+	// visible terrain)
+	static void rayNodeNearest(const Vector3d &origin, const Vector3d &dir,
+			const rocktree_t::node_t *node, uint8_t octant_mask, double &best_t) {
+		Matrix4d mesh_from_globe = node->matrix_globe_from_mesh.inverse();
+		Vector3d o = (mesh_from_globe * Vector4d(origin.x(), origin.y(), origin.z(), 1.0)).head<3>();
+		Vector3d d = (mesh_from_globe * Vector4d(dir.x(), dir.y(), dir.z(), 0.0)).head<3>();
+		for (auto &mesh : node->meshes) {
+			auto verts = mesh.vertices.data();
+			auto vcount = mesh.vertices.size() / 8;
+			auto pos = [&](uint16_t idx) {
+				auto p = verts + (size_t)idx * 8; // 8-byte vertex, xyz in bytes 0-2
+				return Vector3d(p[0], p[1], p[2]);
+			};
+			for (size_t i = 2; i < mesh.indices.size(); i++) {
+				auto ia = mesh.indices[i-2], ib = mesh.indices[i-1], ic = mesh.indices[i];
+				if (ia == ib || ib == ic || ia == ic) continue; // strip degenerates
+				if (ia >= vcount || ib >= vcount || ic >= vcount) continue;
+				if ((octant_mask >> verts[(size_t)ia * 8 + 3] & 1)
+					&& (octant_mask >> verts[(size_t)ib * 8 + 3] & 1)
+					&& (octant_mask >> verts[(size_t)ic * 8 + 3] & 1)) continue;
+				Vector3d v0 = pos(ia);
+				Vector3d e1 = pos(ib) - v0;
+				Vector3d e2 = pos(ic) - v0;
+				Vector3d p = d.cross(e2);
+				auto det = e1.dot(p);
+				if (fabs(det) < 1e-12) continue;
+				auto inv = 1.0 / det;
+				Vector3d tv = o - v0;
+				auto u = tv.dot(p) * inv;
+				if (u < 0 || u > 1) continue;
+				Vector3d q = tv.cross(e1);
+				auto v = d.dot(q) * inv;
+				if (v < 0 || u + v > 1) continue;
+				auto t = e2.dot(q) * inv;
+				if (t > 0 && t < best_t) best_t = t;
+			}
+		}
+	}
+
+	// cast a world-space ray (dir unit) against the drawn scene: obb prune,
+	// then exact triangles. falls back to the planetoid sphere so picking
+	// still works while tiles stream in; misses only when the ray misses
+	// the planet entirely
+	enum raycast_result : int { raycast_miss = 0, raycast_mesh = 1, raycast_sphere = 2 };
+	raycast_result raycast(const Vector3d &origin, const Vector3d &dir, Vector3d &hit) {
+		if (!ready()) return raycast_miss;
+		double best_t = INFINITY;
+		for (auto &kv : drawn_nodes) {
+			auto node = kv.first;
+			if (node->dl_state != dl_state_downloaded) continue;
+			if (!rayHitsObb(origin, dir, node->obb, best_t)) continue;
+			rayNodeNearest(origin, dir, node, kv.second, best_t);
+		}
+		if (!isinf(best_t)) {
+			hit = origin + dir * best_t;
+			return raycast_mesh;
+		}
+		auto R = (double)planetoid->radius;
+		auto od = origin.dot(dir);
+		auto disc = od * od - (origin.dot(origin) - R * R);
+		if (disc < 0) return raycast_miss;
+		auto t = -od - sqrt(disc);
+		if (t <= 0) t = -od + sqrt(disc); // origin inside the sphere: take the exit
+		if (t <= 0) return raycast_miss;
+		hit = origin + dir * t;
+		return raycast_sphere;
+	}
+
 	// cull, schedule downloads, evict, draw. the shell has already begun the
 	// frame (renderFrameBegin) and will end it after this returns
 	void updateAndDraw(render_ctx_t &ctx, const camera_t &cam, int width, int height, double dt_ms) {
@@ -82,7 +187,25 @@ struct earth_core_t {
 		auto far = horizon + peak_horizon;
 		if (near >= far) near = far - 1;
 		if (isnan(far) || far < near) far = near + 1;
-		Matrix4d projection = perspective(fov, aspect_ratio, near, far);
+		Matrix4d projection;
+		double ortho_half_extent = 0; // vertical half-extent in meters (ortho only)
+		if (cam.ortho) {
+			// the view extent is what the fov would show at the distance of the
+			// ground at screen center, so mode switches keep the apparent scale
+			auto dist = centerDistance(cam, planet_radius);
+			ortho_half_extent = fmax(1.0, dist * tan(fov / 2.0));
+			// the parallel beam is a box, not a cone from the eye: in a tilted
+			// view its bottom edge reaches ground beside or behind the camera
+			// plane, and its top edge starts half an extent above the eye, so
+			// it sees past the eye's own horizon. open the clip range up to a
+			// full horizon each way, plus the beam's half-diagonal on the far
+			// side (a negative near is fine in ortho)
+			far += ortho_half_extent * sqrt(1.0 + aspect_ratio * aspect_ratio);
+			near = -far;
+			projection = orthographic(ortho_half_extent * aspect_ratio, ortho_half_extent, near, far);
+		} else {
+			projection = perspective(fov, aspect_ratio, near, far);
+		}
 
 		auto t0 = ticksMs();
 
@@ -154,16 +277,23 @@ struct earth_core_t {
 
 					// level of detail
 					{
-						auto t = Affine3d().Identity();
-						t.translate(eye + (eye-node->obb.center).norm() * direction);
-						auto m = viewprojection * t;
-						auto s = m(3, 3);
 						auto texels_per_meter = 1.0f / node->meters_per_texel;
 						auto wh = width < height ? width : height;
-						// zooming (narrowing the fov) magnifies the scene, so it
-						// needs proportionally finer tiles. 1 at the default fov
-						auto zoom = tan(0.125 * M_PI) / tan(cam.fov / 2.0);
-						auto r = (2.0*(1.0/s)) * wh * zoom;
+						double r;
+						if (cam.ortho) {
+							// parallel projection: pixels per meter is the same at
+							// every depth, set entirely by the view extent
+							r = 2.0 * wh * tan(0.125 * M_PI) / ortho_half_extent;
+						} else {
+							auto t = Affine3d().Identity();
+							t.translate(eye + (eye-node->obb.center).norm() * direction);
+							auto m = viewprojection * t;
+							auto s = m(3, 3);
+							// zooming (narrowing the fov) magnifies the scene, so it
+							// needs proportionally finer tiles. 1 at the default fov
+							auto zoom = tan(0.125 * M_PI) / tan(cam.fov / 2.0);
+							r = (2.0*(1.0/s)) * wh * zoom;
+						}
 						if (texels_per_meter > r) continue;
 					}
 
@@ -369,6 +499,8 @@ struct earth_core_t {
 
 		renderSetDebugLod(ctx, debug_lod);
 
+		drawn_nodes.clear();
+
 		// reverse level order: children before parents
 		for (auto kv = potential_nodes.rbegin(); kv != potential_nodes.rend(); ++kv) {
 			auto &full_path = kv->first;
@@ -386,6 +518,8 @@ struct earth_core_t {
 			static const bool no_mask_debug = getenv("EARTH_NO_MASK") != nullptr;
 			auto self_mask = no_mask_debug ? (uint8_t)0 : mask_map[full_path];
 			if (self_mask == 0xff) continue;
+
+			drawn_nodes.push_back({ node, self_mask });
 
 			// octants where a finer tile is wanted but not drawn (still
 			// downloading). children are drawn before parents here, so mask_map

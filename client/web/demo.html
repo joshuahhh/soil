@@ -17,18 +17,41 @@
   html, body { margin: 0; height: 100%; }
   body { display: flex; }
   #map, #right { flex: 1; height: 100%; }
+  #right { position: relative; }
   #globe { width: 100%; height: 100%; display: block; outline: none; }
+  /* pick debug: reticle at the exact screen center of the 3d view (what the
+     center raycast should be looking through) plus a readout of the hit */
+  #cross { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%);
+           pointer-events: none; z-index: 5; }
+  #pickinfo { position: absolute; right: 8px; bottom: 8px; z-index: 10; color: #fff;
+              background: rgba(0,0,0,.55); font: 12px monospace; padding: 6px 8px;
+              border-radius: 4px; pointer-events: none; }
   #hint { position: fixed; right: 8px; top: 8px; z-index: 10; color: #fff;
           background: rgba(0,0,0,.55); font: 12px sans-serif; padding: 6px 8px;
           border-radius: 4px; }
 </style>
 <div id="map"></div>
-<div id="right"><canvas id="globe" tabindex="0"></canvas></div>
+<div id="right"><canvas id="globe" tabindex="0"></canvas>
+  <svg id="cross" width="33" height="33" viewBox="-16 -16 32 32">
+    <g stroke="#000" stroke-width="3.5" fill="none" opacity=".6">
+      <circle r="8"/><path d="M0,-14 V-5 M0,5 V14 M-14,0 H-5 M5,0 H14"/>
+    </g>
+    <g stroke="#ff7f0e" stroke-width="1.5" fill="none">
+      <circle r="8"/><path d="M0,-14 V-5 M0,5 V14 M-14,0 H-5 M5,0 H14"/>
+    </g>
+  </svg>
+  <div id="pickinfo"></div>
+</div>
 <div id="hint"></div>
 <script>
-  const hintText = 'WASD move · E/Q up/down · hold space: view-frame · arrows look · ' +
-    'Z/X zoom · -/= speed · shift slow · click map to teleport';
-  document.getElementById('hint').textContent = hintText;
+  // per-mode control hints; the active one is set by updateHint() below
+  const HINTS = {
+    persp: 'WASD move · E/Q up/down · hold space: view-frame · arrows/drag look · ' +
+      'Z/X zoom · -/= speed · shift slow · O ortho · C pick debug · click map to teleport',
+    ortho: 'WASD/drag pan · arrows orbit around center · wheel/Z/X/E/Q zoom · ' +
+      '-/= speed · shift slow · O perspective · C pick debug · click map to teleport',
+  };
+  document.getElementById('hint').textContent = HINTS.persp;
 </script>
 <script src="earth.js"></script>
 <script>
@@ -98,7 +121,7 @@
 
   // view state (camera pose, fov, speed gain, map zoom) persists in
   // localstorage so a reload puts you back where you were
-  const DEFAULT_VIEW = { lat: 40.7605, lon: -74.0135, alt: 2500, heading: 0, tilt: -25, fov: 45, zoom: 12, gain: 1 };
+  const DEFAULT_VIEW = { lat: 40.7605, lon: -74.0135, alt: 2500, heading: 0, tilt: -25, fov: 45, zoom: 12, gain: 1, ortho: false };
   const START = (() => {
     try {
       const v = JSON.parse(localStorage.getItem('earth-view'));
@@ -113,7 +136,7 @@
     try {
       localStorage.setItem('earth-view', JSON.stringify({
         lat: p.lat, lon: p.lon, alt: p.alt, heading: p.heading, tilt: p.tilt,
-        fov: p.fov, zoom: map.getZoom(), gain,
+        fov: p.fov, zoom: map.getZoom(), gain, ortho,
       }));
     } catch (e) {}
   };
@@ -145,23 +168,59 @@
     if (el) el.style.transform = `rotate(${deg}deg)`;
   };
 
+  // pick debug (C to toggle): a reticle at the exact center of the 3d view,
+  // an orange dot on the map at what the center raycast hit (the orbit
+  // pivot), and a readout of the hit distance/altitude and whether it came
+  // from terrain triangles or the sea-level sphere fallback. if the orbit
+  // pivot looks wrong on screen, the orange dot shows where it actually is
+  let pickDebug = true;
+  const pickEl = document.createElement('div');
+  pickEl.style.cssText = 'width:12px;height:12px;border-radius:50%;background:#ff7f0e;' +
+    'border:2.5px solid #fff;pointer-events:none;';
+  const pickMarker = new maplibregl.Marker({ element: pickEl });
+  let pickMarkerOn = false;
+  const setPickDebug = (on) => {
+    pickDebug = on;
+    document.getElementById('cross').style.display = on ? '' : 'none';
+    document.getElementById('pickinfo').style.display = on ? '' : 'none';
+    if (!on && pickMarkerOn) { pickMarker.remove(); pickMarkerOn = false; }
+  };
+  const updatePickDebug = () => {
+    const pick = view.pickCenter();
+    if (pick) {
+      // position before addTo: a marker on the map without a position throws
+      // from maplibre's own update events (e.g. when the style loads)
+      pickMarker.setLngLat([pick.lon, pick.lat]);
+      if (!pickMarkerOn) { pickMarker.addTo(map); pickMarkerOn = true; }
+      document.getElementById('pickinfo').textContent =
+        `pick: ${pick.src} · dist ${Math.round(pick.dist)}m · alt ${Math.round(pick.alt)}m`;
+    } else {
+      if (pickMarkerOn) { pickMarker.remove(); pickMarkerOn = false; }
+      document.getElementById('pickinfo').textContent = 'pick: miss';
+    }
+  };
+  setPickDebug(pickDebug);
+
   // --- input on the canvas -> built-in flying controls ----------------------
   // ground frame: WASD cruise/truck, Q/E pedestal. hold Space for the view
   // frame: W/S dolly along the view, Q/E boom along view-up. arrows pan/tilt
   // so no mouse is needed. Z/X zoom (fov). -/= sticky speed gain. shift slow
   const keys = {};
-  const handled = new Set(['KeyW','KeyA','KeyS','KeyD','KeyQ','KeyE','KeyZ','KeyX',
+  const handled = new Set(['KeyW','KeyA','KeyS','KeyD','KeyQ','KeyE','KeyZ','KeyX','KeyO','KeyC',
     'Space','ArrowLeft','ArrowRight','ArrowUp','ArrowDown','Minus','Equal']);
   let gain = 1; // re-initialized from the saved view once it loads
-  const gainBadge = () => {
-    document.getElementById('hint').textContent =
-      hintText + (gain !== 1 ? `  [speed x${gain >= 1 ? gain : '1/' + (1/gain)}]` : '');
+  let ortho = false;
+  const updateHint = () => {
+    document.getElementById('hint').textContent = HINTS[ortho ? 'ortho' : 'persp']
+      + (gain !== 1 ? `  [speed x${gain >= 1 ? gain : '1/' + (1/gain)}]` : '');
   };
   canvas.addEventListener('keydown', (e) => {
     if (handled.has(e.code)) e.preventDefault();
     keys[e.code] = true;
-    if (e.code === 'Minus' && !e.repeat) { gain = Math.max(1/16, gain/2); gainBadge(); }
-    if (e.code === 'Equal' && !e.repeat) { gain = Math.min(16, gain*2); gainBadge(); }
+    if (e.code === 'Minus' && !e.repeat) { gain = Math.max(1/16, gain/2); updateHint(); }
+    if (e.code === 'Equal' && !e.repeat) { gain = Math.min(16, gain*2); updateHint(); }
+    if (e.code === 'KeyO' && !e.repeat) { ortho = !ortho; view.setOrtho(ortho); updateHint(); }
+    if (e.code === 'KeyC' && !e.repeat) setPickDebug(!pickDebug);
   });
   canvas.addEventListener('keyup', (e) => { keys[e.code] = false; });
   canvas.addEventListener('blur', () => { for (const k in keys) keys[k] = false; });
@@ -174,7 +233,13 @@
   canvas.addEventListener('pointerup', () => { dragging = false; });
   canvas.addEventListener('pointermove', (e) => {
     if (!dragging) return;
-    // grab-the-world: dragging pulls the scene with the pointer
+    // grab-the-world: in perspective, dragging pulls the scene with the
+    // pointer by looking around; in ortho it pans instead (WASD-equivalent
+    // camera translation, so the ground follows the pointer)
+    if (ortho) {
+      view.panOrtho(e.movementX, e.movementY, canvas.clientHeight);
+      return;
+    }
     yaw -= e.movementX * 0.003;
     pitch += e.movementY * 0.003;
   });
@@ -182,6 +247,9 @@
   // native app (which uses fov *= 0.9^wheel; setFov clamps to 1..100 deg)
   canvas.addEventListener('wheel', (e) => {
     e.preventDefault();
+    // in ortho, zooming is a dolly (elevation is not a real degree of
+    // freedom there); in perspective it narrows the fov like the native app
+    if (ortho) { view.zoomOrtho(Math.pow(0.9, e.deltaY / 100)); return; }
     const p = view.getPose();
     view.setFov(p.fov * Math.pow(0.9, -e.deltaY / 100));
   }, { passive: false });
@@ -295,29 +363,45 @@
       view.setPose(START.lat, START.lon, START.alt, START.heading, START.tilt);
       view.setFov(START.fov);
       gain = START.gain;
-      gainBadge();
+      ortho = !!START.ortho;
+      view.setOrtho(ortho);
+      updateHint();
     }
 
     const slow = !!(keys.ShiftLeft || keys.ShiftRight);
-    // arrows pan/tilt at fixed angular rates (rad/s), shift-slowed
+    // arrows pan/tilt at fixed angular rates (rad/s), shift-slowed. in
+    // ortho mode all four arrows instead orbit around whatever is at the
+    // center of the screen (raycast into the scene on the wasm side):
+    // left/right around its up axis, up/down in tilt
     const rot = (slow ? 0.1 : 1) * dt / 1000;
-    if (keys.ArrowRight) yaw += 1.2 * rot;
-    if (keys.ArrowLeft) yaw -= 1.2 * rot;
-    if (keys.ArrowUp) pitch += 0.9 * rot;
-    if (keys.ArrowDown) pitch -= 0.9 * rot;
-    // z/x zoom like the wheel
+    const orbitH = ortho ? ((keys.ArrowRight ? 1 : 0) - (keys.ArrowLeft ? 1 : 0)) : 0;
+    const orbitV = ortho ? ((keys.ArrowUp ? 1 : 0) - (keys.ArrowDown ? 1 : 0)) : 0;
+    if ((orbitH || orbitV) && view.ready()) view.orbit(orbitH * 45 * rot, orbitV * 34 * rot); // deg
+    if (!ortho && keys.ArrowRight) yaw += 1.2 * rot;
+    if (!ortho && keys.ArrowLeft) yaw -= 1.2 * rot;
+    if (!ortho && keys.ArrowUp) pitch += 0.9 * rot;
+    if (!ortho && keys.ArrowDown) pitch -= 0.9 * rot;
+    // z/x zoom like the wheel; in ortho E/Q join them as zoom too, since a
+    // parallel projection has no meaningful elevation to pedestal along
     if (!!keys.KeyZ !== !!keys.KeyX) {
-      const p = view.getPose();
-      view.setFov(p.fov * Math.pow(0.9, (dt / 150) * (keys.KeyZ ? 1 : -1)));
+      if (ortho) {
+        view.zoomOrtho(Math.pow(0.9, (dt / 150) * (keys.KeyZ ? -1 : 1)));
+      } else {
+        const p = view.getPose();
+        view.setFov(p.fov * Math.pow(0.9, (dt / 150) * (keys.KeyZ ? 1 : -1)));
+      }
+    }
+    if (ortho && !!keys.KeyE !== !!keys.KeyQ) {
+      view.zoomOrtho(Math.pow(0.9, (dt / 150) * (keys.KeyE ? 1 : -1))); // E out, Q in
     }
 
-    const flying = dragging || yaw !== 0 || pitch !== 0
+    const flying = dragging || yaw !== 0 || pitch !== 0 || orbitH !== 0 || orbitV !== 0
       || keys.KeyW || keys.KeyS || keys.KeyA || keys.KeyD || keys.KeyQ || keys.KeyE;
     if (flying && !following) following = true;
 
     view.fly(yaw, pitch,
       !!keys.KeyW, !!keys.KeyS, !!keys.KeyA, !!keys.KeyD,
-      !!keys.KeyE, !!keys.KeyQ,
+      !ortho && !!keys.KeyE, !ortho && !!keys.KeyQ,
       slow, !!keys.Space, gain, dt);
     yaw = 0;
     pitch = 0;
@@ -334,6 +418,7 @@
       // converging even after the camera stops; paused while the pointer is
       // down on the map so drag gestures aren't cancelled mid-flight
       if (following && !mapPointerDown) followMarker({ lat: p.lat, lng: p.lon }, dt);
+      if (pickDebug) updatePickDebug();
 
       saveTimer += dt;
       if (saveTimer > 1000) {
