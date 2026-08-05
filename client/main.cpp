@@ -445,6 +445,7 @@ int main(int argc, char* argv[]) {
 	auto ctx = new render_ctx_t();
 
 	renderInit(*ctx, sdl_window);
+	if (getenv("EARTH_FORCE_JPG")) texture_s3tc_supported = false; // debug: exercise the jpg texture path natively
 	earth.log_sched = bench_mode;
 	earth.load();
 

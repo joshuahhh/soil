@@ -134,9 +134,23 @@ void populateNode(rocktree_t::node_t *node, std::unique_ptr<NodeData> node_data)
 			unsigned char* pixels = stbi_load_from_memory(&data[0], tex.size(), &width, &height, &comp, 0);
 			assert(pixels != NULL);
 			assert (width == texture.width() && height == texture.height() && comp == 3);
-			m.texture = std::vector<uint8_t>(pixels, pixels + width * height * comp);
+			// the jpg variant of the atlas is stored flipped vertically
+			// relative to the crn/dxt variant the uv transform expects
+			m.texture.resize((size_t)width * height * comp);
+			for (int y = 0; y < height; y++)
+				memcpy(m.texture.data() + (size_t)y * width * comp,
+					pixels + (size_t)(height - 1 - y) * width * comp,
+					(size_t)width * comp);
 			stbi_image_free(pixels);
 			m.texture_format = rocktree_t::texture_format_rgb;
+			{
+				// debug: catch tiles whose decoded jpg is (near-)black
+				long sum = 0;
+				for (size_t i = 0; i < m.texture.size(); i += 97) sum += m.texture[i];
+				auto avg = (int)(sum / (m.texture.size() / 97 + 1));
+				if (avg < 8) printf("jpgtex dark: %s %dx%d avg=%d jpgbytes=%zu\n",
+					node->request.node_key().path().c_str(), width, height, avg, tex.size());
+			}
 		} else if (texture.format() == Texture_Format_CRN_DXT1) {
 			auto src_size = tex.size();
 			auto src = (uint8_t*)tex.data();

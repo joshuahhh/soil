@@ -35,7 +35,7 @@ void meshTexImage2d(const rocktree_t::node_t::mesh_t &mesh) {
 void bufferMesh(rocktree_t::node_t::mesh_t &mesh) {
 	if (mesh.buffered) fprintf(stderr, "mesh already buffered\n"), abort();
 
-	glGenBuffers(1, &mesh.vertex_buffer);						
+	glGenBuffers(1, &mesh.vertex_buffer);
 	glBindBuffer(GL_ARRAY_BUFFER, mesh.vertex_buffer);
 	glBufferData(GL_ARRAY_BUFFER, mesh.vertices.size() * sizeof(unsigned char), mesh.vertices.data(), GL_STATIC_DRAW);
 	glGenBuffers(1, &mesh.index_buffer);

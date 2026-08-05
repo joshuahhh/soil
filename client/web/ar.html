@@ -99,11 +99,6 @@
     });
   });
   status('loading engine…');
-  if (!crossOriginIsolated && !sessionStorage.getItem('coiReloaded')) {
-    // first visit: the isolation service worker is installing and will
-    // reload; note it so a second failure reads as a real error
-    sessionStorage.setItem('coiReloaded', '1');
-  }
 
   // --- persisted calibration ------------------------------------------------
   const cal = (() => {
@@ -129,11 +124,24 @@
   };
   let Module;
   try {
-    if (!crossOriginIsolated) throw new Error('page is not cross-origin isolated (browser/service-worker issue)');
+    if (!crossOriginIsolated) {
+      const sw = 'serviceWorker' in navigator;
+      const controlled = sw && !!navigator.serviceWorker.controller;
+      if (!sessionStorage.getItem('coiRetried')) {
+        // the isolation service worker may still be installing; give it a
+        // beat and reload once ourselves in case its auto-reload didn't fire
+        sessionStorage.setItem('coiRetried', '1');
+        status('installing isolation worker, reloading…');
+        setTimeout(() => location.reload(), 1500);
+        return;
+      }
+      throw new Error('not cross-origin isolated (serviceworker:' + sw +
+        ' controlled:' + controlled + ') — try a normal tab, not an in-app browser');
+    }
+    sessionStorage.removeItem('coiRetried');
     Module = await createEarthModule();
   } catch (e) {
     status('engine failed to load: ' + e.message);
-    $('start').remove?.();
     throw e;
   }
   const fetchTile = async (path, id) => {
