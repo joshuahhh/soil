@@ -145,7 +145,13 @@ struct EarthView {
 		p.alt = alt;
 		p.heading = heading * M_PI / 180.0;
 		p.tilt = tilt * M_PI / 180.0;
+		// poseToCamera builds a fresh camera_t; carry over the state that
+		// isn't part of a pose (otherwise e.g. a map-click teleport silently
+		// drops orthographic mode)
+		auto ortho = camera.ortho;
 		camera = poseToCamera(p, planetRadius(), camera.fov);
+		camera.ortho = ortho;
+		clampOrthoTilt(camera);
 	}
 
 	void setFov(double deg) {
