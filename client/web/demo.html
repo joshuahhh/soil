@@ -47,9 +47,9 @@
   // per-mode control hints; the active one is set by updateHint() below
   const HINTS = {
     persp: 'WASD move · E/Q up/down · hold space: view-frame · arrows/drag look · ' +
-      'Z/X zoom · -/= speed · shift slow · O ortho · C pick debug · click map to teleport',
+      'Z/X zoom · -/= speed · shift slow · O ortho · C pick debug · L lod debug · click map to teleport',
     ortho: 'WASD/drag pan · arrows orbit around center · wheel/Z/X/E/Q zoom · ' +
-      '-/= speed · shift slow · O perspective · C pick debug · click map to teleport',
+      '-/= speed · shift slow · O perspective · C pick debug · L lod debug · click map to teleport',
   };
   document.getElementById('hint').textContent = HINTS.persp;
 </script>
@@ -207,10 +207,11 @@
   // frame: W/S dolly along the view, Q/E boom along view-up. arrows pan/tilt
   // so no mouse is needed. Z/X zoom (fov). -/= sticky speed gain. shift slow
   const keys = {};
-  const handled = new Set(['KeyW','KeyA','KeyS','KeyD','KeyQ','KeyE','KeyZ','KeyX','KeyO','KeyC',
+  const handled = new Set(['KeyW','KeyA','KeyS','KeyD','KeyQ','KeyE','KeyZ','KeyX','KeyO','KeyC','KeyL',
     'Space','ArrowLeft','ArrowRight','ArrowUp','ArrowDown','Minus','Equal']);
   let gain = 1; // re-initialized from the saved view once it loads
   let ortho = false;
+  let debugLod = false;
   const updateHint = () => {
     document.getElementById('hint').textContent = HINTS[ortho ? 'ortho' : 'persp']
       + (gain !== 1 ? `  [speed x${gain >= 1 ? gain : '1/' + (1/gain)}]` : '');
@@ -222,6 +223,9 @@
     if (e.code === 'Equal' && !e.repeat) { gain = Math.min(16, gain*2); updateHint(); }
     if (e.code === 'KeyO' && !e.repeat) { ortho = !ortho; view.setOrtho(ortho); updateHint(); }
     if (e.code === 'KeyC' && !e.repeat) setPickDebug(!pickDebug);
+    // like the native app's L key: tint octants red where a finer tile is
+    // wanted but not yet downloaded
+    if (e.code === 'KeyL' && !e.repeat) { debugLod = !debugLod; view.setDebugLod(debugLod); }
   });
   canvas.addEventListener('keyup', (e) => { keys[e.code] = false; });
   canvas.addEventListener('blur', () => { for (const k in keys) keys[k] = false; });
