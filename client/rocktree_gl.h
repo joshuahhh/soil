@@ -18,6 +18,9 @@ struct gl_ctx_t {
 void meshTexImage2d(const rocktree_t::node_t::mesh_t &mesh) {
 	switch (mesh.texture_format) {
 	case rocktree_t::texture_format_rgb:
+		// tightly packed rgb rows; without this, widths whose row size isn't
+		// a multiple of 4 upload skewed (the default unpack alignment is 4)
+		glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
 		glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, mesh.texture_width, mesh.texture_height, 0, GL_RGB, GL_UNSIGNED_BYTE, mesh.texture.data());
 		break;
 	case rocktree_t::texture_format_dxt1:
@@ -218,7 +221,13 @@ void renderInit(render_ctx_t &ctx, void *) {
 		"}",
 
 		"#ifdef GL_ES\n"
+		// real mobile gpus execute mediump as fp16, which garbles atlas uv
+		// interpolation; use highp where the hardware offers it
+		"#ifdef GL_FRAGMENT_PRECISION_HIGH\n"
+		"precision highp float;\n"
+		"#else\n"
 		"precision mediump float;\n"
+		"#endif\n"
 		"#endif\n"
 		"uniform sampler2D texture;"
 		"uniform bool debug_lod;"
