@@ -121,7 +121,8 @@
 
   // view state (camera pose, fov, speed gain, map zoom) persists in
   // localstorage so a reload puts you back where you were
-  const DEFAULT_VIEW = { lat: 40.7605, lon: -74.0135, alt: 2500, heading: 0, tilt: -25, fov: 45, zoom: 12, gain: 1, ortho: false };
+  // the seattle skyline from out on elliott bay
+  const DEFAULT_VIEW = { lat: 47.5980, lon: -122.3750, alt: 800, heading: 65, tilt: -12, fov: 45, zoom: 12, gain: 1, ortho: false };
   const START = (() => {
     try {
       const v = JSON.parse(localStorage.getItem('earth-view'));
