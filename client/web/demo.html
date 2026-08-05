@@ -1,5 +1,5 @@
 <!doctype html>
-<!-- split-screen demo: leaflet slippy map on the left, the earth renderer on
+<!-- split-screen demo: maplibre gl slippy map on the left, the earth renderer on
      an ordinary canvas on the right, two-way synced. tiles are cached in
      indexeddb via the js fetch hook.
 
@@ -11,8 +11,8 @@
 <title>earth split-screen demo</title>
 <script>window.coi = { coepCredentialless: () => true };</script>
 <script src="coi-serviceworker.js"></script>
-<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
-<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<link rel="stylesheet" href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css">
+<script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
 <style>
   html, body { margin: 0; height: 100%; }
   body { display: flex; }
@@ -118,28 +118,27 @@
   };
   addEventListener('beforeunload', saveView);
 
-  // --- leaflet --------------------------------------------------------------
-  const map = L.map('map').setView([START.lat, START.lon], START.zoom);
-  L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
-    maxZoom: 19,
-    attribution: '&copy; OpenStreetMap contributors',
-    // cors-mode tile requests satisfy the page's cross-origin-embedder-policy
-    // even in strict require-corp mode
-    crossOrigin: 'anonymous',
-  }).addTo(map);
-  // camera marker: a dot with a view cone that rotates with the heading
-  const camIcon = L.divIcon({
-    className: '',
-    html: '<svg id="camIcon" width="44" height="44" viewBox="-22 -22 44 44" style="display:block">' +
-      '<path d="M0,-3 L-13,-19 A21,21 0 0 1 13,-19 Z" fill="rgba(66,133,244,.4)"/>' +
-      '<circle r="5.5" fill="#4285f4" stroke="#fff" stroke-width="2.5"/></svg>',
-    iconSize: [44, 44],
-    iconAnchor: [22, 22],
+  // --- maplibre -------------------------------------------------------------
+  const map = new maplibregl.Map({
+    container: 'map',
+    style: 'https://tiles.openfreemap.org/styles/liberty',
+    center: [START.lon, START.lat],
+    zoom: START.zoom,
+    dragRotate: false, // keep the map north-up
+    pitchWithRotate: false,
   });
-  const marker = L.marker([START.lat, START.lon], {
-    icon: camIcon,
-    interactive: false, // clicks pass through to the map (teleport)
-  }).addTo(map);
+  map.touchZoomRotate.disableRotation();
+  map.keyboard.disable(); // arrows belong to the flight canvas
+  // camera marker: a dot with a view cone that rotates with the heading.
+  // pointer-events none so clicks pass through to the map (teleport)
+  const markerEl = document.createElement('div');
+  markerEl.style.pointerEvents = 'none';
+  markerEl.innerHTML =
+    '<svg id="camIcon" width="44" height="44" viewBox="-22 -22 44 44" style="display:block">' +
+    '<path d="M0,-3 L-13,-19 A21,21 0 0 1 13,-19 Z" fill="rgba(66,133,244,.4)"/>' +
+    '<circle r="5.5" fill="#4285f4" stroke="#fff" stroke-width="2.5"/></svg>';
+  const marker = new maplibregl.Marker({ element: markerEl })
+    .setLngLat([START.lon, START.lat]).addTo(map);
   const setMarkerHeading = (deg) => {
     const el = document.getElementById('camIcon');
     if (el) el.style.transform = `rotate(${deg}deg)`;
@@ -193,29 +192,36 @@
   // when follow mode re-engages); grabbing the map stops the following
   let following = true;
   let posed = false;
-  let zooming = false;
 
-  // locked mode zooms around the marker (= map center); free mode keeps
-  // leaflet's normal zoom-toward-pointer. leaflet reads these options live
-  const setZoomAnchor = (locked) => {
-    map.options.scrollWheelZoom = locked ? 'center' : true;
-    map.options.doubleClickZoom = locked ? 'center' : true;
-    map.options.touchZoom = locked ? 'center' : true;
-  };
-  setZoomAnchor(true);
-  map.on('zoomstart', () => { zooming = true; });
-  map.on('zoomend', () => { zooming = false; });
+  // while the pointer is down on the map, pause follow updates entirely:
+  // the per-frame jumpTo would cancel maplibre's drag gesture mid-flight
+  // (the aborted drag then even lands as a click -> surprise teleport)
+  let mapPointerDown = false;
+  const mapEl = document.getElementById('map');
+  mapEl.addEventListener('pointerdown', () => { mapPointerDown = true; });
+  addEventListener('pointerup', () => { mapPointerDown = false; });
 
-  map.on('dragstart', () => { following = false; setZoomAnchor(false); });
+  map.on('dragstart', () => { following = false; });
   map.on('click', (e) => {
     if (!view.ready()) return;
     const p = view.getPose();
-    view.setPose(e.latlng.lat, e.latlng.lng, p.alt, p.heading, p.tilt);
+    view.setPose(e.lngLat.lat, e.lngLat.lng, p.alt, p.heading, p.tilt);
   });
+
+  // locked-mode wheel zoom: handle it ourselves with an unanimated setZoom,
+  // which zooms around the center — where the follow keeps the marker — so
+  // it can't fight the per-frame follow updates. free mode gets maplibre's
+  // native pointer-anchored zoom
+  document.getElementById('map').addEventListener('wheel', (e) => {
+    if (!following) return;
+    e.preventDefault();
+    e.stopPropagation();
+    map.setZoom(map.getZoom() - e.deltaY * 0.005);
+  }, { capture: true, passive: false });
 
   // per-frame exponential ease of the map center toward the marker: smooth
   // when follow mode re-engages far away, and tight tracking during flight.
-  // no leaflet animations — they lock the map for their whole duration,
+  // no built-in map animations — they lock the map for their whole duration,
   // which falls apart when the camera covers a large distance every frame.
   // an exponential ease chasing a moving target always lags it by
   // velocity*tau, so aim at the marker's position led by its (smoothed)
@@ -253,7 +259,7 @@
       nlat = latlng.lat;
       nlng = latlng.lng;
     }
-    map.panTo([nlat, nlng], { animate: false });
+    map.jumpTo({ center: [nlng, nlat] });
   };
 
   // for devtools poking and automated testing
@@ -290,10 +296,7 @@
 
     const flying = dragging || yaw !== 0 || pitch !== 0
       || keys.KeyW || keys.KeyS || keys.KeyA || keys.KeyD || keys.KeyQ || keys.KeyE;
-    if (flying && !following) {
-      following = true;
-      setZoomAnchor(true);
-    }
+    if (flying && !following) following = true;
 
     view.fly(yaw, pitch,
       !!keys.KeyW, !!keys.KeyS, !!keys.KeyA, !!keys.KeyD,
@@ -308,12 +311,12 @@
       setMarkerHeading(p.heading);
       if (Math.abs(p.lat - lastSynced.lat) > 1e-7 || Math.abs(p.lon - lastSynced.lon) > 1e-7) {
         lastSynced = { lat: p.lat, lon: p.lon };
-        marker.setLatLng([p.lat, p.lon]);
+        marker.setLngLat([p.lon, p.lat]);
       }
       // runs every frame (not just on movement) so the ease finishes
-      // converging even after the camera stops. paused during zoom
-      // animations, which are already anchored on the marker in locked mode
-      if (following && !zooming) followMarker(L.latLng(p.lat, p.lon), dt);
+      // converging even after the camera stops; paused while the pointer is
+      // down on the map so drag gestures aren't cancelled mid-flight
+      if (following && !mapPointerDown) followMarker({ lat: p.lat, lng: p.lon }, dt);
 
       saveTimer += dt;
       if (saveTimer > 1000) {
