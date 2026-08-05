@@ -15,7 +15,9 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
 <title>earth camera match</title>
-<script>window.coi = { coepCredentialless: () => true };</script>
+<!-- require-corp (not credentialless): firefox doesn't support credentialless
+     coep, and this page has no cross-origin no-cors subresources to need it -->
+<script>window.coi = { coepCredentialless: () => false };</script>
 <script src="coi-serviceworker.js"></script>
 <style>
   html, body { margin: 0; height: 100%; background: #000; overflow: hidden;
@@ -35,7 +37,13 @@
   #start { position: fixed; inset: 0; z-index: 20; display: flex;
     align-items: center; justify-content: center; background: #000c;
     color: #fff; font-size: 20px; }
+  #errors { position: fixed; left: 0; right: 0; top: 0; z-index: 30;
+    display: none; max-height: 40%; overflow-y: auto; margin: 0;
+    padding: 8px max(8px, env(safe-area-inset-right)) 8px max(8px, env(safe-area-inset-left));
+    background: rgba(160, 20, 20, .92); color: #fff;
+    font: 11px/1.5 monospace; white-space: pre-wrap; word-break: break-all; }
 </style>
+<pre id="errors" title="tap to dismiss"></pre>
 <video id="video" autoplay muted playsinline></video>
 <canvas id="globe"></canvas>
 <div id="hud">
@@ -49,10 +57,53 @@
 <div id="start"><div>tap to start<br><small>(needs location &amp; motion access)</small></div></div>
 <script src="earth.js"></script>
 <script>
+// on-page error console: this runs on phones, where nobody has devtools.
+// uncaught errors, unhandled rejections, and console.error (which includes
+// the wasm module's stderr) all land in a red tap-to-dismiss panel
+(() => {
+  const box = document.getElementById('errors');
+  const lines = [];
+  const show = (msg) => {
+    lines.push(new Date().toTimeString().slice(0, 8) + '  ' + msg);
+    while (lines.length > 20) lines.shift();
+    box.textContent = lines.join('\n');
+    box.style.display = 'block';
+  };
+  box.addEventListener('click', () => { box.style.display = 'none'; });
+  window.addEventListener('error', (e) => show(
+    (e.message || 'error') + (e.filename ? '  @' + e.filename.split('/').pop() + ':' + e.lineno : '')));
+  window.addEventListener('unhandledrejection', (e) => show(
+    'unhandled promise: ' + ((e.reason && e.reason.message) || e.reason)));
+  const orig = console.error.bind(console);
+  console.error = (...a) => { orig(...a); show(a.map(String).join(' ')); };
+})();
 (async () => {
   const MOCK = new URLSearchParams(location.search).has('mock');
   const $ = (id) => document.getElementById(id);
   const status = (t) => { $('status').textContent = t; };
+
+  // the start gate attaches before anything async: permission requests need
+  // the tap's user-gesture, and a dead button with no error is the worst
+  // failure mode (seen when module load fails and nothing was listening)
+  const started = new Promise((resolve) => {
+    $('start').addEventListener('click', async () => {
+      $('start').remove();
+      if (!MOCK) {
+        try {
+          if (window.DeviceOrientationEvent && DeviceOrientationEvent.requestPermission)
+            await DeviceOrientationEvent.requestPermission(); // ios
+        } catch (e) {}
+        try { await navigator.wakeLock.request('screen'); } catch (e) {}
+      }
+      resolve();
+    });
+  });
+  status('loading engine…');
+  if (!crossOriginIsolated && !sessionStorage.getItem('coiReloaded')) {
+    // first visit: the isolation service worker is installing and will
+    // reload; note it so a second failure reads as a real error
+    sessionStorage.setItem('coiReloaded', '1');
+  }
 
   // --- persisted calibration ------------------------------------------------
   const cal = (() => {
@@ -76,7 +127,15 @@
   const idbPut = (key, bytes) => {
     try { db.transaction('tiles', 'readwrite').objectStore('tiles').put(bytes, key); } catch (e) {}
   };
-  const Module = await createEarthModule();
+  let Module;
+  try {
+    if (!crossOriginIsolated) throw new Error('page is not cross-origin isolated (browser/service-worker issue)');
+    Module = await createEarthModule();
+  } catch (e) {
+    status('engine failed to load: ' + e.message);
+    $('start').remove?.();
+    throw e;
+  }
   const fetchTile = async (path, id) => {
     try {
       let bytes = path[0] !== 'P' ? await idbGet(path) : undefined;
@@ -131,21 +190,16 @@
     sensor.have = true;
   };
 
-  // --- start gate (permissions need a user gesture) -------------------------
-  $('start').addEventListener('click', async () => {
-    $('start').remove();
+  // --- sensors start once the gate has been tapped --------------------------
+  started.then(() => {
     if (MOCK) {
       status('mock mode');
     } else {
-      try {
-        if (window.DeviceOrientationEvent && DeviceOrientationEvent.requestPermission)
-          await DeviceOrientationEvent.requestPermission(); // ios
-      } catch (e) {}
+      status('waiting for gps…');
       navigator.geolocation.watchPosition((p) => {
         fix = { lat: p.coords.latitude, lon: p.coords.longitude,
           alt: p.coords.altitude, acc: p.coords.accuracy };
       }, (e) => status('gps error: ' + e.message), { enableHighAccuracy: true });
-      try { await navigator.wakeLock.request('screen'); } catch (e) {}
     }
     // chrome android exposes a north-referenced variant; prefer it — but
     // only once it has actually delivered data (desktop chrome fires one
