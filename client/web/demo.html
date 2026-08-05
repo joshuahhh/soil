@@ -202,6 +202,22 @@
   mapEl.addEventListener('pointerdown', () => { mapPointerDown = true; });
   addEventListener('pointerup', () => { mapPointerDown = false; });
 
+  // the standard geolocate control (crosshair button); its geolocate event
+  // teleports the camera like a map click, keeping altitude/heading/tilt.
+  // the control's own flyTo is immediately overridden by follow mode's
+  // per-frame jumpTo, which brings the map along instead
+  const geolocate = new maplibregl.GeolocateControl({
+    positionOptions: { enableHighAccuracy: true, timeout: 10000 },
+    trackUserLocation: false,
+  });
+  map.addControl(geolocate, 'top-left');
+  geolocate.on('geolocate', (pos) => {
+    if (!view.ready()) return;
+    const p = view.getPose();
+    view.setPose(pos.coords.latitude, pos.coords.longitude, p.alt, p.heading, p.tilt);
+    following = true;
+  });
+
   map.on('dragstart', () => { following = false; });
   map.on('click', (e) => {
     if (!view.ready()) return;
