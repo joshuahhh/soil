@@ -85,10 +85,14 @@ void populateNode(rocktree_t::node_t *node, std::unique_ptr<NodeData> node_data)
 			m.uv_offset[1] = mesh.uv_offset_and_scale(1);
 			m.uv_scale[0] = mesh.uv_offset_and_scale(2);
 			m.uv_scale[1] = mesh.uv_offset_and_scale(3);
-		} else {
-			m.uv_offset[1] -= 1 / m.uv_scale[1];
-			m.uv_scale[1] *= -1;			
 		}
+		// the imagery's v axis runs opposite to the texture t axis in both
+		// cases; the flip used to be applied only when uv_offset_and_scale
+		// was absent (fine tiles), leaving every mesh that ships the field
+		// (the coarse levels) v-mirrored within its tile — landforms diced
+		// and rearranged at planet zooms while street level looked perfect
+		m.uv_offset[1] -= 1 / m.uv_scale[1];
+		m.uv_scale[1] *= -1;
 
 		int layer_bounds[10];
 		unpackOctantMaskAndOctantCountsAndLayerBounds(mesh.layer_and_octant_counts(), m.indices.data(), m.indices.size(), m.vertices.data(), m.vertices.size(), layer_bounds);

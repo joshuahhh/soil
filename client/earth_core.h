@@ -60,13 +60,11 @@ struct earth_core_t {
 	// the rect center: x along the tube axis (the rect's longer dimension),
 	// y across it, z up. the z zero-point must be the actual terrain surface
 	// — the roll radius ρ = R - z, so a reference even tens of meters off
-	// shifts the whole sheet radially (and km off — e.g. the sphere radius
-	// vs the wgs84 ellipsoid, -4.5km at seattle — rolls the rect into a huge
-	// cylinder with invisible relief). staged: the sheet stays flat (curl 0,
+	// shifts the whole sheet radially. staged: the sheet stays flat (curl 0,
 	// where the zero-point cancels out and tiles render exactly in place)
 	// while the rect loads, then tubeLockGround() measures the surface and
-	// the host rolls the tube up. the ellipsoid seed here only sets the
-	// height to cast measurement rays down from.
+	// the host rolls the tube up; the seed here only sets the height to
+	// cast measurement rays down from.
 	// small-rect tangent-plane approximation: over a few km the curvature
 	// drop below the plane is centimeters
 	void setTubeRect(double lat0, double lon0, double lat1, double lon1, bool ew_axis) {
@@ -84,12 +82,11 @@ struct earth_core_t {
 		tube_half_wid = ew_axis ? ns_half : ew_half;
 		tube_radius = fmax(1.0, tube_half_wid / M_PI); // 2*half_wid = 2*pi*R
 		tube_ground_locked = false;
-		// wgs84 geocentric radius at this latitude: within terrain height of
-		// the surface everywhere, plenty for a ray start
-		const double wa = 6378137.0, wb = 6356752.314245;
-		auto ca = cos(latc), sa = sin(latc);
-		tube_ground_radius = sqrt((pow(wa * wa * ca, 2) + pow(wb * wb * sa, 2))
-			/ (pow(wa * ca, 2) + pow(wb * sa, 2)));
+		// seed at the sphere radius: measured (straight-down mesh probes at
+		// many levels and latitudes) the mesh datum IS the planetoid sphere,
+		// not the wgs84 ellipsoid — mesh hits come in at sphere + terrain
+		// height. the real zero-point still comes from tubeLockGround()
+		tube_ground_radius = R_p;
 		tubeRebuild();
 	}
 
@@ -213,6 +210,38 @@ struct earth_core_t {
 
 	// --- picking --------------------------------------------------------
 
+	// horizon culling: is p hidden from eye behind the occluder sphere of
+	// radius r_occ (centered on the planet)? true when the segment eye->p
+	// dips inside the sphere, or p itself is under it
+	static bool pointOccluded(const Vector3d &eye, const Vector3d &p, double r_occ2) {
+		if (p.squaredNorm() < r_occ2) return true;
+		Vector3d d = p - eye;
+		auto l2 = d.squaredNorm();
+		if (l2 < 1e-12) return false;
+		auto t0 = -eye.dot(d) / l2; // segment param of closest approach to the center
+		if (t0 <= 0 || t0 >= 1) return false;
+		return (eye + d * t0).squaredNorm() < r_occ2;
+	}
+
+	// a node is skipped when every corner of its obb is behind the planet.
+	// coarse far-side meshes are simplified so crudely that they bulge tens
+	// of km out of their true surface and would otherwise poke through the
+	// near side's fine terrain and win the depth test (mostly-ocean quarter
+	// -planet blobs painting sea over europe). conservative: the occluder
+	// sits ~16km under the sphere datum, below the ellipsoid plus any
+	// terrain, so nothing actually visible can be culled
+	static bool obbOccluded(const Vector3d &eye, const OrientedBoundingBox &obb, double planet_radius) {
+		auto r_occ = planet_radius - 16000.0;
+		auto r_occ2 = r_occ * r_occ;
+		for (auto i = 0; i < 8; i++) {
+			Vector3d s(i & 1 ? obb.extents.x() : -obb.extents.x(),
+				i & 2 ? obb.extents.y() : -obb.extents.y(),
+				i & 4 ? obb.extents.z() : -obb.extents.z());
+			if (!pointOccluded(eye, obb.center + obb.orientation * s, r_occ2)) return false;
+		}
+		return true;
+	}
+
 	// ray/obb slab test in the box frame (orientation columns are the box
 	// axes). true if the ray enters before t_max; entry t may be 0 when the
 	// origin is inside the box
@@ -323,6 +352,137 @@ struct earth_core_t {
 		if (raycast(up * (p.norm() + 2000.0), -up, hit, &mpt) != raycast_mesh) return -1;
 		if (mpt > 10.0) return -1; // coarse filler, not the real surface
 		return hit.norm();
+	}
+
+	// EARTH_AUDIT=1: once the scene completes, compare each drawn node's
+	// mesh placement (its transform applied to the center of the 0..255
+	// mesh coordinate cube) against the metadata obb it was selected by —
+	// content from the wrong node, or a wrong transform, shows up as a mesh
+	// center many obb-radii away from where the octree says the node lives
+	bool audited = false;
+	void auditDrawnNodes(const Matrix4d &viewprojection, int width, int height) {
+		auto bad = 0;
+		FILE *f = fopen("/tmp/earth_audit.txt", "w");
+		for (auto &kv : drawn_nodes) {
+			auto n = kv.first;
+			Vector3d c = (n->matrix_globe_from_mesh * Vector4d(128, 128, 128, 1)).head<3>();
+			auto d = (c - n->obb.center).norm();
+			auto r = n->obb.extents.norm();
+			if (d > 2 * r) {
+				bad++;
+				printf("audit: node %s mesh center %.0fm from obb center (obb radius %.0f)\n",
+					n->request.node_key().path().c_str(), d, r);
+			}
+			if (f) {
+				// screen position of the obb center, for mapping artifacts in
+				// a capture back to the node that drew them
+				Vector4d p = viewprojection * Vector4d(n->obb.center.x(), n->obb.center.y(), n->obb.center.z(), 1.0);
+				auto sx = p.w() != 0 ? (p.x() / p.w() * 0.5 + 0.5) * width : -1;
+				auto sy = p.w() != 0 ? (1.0 - (p.y() / p.w() * 0.5 + 0.5)) * height : -1;
+				auto path = n->request.node_key().path();
+				auto &oc = n->obb.center;
+				auto ocr = oc.norm();
+				fprintf(f, "node %s level %zu screen %.0f,%.0f mask %02x mpt %.1f "
+					"lat %.2f lon %.2f r %.0f ext %.0f,%.0f,%.0f meshes %zu",
+					path.c_str(), path.size(), sx, sy, kv.second, n->meters_per_texel,
+					asin(oc.z() / ocr) * 180 / M_PI, atan2(oc.y(), oc.x()) * 180 / M_PI,
+					ocr, n->obb.extents.x(), n->obb.extents.y(), n->obb.extents.z(),
+					n->meshes.size());
+				for (auto &m : n->meshes)
+					fprintf(f, " [tex %dx%d fmt %d uvoff %.1f,%.1f uvscale %.6f,%.6f verts %zu]",
+						m.texture_width, m.texture_height, m.texture_format,
+						m.uv_offset[0], m.uv_offset[1], m.uv_scale[0], m.uv_scale[1],
+						m.vertices.size() / 8);
+				fprintf(f, "\n");
+			}
+		}
+		if (f) fclose(f);
+		printf("audit: %d of %zu drawn nodes displaced; details in /tmp/earth_audit.txt\n",
+			bad, drawn_nodes.size());
+
+		// EARTH_DUMP_TEX=<dir>: decode every drawn node's dxt1 texture to a
+		// ppm named by its octant path — ground truth for whether the image
+		// on a tile is the image of the tile
+		if (auto dir = getenv("EARTH_DUMP_TEX")) {
+			for (auto &kv : drawn_nodes) {
+				auto n = kv.first;
+				if (n->meshes.empty()) continue;
+				auto &m = n->meshes[0];
+				int w = m.texture_width, h = m.texture_height;
+				std::vector<uint8_t> rgb(w * h * 3);
+				if (m.texture_format == rocktree_t::texture_format_rgb) {
+					if (m.texture.size() < rgb.size()) continue;
+					memcpy(rgb.data(), m.texture.data(), rgb.size());
+				} else if (m.texture_format == rocktree_t::texture_format_dxt1) {
+				for (int by = 0; by < h / 4; by++) for (int bx = 0; bx < w / 4; bx++) {
+					auto p = m.texture.data() + ((size_t)by * (w / 4) + bx) * 8;
+					uint16_t c0 = p[0] | p[1] << 8, c1 = p[2] | p[3] << 8;
+					uint32_t bits = p[4] | p[5] << 8 | p[6] << 16 | (uint32_t)p[7] << 24;
+					int pal[4][3];
+					auto expand = [](uint16_t c, int *o) {
+						o[0] = (c >> 11) << 3; o[1] = ((c >> 5) & 63) << 2; o[2] = (c & 31) << 3;
+					};
+					expand(c0, pal[0]);
+					expand(c1, pal[1]);
+					for (int k = 0; k < 3; k++) {
+						pal[2][k] = c0 > c1 ? (2 * pal[0][k] + pal[1][k]) / 3 : (pal[0][k] + pal[1][k]) / 2;
+						pal[3][k] = c0 > c1 ? (pal[0][k] + 2 * pal[1][k]) / 3 : 0;
+					}
+					for (int py = 0; py < 4; py++) for (int px = 0; px < 4; px++) {
+						auto *c = pal[(bits >> ((py * 4 + px) * 2)) & 3];
+						auto o = ((size_t)(by * 4 + py) * w + bx * 4 + px) * 3;
+						rgb[o] = c[0]; rgb[o + 1] = c[1]; rgb[o + 2] = c[2];
+					}
+				}
+				} else continue;
+				char fn[512];
+				snprintf(fn, sizeof fn, "%s/%s.ppm", dir,
+					n->request.node_key().path().c_str());
+				if (FILE *tf = fopen(fn, "w")) {
+					fprintf(tf, "P6\n%d %d\n255\n", w, h);
+					fwrite(rgb.data(), 1, rgb.size(), tf);
+					fclose(tf);
+				}
+			}
+		}
+
+		// EARTH_PROBE="x,y;x,y;...": shoot rays through these pixels and
+		// report which drawn node's triangle wins — maps artifact pixels in
+		// a capture directly to the node that painted them
+		auto probe = getenv("EARTH_PROBE");
+		if (!probe) return;
+		Matrix4d inv = viewprojection.inverse();
+		auto unproject = [&](double px, double py, double ndc_z) {
+			Vector4d ndc(px / width * 2 - 1, 1 - py / height * 2, ndc_z, 1.0);
+			Vector4d w = inv * ndc;
+			return Vector3d(w.head<3>() / w.w());
+		};
+		double px, py;
+		const char *s = probe;
+		while (sscanf(s, "%lf,%lf", &px, &py) == 2) {
+			Vector3d a = unproject(px, py, -1.0), b = unproject(px, py, 1.0);
+			Vector3d dir = (b - a).normalized();
+			double best_t = INFINITY;
+			const rocktree_t::node_t *best = nullptr;
+			for (auto &kv : drawn_nodes) {
+				if (!rayHitsObb(a, dir, kv.first->obb, best_t)) continue;
+				rayNodeNearest(a, dir, kv.first, kv.second, best_t, best);
+			}
+			if (best) {
+				Vector3d h = a + dir * best_t;
+				auto hr = h.norm();
+				printf("probe %.0f,%.0f: node %s level %zu hit lat %.2f lon %.2f r %.0f (alt %+.0f) mpt %.1f\n",
+					px, py, best->request.node_key().path().c_str(),
+					best->request.node_key().path().size(),
+					asin(h.z() / hr) * 180 / M_PI, atan2(h.y(), h.x()) * 180 / M_PI,
+					hr, hr - planetoid->radius, best->meters_per_texel);
+			} else {
+				printf("probe %.0f,%.0f: miss\n", px, py);
+			}
+			s = strchr(s, ';');
+			if (!s) break;
+			s++;
+		}
 	}
 
 	// distance along the boresight to the actual drawn terrain, for the
@@ -457,9 +617,16 @@ struct earth_core_t {
 					cnt_oct++;
 					auto nxt = cur + o;
 					auto nxt_rel = nxt.substr (floor((nxt.size() - 1) / 4) * 4, 4);
+					// EARTH_TRACE=<path>: log every walk decision on the
+					// prefixes of one octant path, to see where and why the
+					// descent toward it stops
+					static const char *trace = getenv("EARTH_TRACE");
+					auto traced = trace && strncmp(trace, nxt.c_str(), nxt.size()) == 0;
 					auto node_kv = bulk->nodes.find(nxt_rel);
-					if (node_kv == bulk->nodes.end()) // node at "nxt" doesn't exist
+					if (node_kv == bulk->nodes.end()) { // node at "nxt" doesn't exist
+						if (traced) printf("trace %s: no node in bulk\n", nxt.c_str());
 						continue;
+					}
 					auto node = node_kv->second.get();
 
 					// cull outside frustum using obb
@@ -486,13 +653,21 @@ struct earth_core_t {
 							continue;
 						}
 					} else if (obb_frustum_outside == classifyObbFrustum(&node->obb, frustum_planes)) {
+						if (traced) printf("trace %s: frustum culled\n", nxt.c_str());
 						continue;
+					} else if (obbOccluded(eye, node->obb, planet_radius)) {
+						if (traced) printf("trace %s: horizon culled\n", nxt.c_str());
+						continue; // wholly behind the planet
 					}
 					cnt_lod++;
 
 					// level of detail: tube mode and the ground column always
 					// descend — both want the finest data available there,
 					// regardless of the camera view
+					// EARTH_LOD_SCALE=n: draw n-times coarser than the
+					// standard target (lod experiment knob)
+					static const double lod_scale = getenv("EARTH_LOD_SCALE")
+						? atof(getenv("EARTH_LOD_SCALE")) : 1.0;
 					if (!tube_on && !in_column) {
 						auto texels_per_meter = 1.0f / node->meters_per_texel;
 						auto wh = width < height ? width : height;
@@ -503,7 +678,7 @@ struct earth_core_t {
 							r = 2.0 * wh * tan(0.125 * M_PI) / ortho_half_extent;
 						} else {
 							auto t = Affine3d().Identity();
-							t.translate(eye + (eye-node->obb.center).norm() * direction);
+							t.translate(eye + (eye - node->obb.center).norm() * direction);
 							auto m = viewprojection * t;
 							auto s = m(3, 3);
 							// zooming (narrowing the fov) magnifies the scene, so it
@@ -511,6 +686,10 @@ struct earth_core_t {
 							auto zoom = tan(0.125 * M_PI) / tan(cam.fov / 2.0);
 							r = (2.0*(1.0/s)) * wh * zoom;
 						}
+						r /= lod_scale;
+						if (traced) printf("trace %s: lod tpm %.6f r %.6f -> %s (state %d)\n",
+							nxt.c_str(), texels_per_meter, r,
+							texels_per_meter > r ? "stop" : "descend", (int)node->dl_state.load());
 						if (texels_per_meter > r) continue;
 					}
 
@@ -748,6 +927,7 @@ struct earth_core_t {
 			assert(node->can_have_data);
 			if (node->dl_state != dl_state_downloaded) continue;
 
+
 			// set octant mask of previous node
 			auto octant = (int)(full_path[level - 1] - '0');
 			mask_map[full_path.substr(0, level - 1)] |= 1 << octant;
@@ -788,6 +968,12 @@ struct earth_core_t {
 				if (!mesh.buffered) bufferMesh(mesh);
 				bindAndDrawMesh(mesh, self_mask, stale_mask, ctx);
 			}
+		}
+
+		static const bool audit_env = getenv("EARTH_AUDIT") != nullptr;
+		if (audit_env && scene_complete && !audited) {
+			audited = true;
+			auditDrawnNodes(viewprojection, width, height);
 		}
 
 		sec_draw += ticksMs() - t3;
