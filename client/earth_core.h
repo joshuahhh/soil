@@ -13,10 +13,150 @@ struct earth_core_t {
 
 	// true when the last walk saw everything the view wants fully downloaded
 	bool scene_complete = false;
+	// last walk's want/have node counts, for download progress display
+	int stat_nodes_wanted = 0, stat_nodes_loaded = 0;
 	// tint octants where a finer tile is wanted but not yet drawn (L key)
 	bool debug_lod = false;
 	// print per-frame scheduler state (bench mode)
 	bool log_sched = false;
+
+	// tube mode: a geodetic rectangle of terrain is rolled into a cylinder in
+	// the vertex shader (the inception effect). selection switches from
+	// frustum culling + camera-driven lod to "every node whose obb touches
+	// the rect, finest resolution available" — the rect is fixed, so there is
+	// no point chasing the camera. curl animates flat slab (0) to fully
+	// closed tube (1); the roll radius is chosen so the rect's width is
+	// exactly the closed tube's circumference
+	bool tube_on = false;
+	double tube_curl = 1.0;
+	double tube_radius = 0; // fully-curled tube radius (m)
+	double tube_half_len = 0, tube_half_wid = 0; // rect half extents (m)
+	double tube_ground_radius = 0; // ecef radius of the ground at the rect center
+	bool tube_ground_locked = false; // true once measured from the loaded mesh
+	bool tube_ew_axis = true; // tube axis east-west (else north-south)
+	Vector3d tube_up = Vector3d::UnitZ(), tube_axis = Vector3d::UnitX();
+	Matrix4d tube_globe_from_local = Matrix4d::Identity();
+	Matrix4d tube_local_from_globe = Matrix4d::Identity();
+
+	void tubeRebuild() {
+		Matrix4d g = Matrix4d::Identity();
+		g.block<3,1>(0,0) = tube_axis;
+		g.block<3,1>(0,1) = tube_up.cross(tube_axis);
+		g.block<3,1>(0,2) = tube_up;
+		g.block<3,1>(0,3) = tube_up * tube_ground_radius;
+		tube_globe_from_local = g;
+		tube_local_from_globe = g.inverse();
+	}
+
+	// corners in radians, any order. the local frame sits on the ground at
+	// the rect center: x along the tube axis (the rect's longer dimension),
+	// y across it, z up. the z zero-point must be the actual terrain surface
+	// — the roll radius ρ = R - z, so a reference even tens of meters off
+	// shifts the whole sheet radially (and km off — e.g. the sphere radius
+	// vs the wgs84 ellipsoid, -4.5km at seattle — rolls the rect into a huge
+	// cylinder with invisible relief). staged: the sheet stays flat (curl 0,
+	// where the zero-point cancels out and tiles render exactly in place)
+	// while the rect loads, then tubeLockGround() measures the surface and
+	// the host rolls the tube up. the ellipsoid seed here only sets the
+	// height to cast measurement rays down from.
+	// small-rect tangent-plane approximation: over a few km the curvature
+	// drop below the plane is centimeters
+	void setTubeRect(double lat0, double lon0, double lat1, double lon1, bool ew_axis) {
+		auto R_p = planetoid && planetoid->downloaded ? (double)planetoid->radius : 6371010.0;
+		auto latc = (lat0 + lat1) / 2, lonc = (lon0 + lon1) / 2;
+		auto ns_half = R_p * fabs(lat1 - lat0) / 2;
+		auto ew_half = R_p * cos(latc) * fabs(lon1 - lon0) / 2;
+		Vector3d up(cos(latc) * cos(lonc), cos(latc) * sin(lonc), sin(latc));
+		Vector3d east(-sin(lonc), cos(lonc), 0);
+		Vector3d north = up.cross(east);
+		tube_ew_axis = ew_axis;
+		tube_up = up;
+		tube_axis = ew_axis ? east : north;
+		tube_half_len = ew_axis ? ew_half : ns_half;
+		tube_half_wid = ew_axis ? ns_half : ew_half;
+		tube_radius = fmax(1.0, tube_half_wid / M_PI); // 2*half_wid = 2*pi*R
+		tube_ground_locked = false;
+		// wgs84 geocentric radius at this latitude: within terrain height of
+		// the surface everywhere, plenty for a ray start
+		const double wa = 6378137.0, wb = 6356752.314245;
+		auto ca = cos(latc), sa = sin(latc);
+		tube_ground_radius = sqrt((pow(wa * wa * ca, 2) + pow(wb * wb * sa, 2))
+			/ (pow(wa * ca, 2) + pow(wb * sa, 2)));
+		tubeRebuild();
+	}
+
+	// where the camera is in the rolled tube's own coordinates, unrolled
+	// back onto the rect: cylindrical coordinates around the tube axis
+	// (angle theta, axial x), mapped to the spot on the original rectangle
+	// whose imagery is wrapped there — what a 2d map should show in tube
+	// mode instead of the ecef point under the camera. the view direction
+	// unrolls by -theta the same way for the heading. degenerates smoothly
+	// to the ordinary pose as curl -> 0. angles in radians
+	bool tubePose(const Vector3d &eye, const Vector3d &direction,
+			double &lat, double &lon, double &heading) {
+		if (!tube_on || tube_radius <= 0) return false;
+		auto R_eff = tube_radius / fmax(tube_curl, 1e-3);
+		Vector3d l = (tube_local_from_globe
+			* Vector4d(eye.x(), eye.y(), eye.z(), 1.0)).head<3>();
+		Vector3d d = (tube_local_from_globe
+			* Vector4d(direction.x(), direction.y(), direction.z(), 0.0)).head<3>();
+		auto theta = atan2(l.y(), R_eff - l.z());
+		auto y = theta * R_eff; // unrolled across-offset
+		// unrolled across-component of the view direction: its projection on
+		// the tangential direction at angle theta
+		auto dy = d.y() * cos(theta) + d.z() * sin(theta);
+		// local (x, y) to east/north displacement by axis orientation
+		// (across = up x axis, so for a north-south axis, across is -east)
+		auto dE = tube_ew_axis ? l.x() : -y;
+		auto dN = tube_ew_axis ? y : l.x();
+		auto hE = tube_ew_axis ? d.x() : -dy;
+		auto hN = tube_ew_axis ? dy : d.x();
+		auto latc = asin(fmax(-1.0, fmin(1.0, tube_up.z())));
+		auto lonc = atan2(tube_up.y(), tube_up.x());
+		auto R_p = planetoid && planetoid->downloaded ? (double)planetoid->radius : 6371010.0;
+		lat = latc + dN / R_p;
+		lon = lonc + dE / (R_p * cos(latc));
+		heading = atan2(hE, hN);
+		return true;
+	}
+
+	// terrain elevation converges several lod levels before the imagery
+	// does: mesh at this resolution already carries the ground to within a
+	// few meters, so the roll can start ~two orders of magnitude fewer tiles
+	// in, and full res streams into the rolled tube afterwards
+	static constexpr double tube_lock_mpt = 4.0;
+
+	// the elevation analysis: raycast a 7x7 grid over the rect (cpu, against
+	// the resident meshes) and take the median hit radius as the zero-point
+	// — robust to a roof or treetop at any one sample. strict mode (retried
+	// every frame while loading) only locks once every sample hits mesh
+	// finer than tube_lock_mpt — that coverage test needs no download
+	// bookkeeping. non-strict is the host's timeout escape hatch: take the
+	// median of whatever is resident. the 0.9 keeps samples off the edges
+	void tubeLockGround(bool strict) {
+		std::vector<double> rs;
+		Vector3d across = tube_up.cross(tube_axis);
+		for (auto i = 0; i < 7; i++) {
+			for (auto j = 0; j < 7; j++) {
+				Vector3d p = tube_up * (tube_ground_radius + 10000.0)
+					+ tube_axis * ((i / 3.0 - 1.0) * 0.9 * tube_half_len)
+					+ across * ((j / 3.0 - 1.0) * 0.9 * tube_half_wid);
+				Vector3d hit;
+				double mpt;
+				if (raycast(p, -tube_up, hit, &mpt) != raycast_mesh) {
+					if (strict) return; // a sample has no mesh yet
+					continue;
+				}
+				if (strict && mpt > tube_lock_mpt) return; // only coarse mesh here yet
+				rs.push_back(hit.norm());
+			}
+		}
+		if (rs.empty()) return; // nothing resident at all; retried next frame
+		std::nth_element(rs.begin(), rs.begin() + rs.size() / 2, rs.end());
+		tube_ground_radius = rs[rs.size() / 2];
+		tube_ground_locked = true;
+		tubeRebuild();
+	}
 
 	// download slots in flight, held from request through decode; the cap
 	// needs to stay comfortably above the decode pool's thread count
@@ -96,7 +236,8 @@ struct earth_core_t {
 	// finer node — hitting it instead would pick a point slightly off the
 	// visible terrain)
 	static void rayNodeNearest(const Vector3d &origin, const Vector3d &dir,
-			const rocktree_t::node_t *node, uint8_t octant_mask, double &best_t) {
+			const rocktree_t::node_t *node, uint8_t octant_mask, double &best_t,
+			const rocktree_t::node_t *&best_node) {
 		Matrix4d mesh_from_globe = node->matrix_globe_from_mesh.inverse();
 		Vector3d o = (mesh_from_globe * Vector4d(origin.x(), origin.y(), origin.z(), 1.0)).head<3>();
 		Vector3d d = (mesh_from_globe * Vector4d(dir.x(), dir.y(), dir.z(), 0.0)).head<3>();
@@ -128,38 +269,49 @@ struct earth_core_t {
 				auto v = d.dot(q) * inv;
 				if (v < 0 || u + v > 1) continue;
 				auto t = e2.dot(q) * inv;
-				if (t > 0 && t < best_t) best_t = t;
+				if (t > 0 && t < best_t) { best_t = t; best_node = node; }
 			}
 		}
 	}
 
 	// cast a world-space ray (dir unit) against the drawn scene: obb prune,
-	// then exact triangles. falls back to the planetoid sphere so picking
-	// still works while tiles stream in; misses only when the ray misses
-	// the planet entirely
-	enum raycast_result : int { raycast_miss = 0, raycast_mesh = 1, raycast_sphere = 2 };
-	raycast_result raycast(const Vector3d &origin, const Vector3d &dir, Vector3d &hit) {
+	// then exact triangles. misses when no resident mesh is on the ray — no
+	// fallback: the old sea-level-sphere fallback sat ~4.5km off the real
+	// terrain (sphere radius vs the ellipsoidal mesh), so everything that
+	// consumed it (orbit pivots, picks) got phantom points kilometers from
+	// the visible ground. hit_mpt (optional) reports the resolution of the
+	// node the winning triangle came from, meters per texel — how much the
+	// hit can be trusted for measurement
+	enum raycast_result : int { raycast_miss = 0, raycast_mesh = 1 };
+	raycast_result raycast(const Vector3d &origin, const Vector3d &dir, Vector3d &hit,
+			double *hit_mpt = nullptr) {
 		if (!ready()) return raycast_miss;
 		double best_t = INFINITY;
+		const rocktree_t::node_t *best_node = nullptr;
 		for (auto &kv : drawn_nodes) {
 			auto node = kv.first;
 			if (node->dl_state != dl_state_downloaded) continue;
 			if (!rayHitsObb(origin, dir, node->obb, best_t)) continue;
-			rayNodeNearest(origin, dir, node, kv.second, best_t);
+			rayNodeNearest(origin, dir, node, kv.second, best_t, best_node);
 		}
-		if (!isinf(best_t)) {
-			hit = origin + dir * best_t;
-			return raycast_mesh;
-		}
-		auto R = (double)planetoid->radius;
-		auto od = origin.dot(dir);
-		auto disc = od * od - (origin.dot(origin) - R * R);
-		if (disc < 0) return raycast_miss;
-		auto t = -od - sqrt(disc);
-		if (t <= 0) t = -od + sqrt(disc); // origin inside the sphere: take the exit
-		if (t <= 0) return raycast_miss;
-		hit = origin + dir * t;
-		return raycast_sphere;
+		if (isinf(best_t) || !best_node) return raycast_miss;
+		hit = origin + dir * best_t;
+		if (hit_mpt) *hit_mpt = best_node->meters_per_texel;
+		return raycast_mesh;
+	}
+
+	// distance along the boresight to the actual drawn terrain, for the
+	// ortho view extent and ortho zoom/pan anchoring. the sphere-datum
+	// centerDistance sits ~4.5km off the real mesh (sphere radius vs the
+	// ellipsoidal terrain), which collapses the derived ortho extent as soon
+	// as the eye dips inside the reference sphere — kilometers above the
+	// visible ground. sphere formula kept only as a last-resort fallback
+	// (looking at the sky, tiles not yet loaded)
+	double centerDistanceMesh(const camera_t &cam) {
+		Vector3d hit;
+		if (raycast(cam.eye, cam.direction, hit) == raycast_mesh)
+			return (hit - cam.eye).norm();
+		return centerDistance(cam, planetoid->radius);
 	}
 
 	// cull, schedule downloads, evict, draw. the shell has already begun the
@@ -169,9 +321,18 @@ struct earth_core_t {
 		auto current_bulk = planetoid->root_bulk;
 		auto planet_radius = planetoid->radius;
 
+		// stage 2 of the tube pipeline: as tiles stream in, keep attempting
+		// the ground measurement against last frame's drawn meshes; it locks
+		// as soon as the whole rect is covered at measurement resolution —
+		// long before full res. the host watches groundLocked, rolls the
+		// tube up, and the remaining detail streams into the rolled tube
+		if (tube_on && !tube_ground_locked)
+			tubeLockGround(true);
+
 		auto &eye = cam.eye;
 		auto &direction = cam.direction;
-		auto up = eye.normalized();
+		// airplane mode owns its up vector (roll); otherwise up is gravity
+		auto up = cam.airplane ? cam.body_up : Vector3d(eye.normalized());
 
 		// projection
 		float aspect_ratio = (float)width / (float)height;
@@ -190,10 +351,10 @@ struct earth_core_t {
 		Matrix4d projection;
 		double ortho_half_extent = 0; // vertical half-extent in meters (ortho only)
 		if (cam.ortho) {
-			// the view extent is what the fov would show at the distance of the
-			// ground at screen center, so mode switches keep the apparent scale
-			auto dist = centerDistance(cam, planet_radius);
-			ortho_half_extent = fmax(1.0, dist * tan(fov / 2.0));
+			// explicit extent state set on mode entry / zooms; derive from the
+			// terrain distance only when unset (e.g. the native shell)
+			ortho_half_extent = cam.ortho_extent > 0 ? cam.ortho_extent
+				: fmax(1.0, centerDistanceMesh(cam) * tan(fov / 2.0));
 			// the parallel beam is a box, not a cone from the eye: in a tilted
 			// view its bottom edge reaches ground beside or behind the camera
 			// plane, and its top edge starts half an extent above the eye, so
@@ -270,13 +431,29 @@ struct earth_core_t {
 					// cull outside frustum using obb
 					// todo: check if it could cull more
 					cnt_cull++;
-					if (obb_frustum_outside == classifyObbFrustum(&node->obb, frustum_planes)) {
+					if (tube_on) {
+						// tube mode culls against the rect, not the view: the
+						// whole slab is drawn wherever the camera looks. box
+						// test in the rect's local frame, obb conservatively
+						// widened to its bounding sphere; z allows terrain
+						// heights (everest) plus a little below sea level
+						Vector3d c = (tube_local_from_globe * Vector4d(
+							node->obb.center.x(), node->obb.center.y(), node->obb.center.z(), 1.0)).head<3>();
+						auto margin = node->obb.extents.norm();
+						if (fabs(c.x()) > tube_half_len + margin
+							|| fabs(c.y()) > tube_half_wid + margin
+							|| c.z() > 9000 + margin || c.z() < -1500 - margin) {
+							continue;
+						}
+					} else if (obb_frustum_outside == classifyObbFrustum(&node->obb, frustum_planes)) {
 						continue;
 					}
 					cnt_lod++;
 
-					// level of detail
-					{
+					// level of detail: tube mode always descends — the fixed
+					// rect wants the finest imagery available, regardless of
+					// where the camera is (the node cap below bounds the total)
+					if (!tube_on) {
 						auto texels_per_meter = 1.0f / node->meters_per_texel;
 						auto wh = width < height ? width : height;
 						double r;
@@ -306,6 +483,10 @@ struct earth_core_t {
 				}
 			}
 			if (next_valid.size() == 0) break;
+			// full resolution over a large rect can outgrow the memory quota
+			// (the potential set is never evicted); stop descending at a
+			// uniform level once the set is big enough
+			if (tube_on && potential_nodes.size() > 3000) break;
 			valid = next_valid;
 			next_valid.clear();
 		}
@@ -325,9 +506,12 @@ struct earth_core_t {
 
 			struct candidate_t { double priority; size_t level; rocktree_t::node_t *node; };
 			std::vector<candidate_t> to_download;
+			stat_nodes_wanted = (int)potential_nodes.size();
+			stat_nodes_loaded = 0;
 			for (auto &kv : potential_nodes) {
 				auto node = kv.second;
 				if (node->dl_state != dl_state_downloaded) all_loaded = false;
+				else stat_nodes_loaded++;
 				if (node->dl_state != dl_state_stub) continue;
 				auto radius = node->obb.extents.norm();
 				auto dist = fmax(0.0, (node->obb.center - eye).norm() - radius);
@@ -499,6 +683,20 @@ struct earth_core_t {
 
 		renderSetDebugLod(ctx, debug_lod);
 
+		// tube warp uniforms: the local->clip matrix folds the camera in, so
+		// the shader works in small rect-local coordinates end to end. the
+		// effective roll radius grows as curl shrinks (flat at curl 0); the
+		// floor keeps it finite for the shader
+		if (tube_on) {
+			Matrix4d l2c = viewprojection * tube_globe_from_local;
+			Matrix4f l2cf = l2c.cast<float>();
+			auto r_eff = tube_radius / fmax(tube_curl, 1e-3);
+			renderSetTube(ctx, true, l2cf.data(),
+				(float)r_eff, (float)tube_half_len, (float)tube_half_wid);
+		} else {
+			renderSetTube(ctx, false, nullptr, 0, 0, 0);
+		}
+
 		drawn_nodes.clear();
 
 		// reverse level order: children before parents
@@ -540,6 +738,12 @@ struct earth_core_t {
 
 			// buffer, bind, draw
 			renderSetTransform(ctx, transform_float.data());
+			if (tube_on) {
+				// mesh -> rect-local frame, composed in double then narrowed:
+				// local coordinates are km-scale, safe in float
+				Matrix4f m2l = (tube_local_from_globe * node->matrix_globe_from_mesh).cast<float>();
+				renderSetTubeNode(ctx, m2l.data());
+			}
 			for (auto &mesh : node->meshes) {
 				if (!mesh.buffered) bufferMesh(mesh);
 				bindAndDrawMesh(mesh, self_mask, stale_mask, ctx);

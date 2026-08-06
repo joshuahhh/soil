@@ -4,6 +4,10 @@ struct gl_ctx_t {
 	int width, height; // weblib: canvas drawable size, set by the shell
 	GLuint program;
 	GLint transform_loc;
+	GLint tube_on_loc;
+	GLint tube_mesh_to_local_loc;
+	GLint tube_local_to_clip_loc;
+	GLint tube_params_loc;
 	GLint uv_offset_loc;
 	GLint uv_scale_loc;
 	GLint octant_mask_loc;
@@ -132,6 +136,25 @@ void renderSetTransform(render_ctx_t &ctx, const float *m16) {
 	glUniformMatrix4fv(ctx.transform_loc, 1, GL_FALSE, m16);
 }
 
+// tube mode (see earth_core.h): per-frame local-frame-to-clip matrix and warp
+// parameters (effective roll radius, rect half length/width in meters)
+void renderSetTube(render_ctx_t &ctx, bool on, const float *local_to_clip16,
+		float r_eff, float half_len, float half_wid) {
+	glUniform1i(ctx.tube_on_loc, on);
+	// draw both faces in tube mode: the camera legitimately sees walls from
+	// either side (approaching the tube from outside, or geometry the roll
+	// has folded over), and culling them reads as holes in the mesh
+	if (on) glDisable(GL_CULL_FACE); else glEnable(GL_CULL_FACE);
+	if (!on) return;
+	glUniformMatrix4fv(ctx.tube_local_to_clip_loc, 1, GL_FALSE, local_to_clip16);
+	glUniform3f(ctx.tube_params_loc, r_eff, half_len, half_wid);
+}
+
+// per-node mesh-to-local-frame matrix (tube mode only)
+void renderSetTubeNode(render_ctx_t &ctx, const float *m16) {
+	glUniformMatrix4fv(ctx.tube_mesh_to_local_loc, 1, GL_FALSE, m16);
+}
+
 void renderFrameEnd(render_ctx_t &ctx) {}
 
 bool renderReadPixels(render_ctx_t &ctx, int w, int h, uint8_t *rgb) {
@@ -193,6 +216,16 @@ void renderInit(render_ctx_t &ctx, void *) {
 	glLineWidth(lw ? (float)atof(lw) : 2.0f);
 	ctx.program = makeShader(
 		"uniform mat4 transform;"
+		// tube mode: vertices go mesh -> rect-local frame (x along the tube
+		// axis, y across, z up), roll across-offset y into an angle around a
+		// horizontal axis at height R, then local -> clip. R is the effective
+		// roll radius (the true tube radius over the curl amount, so curl->0
+		// flattens back out). v_rect is the position in rect units for the
+		// fragment shader to clip the slab's edges
+		"uniform bool tube_on;"
+		"uniform mat4 tube_mesh_to_local;"
+		"uniform mat4 tube_local_to_clip;"
+		"uniform vec3 tube_params;" // (r_eff, half_len, half_wid)
 		"uniform vec2 uv_offset;"
 		"uniform vec2 uv_scale;"
 		"uniform bool octant_mask[8];"
@@ -203,6 +236,7 @@ void renderInit(render_ctx_t &ctx, void *) {
 		"varying vec2 v_texcoords;"
 		"varying float v_stale;"
 		"varying float v_mask;"
+		"varying vec2 v_rect;"
 		"void main() {"
 		// masking: a triangle is dropped only when ALL its vertices are in
 		// masked octants (v_mask interpolates to 0 -> fragment discard).
@@ -215,7 +249,27 @@ void renderInit(render_ctx_t &ctx, void *) {
 		"	v_mask = mask;"
 		"	v_stale = stale_mask[int(octant)] ? 1.0 : 0.0;"
 		"	v_texcoords = (texcoords + uv_offset) * uv_scale;"
-		"	vec4 p = transform * vec4(position, 1.0);"
+		"	vec4 p;"
+		"	if (tube_on) {"
+		"		vec3 l = (tube_mesh_to_local * vec4(position, 1.0)).xyz;"
+		"		v_rect = vec2(l.x / tube_params.y, l.y / tube_params.z);"
+		"		float R = tube_params.x;"
+		"		float th = l.y / R;"
+		// radial distance from the tube axis; the floor keeps terrain taller
+		// than the tube radius squashed near the axis instead of piercing
+		// through and coming out inverted on the far side
+		"		float rho = max(R - l.z, 0.05 * R);"
+		// height = R - rho*cos(th) = R*(1-cos th) + ze*cos th where ze is the
+		// height after the clamp; the 2sin^2 form keeps precision when R is
+		// huge (curl near zero, i.e. nearly flat)
+		"		float ze = R - rho;"
+		"		float hs = sin(0.5 * th);"
+		"		vec3 w = vec3(l.x, rho * sin(th), 2.0 * R * hs * hs + ze * cos(th));"
+		"		p = tube_local_to_clip * vec4(w, 1.0);"
+		"	} else {"
+		"		v_rect = vec2(0.0);"
+		"		p = transform * vec4(position, 1.0);"
+		"	}"
 		"	p.z += (1.0 - mask) * 0.002 * p.w;"
 		"	gl_Position = p;"
 		"}",
@@ -231,11 +285,16 @@ void renderInit(render_ctx_t &ctx, void *) {
 		"#endif\n"
 		"uniform sampler2D texture;"
 		"uniform bool debug_lod;"
+		"uniform bool tube_on;"
 		"varying vec2 v_texcoords;"
 		"varying float v_stale;"
 		"varying float v_mask;"
+		"varying vec2 v_rect;"
 		"void main() {"
 		"	if (v_mask < 0.004) discard;"
+		// tube mode: clip the slab to the drawn rectangle, so tiles straddling
+		// the edge (and geometry rolled past the seam) end cleanly
+		"	if (tube_on && (abs(v_rect.x) > 1.0 || abs(v_rect.y) > 1.0)) discard;"
 		"	vec3 c = texture2D(texture, v_texcoords).rgb;"
 		"	if (debug_lod) c = mix(c, vec3(1.0, 0.0, 0.0), v_stale * 0.5);"
 		"	gl_FragColor = vec4(c, 1.0);"
@@ -243,6 +302,10 @@ void renderInit(render_ctx_t &ctx, void *) {
 	);
 	glUseProgram(ctx.program);
 	ctx.transform_loc = glGetUniformLocation(ctx.program, "transform");
+	ctx.tube_on_loc = glGetUniformLocation(ctx.program, "tube_on");
+	ctx.tube_mesh_to_local_loc = glGetUniformLocation(ctx.program, "tube_mesh_to_local");
+	ctx.tube_local_to_clip_loc = glGetUniformLocation(ctx.program, "tube_local_to_clip");
+	ctx.tube_params_loc = glGetUniformLocation(ctx.program, "tube_params");
 	ctx.uv_offset_loc = glGetUniformLocation(ctx.program, "uv_offset");
 	ctx.uv_scale_loc = glGetUniformLocation(ctx.program, "uv_scale");
 	ctx.octant_mask_loc = glGetUniformLocation(ctx.program, "octant_mask");

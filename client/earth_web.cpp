@@ -12,7 +12,7 @@
 //     Module.deliverFetch(id, true, bytesUint8Array);
 //   });
 //   view.setPose(lat, lon, alt, heading, tilt);   // degrees/meters
-//   view.fly(yaw, pitch, fwd, back, left, right, up, down, slow, viewFrame, gain, dtMs);
+//   view.fly(yaw, pitch, roll, fwd, back, left, right, up, down, slow, viewFrame, gain, dtMs);
 //   view.frame(dtMs);                              // from requestAnimationFrame
 //   view.setOrtho(on);                             // orthographic projection
 //   view.orbit(headingDeg, tiltDeg);               // revolve around the screen-center point
@@ -107,6 +107,51 @@ struct EarthView {
 
 	bool ready() { return earth.ready(); }
 	bool sceneComplete() { return earth.scene_complete; }
+
+	// tube mode (the inception effect): roll a geodetic rectangle of terrain
+	// into a cylinder. corners in degrees, any order; ewAxis picks whether
+	// the tube axis runs east-west or north-south; curl 0..1 animates flat
+	// slab -> closed tube. getTubeInfo reports the derived geometry so the
+	// host can place the camera (radius = tube axis height)
+	void setTubeRect(double lat0, double lon0, double lat1, double lon1, bool ewAxis) {
+		earth.setTubeRect(lat0 * M_PI / 180.0, lon0 * M_PI / 180.0,
+			lat1 * M_PI / 180.0, lon1 * M_PI / 180.0, ewAxis);
+	}
+	void setTubeEnabled(bool on) { earth.tube_on = on; }
+	// force the ground measurement with whatever mesh is resident — the
+	// host's escape hatch when a stuck download keeps coverage incomplete
+	void lockTubeGround() { earth.tubeLockGround(false); }
+	void setTubeCurl(double c) { earth.tube_curl = fmax(0.0, fmin(c, 1.0)); }
+	// the camera in unrolled tube coordinates (see earth_core::tubePose):
+	// where on the original rect the imagery around the camera came from.
+	// null outside tube mode — hosts fall back to getPose for the marker
+	val getTubePose() {
+		double lat, lon, heading;
+		if (!earth.tubePose(camera.eye, camera.direction, lat, lon, heading))
+			return val::null();
+		val o = val::object();
+		o.set("lat", lat * 180.0 / M_PI);
+		o.set("lon", lon * 180.0 / M_PI);
+		o.set("heading", heading * 180.0 / M_PI);
+		return o;
+	}
+
+	val getTubeInfo() {
+		val o = val::object();
+		o.set("radius", earth.tube_radius);
+		o.set("halfLen", earth.tube_half_len);
+		o.set("halfWid", earth.tube_half_wid);
+		// ground level at the rect center in the same terms as setPose's alt
+		// (meters above the planetoid sphere) — spawn heights add onto this.
+		// only meaningful once groundLocked (measured off the loaded mesh)
+		o.set("groundAlt", earth.tube_ground_radius - planetRadius());
+		o.set("groundLocked", earth.tube_ground_locked);
+		// last walk's want/have node counts — in tube mode that's exactly
+		// the rect's download progress
+		o.set("nodesWanted", earth.stat_nodes_wanted);
+		o.set("nodesLoaded", earth.stat_nodes_loaded);
+		return o;
+	}
 	void setSkyColor(int rgb) { sky_color = rgb; }
 	void setDebugLod(bool on) { earth.debug_lod = on; }
 
@@ -125,7 +170,9 @@ struct EarthView {
 		renderFrameEnd(ctx);
 	}
 
-	// pose in degrees/meters, the vocabulary of 2d maps
+	// pose in degrees/meters, the vocabulary of 2d maps. roll is the
+	// airplane-frame bank angle (0 outside airplane mode) — not part of the
+	// geodetic pose struct, reported here so hosts can persist it
 	val getPose() {
 		auto p = cameraToPose(camera, planetRadius());
 		val o = val::object();
@@ -135,7 +182,26 @@ struct EarthView {
 		o.set("heading", p.heading * 180.0 / M_PI);
 		o.set("tilt", p.tilt * 180.0 / M_PI);
 		o.set("fov", camera.fov * 180.0 / M_PI);
+		double roll = 0;
+		if (camera.airplane) {
+			auto up = camera.eye.normalized();
+			Vector3d right = camera.direction.cross(up);
+			if (right.norm() > 1e-9) {
+				right.normalize();
+				Vector3d level_up = right.cross(camera.direction).normalized();
+				roll = atan2(camera.body_up.dot(right), camera.body_up.dot(level_up));
+			}
+		}
+		o.set("roll", roll * 180.0 / M_PI);
 		return o;
+	}
+
+	// bank the airplane frame to an absolute roll angle (degrees, 0 =
+	// wings level); the setPose counterpart for the roll degree of freedom
+	void setRoll(double deg) {
+		if (!camera.airplane) return;
+		alignAirplaneUp(camera);
+		camera.body_up = AngleAxisd(deg * M_PI / 180.0, camera.direction) * camera.body_up;
 	}
 
 	void setPose(double lat, double lon, double alt, double heading, double tilt) {
@@ -149,8 +215,13 @@ struct EarthView {
 		// isn't part of a pose (otherwise e.g. a map-click teleport silently
 		// drops orthographic mode)
 		auto ortho = camera.ortho;
+		auto ortho_extent = camera.ortho_extent;
+		auto airplane = camera.airplane;
 		camera = poseToCamera(p, planetRadius(), camera.fov);
 		camera.ortho = ortho;
+		camera.ortho_extent = ortho_extent;
+		camera.airplane = airplane;
+		if (airplane) alignAirplaneUp(camera); // teleports land wings-level
 		clampOrthoTilt(camera);
 	}
 
@@ -158,10 +229,24 @@ struct EarthView {
 		camera.fov = fmax(1.0, fmin(deg, 100.0)) * M_PI / 180.0;
 	}
 
-	// orthographic projection; the view extent follows the fov at the
-	// terrain distance, so the fov zoom controls keep working
-	void setOrtho(bool on) { camera.ortho = on; clampOrthoTilt(camera); }
+	// orthographic projection; on entry the view extent is initialized to
+	// what the fov shows at the terrain distance, so the mode switch keeps
+	// the apparent scale — from then on only zooms change it
+	void setOrtho(bool on) {
+		camera.ortho = on;
+		if (on)
+			camera.ortho_extent = fmax(1.0,
+				earth.centerDistanceMesh(camera) * tan(camera.fov / 2.0));
+		clampOrthoTilt(camera);
+	}
 	bool getOrtho() { return camera.ortho; }
+
+	// airplane controls (tube flying): yaw/pitch/roll about the camera's own
+	// axes, movement in the body frame, no horizon clamps
+	void setAirplane(bool on) {
+		camera.airplane = on;
+		if (on) alignAirplaneUp(camera);
+	}
 
 	// ortho zoom: dolly along the boresight, which scales the derived view
 	// extent by exactly 1/factor while the screen center stays put. leaves
@@ -169,7 +254,10 @@ struct EarthView {
 	// tracks the zoom, so toggling back to perspective looks right
 	void zoomOrtho(double factor) {
 		if (!earth.ready() || !(factor > 0)) return;
-		auto dist = centerDistance(camera, planetRadius());
+		// the extent is the zoom; the dolly keeps the eye at a matching
+		// distance so toggling back to perspective looks right
+		camera.ortho_extent = fmax(1.0, camera.ortho_extent / factor);
+		auto dist = earth.centerDistanceMesh(camera);
 		auto new_dist = fmax(1.0, dist / factor);
 		camera.eye += camera.direction * (dist - new_dist);
 	}
@@ -181,8 +269,8 @@ struct EarthView {
 	// the foreshortening of ground distance in an oblique view
 	void panOrtho(double dx_px, double dy_px, double viewport_h) {
 		if (!earth.ready() || viewport_h <= 0) return;
-		auto dist = centerDistance(camera, planetRadius());
-		auto half_extent = fmax(1.0, dist * tan(camera.fov / 2.0));
+		auto half_extent = camera.ortho_extent > 0 ? camera.ortho_extent
+			: fmax(1.0, earth.centerDistanceMesh(camera) * tan(camera.fov / 2.0));
 		auto mpp = 2.0 * half_extent / viewport_h; // meters per pixel
 		auto up = camera.eye.normalized();
 		Vector3d sideways = camera.direction.cross(up);
@@ -209,21 +297,20 @@ struct EarthView {
 	}
 
 	// what the camera is looking at, in degrees/meters; null when the view
-	// misses the planet. src tells whether the hit came from real terrain
-	// triangles ('mesh') or the sea-level sphere fallback ('sphere'), dist
+	// hits no loaded terrain (no fallback — see earth_core::raycast). dist
 	// is meters from the eye — both for the pick debug overlay and tests
 	val pickCenter() {
 		Vector3d hit;
 		if (!earth.ready()) return val::null();
-		auto res = earth.raycast(camera.eye, camera.direction, hit);
-		if (res == earth_core_t::raycast_miss) return val::null();
+		if (earth.raycast(camera.eye, camera.direction, hit) == earth_core_t::raycast_miss)
+			return val::null();
 		auto r = hit.norm();
 		val o = val::object();
 		o.set("lat", asin(hit.z() / r) * 180.0 / M_PI);
 		o.set("lon", atan2(hit.y(), hit.x()) * 180.0 / M_PI);
 		o.set("alt", r - planetRadius());
 		o.set("dist", (hit - camera.eye).norm());
-		o.set("src", res == earth_core_t::raycast_mesh ? std::string("mesh") : std::string("sphere"));
+		o.set("src", std::string("mesh"));
 		return o;
 	}
 
@@ -231,12 +318,14 @@ struct EarthView {
 	// events into this (yaw/pitch in radians for this frame). view_frame
 	// switches forward/back and raise/lower from ground-frame cruise/pedestal
 	// to view-frame dolly/boom; gain is the host's sticky speed multiplier
-	void fly(double yaw, double pitch, bool forward, bool back, bool left, bool right,
+	void fly(double yaw, double pitch, double roll,
+			bool forward, bool back, bool left, bool right,
 			bool raise, bool lower, bool slow, bool view_frame, double gain, double dt_ms) {
 		if (!earth.ready()) return;
 		camera_input_t in;
 		in.yaw = yaw;
 		in.pitch = pitch;
+		in.roll = roll;
 		in.forward = forward;
 		in.back = back;
 		in.left = left;
@@ -285,13 +374,21 @@ EMSCRIPTEN_BINDINGS(earth) {
 		.function("sceneComplete", &EarthView::sceneComplete)
 		.function("getPose", &EarthView::getPose)
 		.function("setPose", &EarthView::setPose)
+		.function("setRoll", &EarthView::setRoll)
+		.function("getTubePose", &EarthView::getTubePose)
 		.function("setFov", &EarthView::setFov)
 		.function("setOrtho", &EarthView::setOrtho)
 		.function("getOrtho", &EarthView::getOrtho)
+		.function("setAirplane", &EarthView::setAirplane)
 		.function("orbit", &EarthView::orbit)
 		.function("zoomOrtho", &EarthView::zoomOrtho)
 		.function("panOrtho", &EarthView::panOrtho)
 		.function("pickCenter", &EarthView::pickCenter)
+		.function("setTubeRect", &EarthView::setTubeRect)
+		.function("setTubeEnabled", &EarthView::setTubeEnabled)
+		.function("lockTubeGround", &EarthView::lockTubeGround)
+		.function("setTubeCurl", &EarthView::setTubeCurl)
+		.function("getTubeInfo", &EarthView::getTubeInfo)
 		.function("setSkyColor", &EarthView::setSkyColor)
 		.function("setDebugLod", &EarthView::setDebugLod)
 		.function("fly", &EarthView::fly);

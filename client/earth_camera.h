@@ -11,7 +11,27 @@ struct camera_t {
 	// show at the terrain distance, so mode switches keep the apparent
 	// scale and the fov zoom controls keep working
 	bool ortho = false;
+	// ortho vertical half-extent in meters — explicit state, initialized on
+	// entering ortho and scaled by zooms. deriving it per frame from the
+	// terrain distance under the boresight made movement pump the zoom
+	double ortho_extent = 0;
+	// airplane mode (tube flying): the camera owns its up vector instead of
+	// deriving it from the planet center, so roll is a real degree of
+	// freedom and yaw/pitch happen about the body axes with no horizon
+	// clamps. body_up is only meaningful while airplane is set
+	bool airplane = false;
+	Vector3d body_up = Vector3d::UnitZ();
 };
+
+// (re)level the airplane frame: body up from the planet's up at the current
+// position. used on mode entry and after teleports
+void alignAirplaneUp(camera_t &cam) {
+	auto up = cam.eye.normalized();
+	Vector3d right = cam.direction.cross(up);
+	if (right.norm() < 1e-9) right = Vector3d::UnitX().cross(cam.direction); // looking straight down
+	right.normalize();
+	cam.body_up = right.cross(cam.direction).normalized();
+}
 
 // geodetic pose on the spherical planetoid — the vocabulary a 2d map speaks.
 // angles in radians; alt in meters above the sphere; heading 0 = north,
@@ -126,6 +146,7 @@ void orbitCameraTilt(camera_t &cam, const Vector3d &pivot, double angle) {
 // introduced, so camera-right is always horizontal
 struct camera_input_t {
 	double yaw = 0, pitch = 0; // pan/tilt radians this frame
+	double roll = 0;           // radians this frame; airplane mode only
 	bool forward = false, back = false, left = false, right = false;
 	bool raise = false, lower = false;
 	bool view_frame = false;
@@ -142,6 +163,39 @@ void applyCameraInput(camera_t &cam, const camera_input_t &in, double planet_rad
 	// altitude-proportional speed scale down with it, keeping screen-space
 	// rates constant. 1 at the default 45-degree fov
 	auto zoom_scale = tan(cam.fov / 2.0) / tan(0.125 * M_PI);
+
+	// airplane mode: yaw/pitch/roll about the camera's own axes and all
+	// movement in the body frame. no horizon or overhead clamps — loops and
+	// rolls are the point. axis signs chosen to match the ground-frame
+	// controls when flying level
+	if (cam.airplane) {
+		Vector3d right = cam.direction.cross(cam.body_up);
+		if (right.norm() < 1e-9) right = cam.direction.cross(up);
+		if (right.norm() < 1e-9) right = Vector3d::UnitX().cross(cam.direction);
+		right.normalize();
+		cam.body_up = right.cross(cam.direction).normalized();
+		auto quat = AngleAxisd(in.roll * zoom_scale, cam.direction)
+			* AngleAxisd(in.yaw * zoom_scale, cam.direction.cross(right)) // = -body_up
+			* AngleAxisd(in.pitch * zoom_scale, right);
+		cam.direction = (quat * cam.direction).normalized();
+		// re-orthonormalize so drift never creeps in
+		cam.body_up = (quat * cam.body_up).normalized();
+		right = cam.direction.cross(cam.body_up).normalized();
+		cam.body_up = right.cross(cam.direction).normalized();
+
+		const auto altitude_per_second = 1.0;
+		const auto min_speed = 5.0;
+		auto altitude = cam.eye.norm() - planet_radius;
+		auto speed = fmax(min_speed, altitude * altitude_per_second * zoom_scale);
+		auto mag = speed * (in.dt_ms / 1000.0) * (in.slow ? 0.1 : 1.0) * in.speed_gain;
+		auto fwd = (in.forward ? 1.0 : 0.0) - (in.back ? 1.0 : 0.0);
+		auto vert = (in.raise ? 1.0 : 0.0) - (in.lower ? 1.0 : 0.0);
+		auto lat = (in.right ? 1.0 : 0.0) - (in.left ? 1.0 : 0.0);
+		Vector3d new_eye = cam.eye
+			+ (fwd * cam.direction + lat * right + vert * cam.body_up) * mag;
+		if (new_eye.norm() - planet_radius < 1000 * 1000 * 10) cam.eye = new_eye;
+		return;
+	}
 
 	// rotation
 	auto yaw = in.yaw * zoom_scale;

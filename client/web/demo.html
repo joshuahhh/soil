@@ -26,9 +26,19 @@
   #pickinfo { position: absolute; right: 8px; bottom: 8px; z-index: 10; color: #fff;
               background: rgba(0,0,0,.55); font: 12px monospace; padding: 6px 8px;
               border-radius: 4px; pointer-events: none; }
-  #hint { position: fixed; right: 8px; top: 8px; z-index: 10; color: #fff;
-          background: rgba(0,0,0,.55); font: 12px sans-serif; padding: 6px 8px;
-          border-radius: 4px; }
+  #tubeinfo { position: absolute; left: 8px; bottom: 8px; z-index: 10; color: #fff;
+              background: rgba(0,0,0,.55); font: 12px monospace; padding: 6px 8px;
+              border-radius: 4px; pointer-events: none; display: none; }
+  /* top-right hud: controls hint and speed readout as separate boxes, each
+     hugging its own content */
+  #hud { position: fixed; right: 8px; top: 8px; z-index: 10; display: flex;
+         flex-direction: column; align-items: flex-end; gap: 4px; }
+  #hint, #speed { color: #fff; background: rgba(0,0,0,.55); font: 12px sans-serif;
+                  padding: 6px 8px; border-radius: 4px; }
+  /* tube axis switch, over the map's bottom-left corner */
+  #axisbtn { position: fixed; left: 8px; bottom: 24px; z-index: 10; color: #fff;
+             background: rgba(0,0,0,.55); font: 12px sans-serif; padding: 6px 8px;
+             border-radius: 4px; cursor: pointer; user-select: none; }
 </style>
 <div id="map"></div>
 <div id="right"><canvas id="globe" tabindex="0"></canvas>
@@ -41,17 +51,24 @@
     </g>
   </svg>
   <div id="pickinfo"></div>
+  <div id="tubeinfo"></div>
 </div>
-<div id="hint"></div>
+<div id="hud"><div id="hint"></div><div id="speed"></div></div>
+<div id="axisbtn"></div>
 <script>
   // per-mode control hints; the active one is set by updateHint() below
   const HINTS = {
-    persp: 'WASD move · E/Q up/down · hold space: view-frame · arrows/drag look · ' +
-      'Z/X zoom · -/= speed · shift slow · O ortho · C pick debug · L lod debug · click map to teleport',
-    ortho: 'WASD/drag pan · arrows orbit around center · wheel/Z/X/E/Q zoom · ' +
-      '-/= speed · shift slow · O perspective · C pick debug · L lod debug · click map to teleport',
+    persp: 'WASD move · R/F up/down · hold space: view-frame · arrows/drag look · ' +
+      'Z/X zoom · shift slow · O ortho · C pick debug · L lod debug · click map to teleport · ' +
+      '⇧drag map: tube rect',
+    ortho: 'WASD/drag pan · arrows orbit around center · wheel/Z/X/R/F zoom · ' +
+      'shift slow · O perspective · C pick debug · L lod debug · click map to teleport · ' +
+      '⇧drag map: tube rect',
+    tube: 'airplane controls — W/S thrust · A/D strafe · R/F up/down · arrows/drag pitch+yaw · Q/E roll · ' +
+      'Z/X zoom · shift slow · T unroll · esc clear tube · ⇧drag map: new rect',
   };
   document.getElementById('hint').textContent = HINTS.persp;
+  document.getElementById('speed').textContent = '-/= speed x1';
 </script>
 <script src="earth.js"></script>
 <script>
@@ -122,7 +139,7 @@
   // view state (camera pose, fov, speed gain, map zoom) persists in
   // localstorage so a reload puts you back where you were
   // the seattle skyline from out on elliott bay
-  const DEFAULT_VIEW = { lat: 47.5980, lon: -122.3750, alt: 800, heading: 65, tilt: -12, fov: 45, zoom: 12, gain: 1, ortho: false };
+  const DEFAULT_VIEW = { lat: 47.5980, lon: -122.3750, alt: 800, heading: 65, tilt: -12, fov: 45, zoom: 12, gain: 1, ortho: false, tube: null };
   const START = (() => {
     try {
       const v = JSON.parse(localStorage.getItem('earth-view'));
@@ -137,7 +154,8 @@
     try {
       localStorage.setItem('earth-view', JSON.stringify({
         lat: p.lat, lon: p.lon, alt: p.alt, heading: p.heading, tilt: p.tilt,
-        fov: p.fov, zoom: map.getZoom(), gain, ortho,
+        roll: p.roll, fov: p.fov, zoom: map.getZoom(), gain, ortho,
+        tube: tubeRect ? { rect: tubeRect, on: tubeOn, ewAxis: tubeAxisEw } : null,
       }));
     } catch (e) {}
   };
@@ -207,16 +225,22 @@
   // frame: W/S dolly along the view, Q/E boom along view-up. arrows pan/tilt
   // so no mouse is needed. Z/X zoom (fov). -/= sticky speed gain. shift slow
   const keys = {};
-  const handled = new Set(['KeyW','KeyA','KeyS','KeyD','KeyQ','KeyE','KeyZ','KeyX','KeyO','KeyC','KeyL',
+  const handled = new Set(['KeyW','KeyA','KeyS','KeyD','KeyQ','KeyE','KeyR','KeyF','KeyZ','KeyX','KeyO','KeyC','KeyL','KeyT',
     'Space','ArrowLeft','ArrowRight','ArrowUp','ArrowDown','Minus','Equal']);
   let gain = 1; // re-initialized from the saved view once it loads
   let ortho = false;
   let debugLod = false;
   const updateHint = () => {
-    document.getElementById('hint').textContent = HINTS[ortho ? 'ortho' : 'persp']
-      + (gain !== 1 ? `  [speed x${gain >= 1 ? gain : '1/' + (1/gain)}]` : '');
+    document.getElementById('hint').textContent =
+      HINTS[tubeOn ? 'tube' : ortho ? 'ortho' : 'persp']
+      // T only does anything once a rect exists
+      + (!tubeOn && tubeRect ? ' · T roll tube · esc clear' : '');
+    document.getElementById('speed').textContent =
+      `-/= speed x${gain >= 1 ? gain : '1/' + (1/gain)}`;
   };
   canvas.addEventListener('keydown', (e) => {
+    // browser/os shortcuts (cmd-R reload etc.) pass through untouched
+    if (e.metaKey || e.ctrlKey || e.altKey) return;
     if (handled.has(e.code)) e.preventDefault();
     keys[e.code] = true;
     if (e.code === 'Minus' && !e.repeat) { gain = Math.max(1/16, gain/2); updateHint(); }
@@ -226,6 +250,33 @@
     // like the native app's L key: tint octants red where a finer tile is
     // wanted but not yet downloaded
     if (e.code === 'KeyL' && !e.repeat) { debugLod = !debugLod; view.setDebugLod(debugLod); }
+    // roll/unroll the tube for the current rect (drawn by shift+drag on the
+    // map). rolling up also flies into the tube mouth — watching the roll
+    // from outside mostly shows the back of the sheet
+    // clear the tube entirely: unroll, drop the rect, back to normal flight
+    if (e.code === 'Escape' && tubeRect) {
+      tubeRect = null;
+      tubeOn = false;
+      tubePending = null;
+      view.setTubeEnabled(false);
+      view.setAirplane(false);
+      setRectData(null);
+      updateHint();
+    }
+    if (e.code === 'KeyT' && !e.repeat && tubeRect) {
+      tubeOn = !tubeOn;
+      view.setTubeEnabled(tubeOn);
+      view.setAirplane(tubeOn); // tube flying is airplane-frame
+      if (tubeOn) {
+        curl = 0;
+        view.setTubeCurl(0);
+        tubePending = 'fly'; // rolls (and flies in) once the rect is loaded
+        tubePendingSince = performance.now();
+      } else {
+        tubePending = null;
+      }
+      updateHint();
+    }
   });
   canvas.addEventListener('keyup', (e) => { keys[e.code] = false; });
   canvas.addEventListener('blur', () => { for (const k in keys) keys[k] = false; });
@@ -294,8 +345,136 @@
   map.on('dragstart', () => { following = false; });
   map.on('click', (e) => {
     if (!view.ready()) return;
+    if (e.originalEvent.shiftKey) return; // shift belongs to rect drawing
     const p = view.getPose();
     view.setPose(e.lngLat.lat, e.lngLat.lng, p.alt, p.heading, p.tilt);
+  });
+
+  // --- tube mode ------------------------------------------------------------
+  // shift+drag on the map draws a rectangle; that slab of territory is rolled
+  // into a tube (the inception effect) and the camera teleports to one end of
+  // the tube axis, looking down it. T rolls/unrolls; drawing a new rect
+  // replaces the old one. the roll animates via curl (0 flat .. 1 closed)
+  let tubeRect = null; // [latMin, lonMin, latMax, lonMax] degrees
+  let tubeOn = false;
+  let curl = 0;
+  const curlTarget = 1;
+  // staged pipeline: the sheet stays flat while the rect's tiles load at
+  // full res; once the scene is complete the engine measures ground level
+  // off the mesh, and only then does the roll (and camera fly-in) happen.
+  // 'fly' also teleports into the tube mouth; 'roll' just rolls in place
+  let tubePending = null; // null | 'fly' | 'roll'
+  let tubePendingSince = 0;
+  // which way the tube axis runs; the rolled-up (glued) edges are the two
+  // edges parallel to it. toggled by the #axisbtn switch
+  let tubeAxisEw = true;
+  const normRect = (a, b) => [Math.min(a.lat, b.lat), Math.min(a.lng, b.lng),
+    Math.max(a.lat, b.lat), Math.max(a.lng, b.lng)];
+  // the rect plus topology-diagram arrows on the two glued edges (the ones
+  // that meet at the overhead seam), same direction on both — the cylinder
+  // identification, the way quotient-space diagrams mark it
+  const rectFC = (r) => {
+    if (!r) return { type: 'FeatureCollection', features: [] };
+    const feats = [{ type: 'Feature', properties: { kind: 'rect' },
+      geometry: { type: 'Polygon', coordinates: [[
+        [r[1], r[0]], [r[3], r[0]], [r[3], r[2]], [r[1], r[2]], [r[1], r[0]],
+      ]] } }];
+    const latc = (r[0] + r[2]) / 2, lonc = (r[1] + r[3]) / 2;
+    const cosLat = Math.cos(latc * Math.PI / 180);
+    const tri = (pts) => feats.push({ type: 'Feature', properties: { kind: 'arrow' },
+      geometry: { type: 'Polygon', coordinates: [pts.concat([pts[0]])] } });
+    if (tubeAxisEw) {
+      // glued edges run east-west; both arrows point east
+      const s = 0.09 * (r[3] - r[1]); // arrow half-length, degrees lon
+      const h = 0.55 * s * cosLat; // half-height in degrees lat (same meters)
+      for (const lat of [r[0], r[2]])
+        tri([[lonc + s, lat], [lonc - 0.6 * s, lat + h], [lonc - 0.6 * s, lat - h]]);
+    } else {
+      // glued edges run north-south; both arrows point north
+      const s = 0.09 * (r[2] - r[0]);
+      const h = 0.55 * s / cosLat;
+      for (const lon of [r[1], r[3]])
+        tri([[lon, latc + s], [lon + h, latc - 0.6 * s], [lon - h, latc - 0.6 * s]]);
+    }
+    return { type: 'FeatureCollection', features: feats };
+  };
+  const setRectData = (r) => {
+    const src = map.getSource('tube-rect');
+    if (src) src.setData(rectFC(r));
+  };
+  map.on('load', () => {
+    map.addSource('tube-rect', { type: 'geojson', data: rectFC(null) });
+    map.addLayer({ id: 'tube-rect-fill', type: 'fill', source: 'tube-rect',
+      filter: ['==', ['get', 'kind'], 'rect'],
+      paint: { 'fill-color': '#ff7f0e', 'fill-opacity': 0.12 } });
+    map.addLayer({ id: 'tube-rect-line', type: 'line', source: 'tube-rect',
+      filter: ['==', ['get', 'kind'], 'rect'],
+      paint: { 'line-color': '#ff7f0e', 'line-width': 2 } });
+    map.addLayer({ id: 'tube-rect-arrows', type: 'fill', source: 'tube-rect',
+      filter: ['==', ['get', 'kind'], 'arrow'],
+      paint: { 'fill-color': '#ff7f0e', 'fill-opacity': 0.9 } });
+    setRectData(tubeRect);
+  });
+  const axisBtn = document.getElementById('axisbtn');
+  const updateAxisBtn = () => {
+    axisBtn.textContent = `tube axis: ${tubeAxisEw ? 'E–W' : 'N–S'} (click to flip)`;
+  };
+  updateAxisBtn();
+  axisBtn.addEventListener('click', () => {
+    tubeAxisEw = !tubeAxisEw;
+    updateAxisBtn();
+    if (tubeRect) {
+      setRectData(tubeRect); // arrows move to the other edge pair
+      if (tubeOn) applyTube(tubeRect, true); // re-roll around the new axis
+      else view.setTubeRect(tubeRect[0], tubeRect[1], tubeRect[2], tubeRect[3], tubeAxisEw);
+    }
+  });
+  // fly to the near end of the tube axis: the axis runs along the rect's
+  // longer dimension at height = tube radius, so spawning at (end, radius)
+  // heading along the axis puts you dead center in the pipe, looking down it
+  const flyIntoTube = (r) => {
+    const latc = (r[0] + r[2]) / 2, lonc = (r[1] + r[3]) / 2;
+    const ew = tubeAxisEw;
+    // on the tube axis (ground + radius), a step in from the mouth
+    const info = view.getTubeInfo();
+    const alt = info.groundAlt + Math.max(20, info.radius);
+    const inset = 0.05;
+    view.setPose(
+      ew ? latc : r[0] + inset * (r[2] - r[0]),
+      ew ? r[1] + inset * (r[3] - r[1]) : lonc,
+      alt, ew ? 90 : 0, -5);
+    following = true;
+  };
+  const applyTube = (r, teleport) => {
+    view.setTubeRect(r[0], r[1], r[2], r[3], tubeAxisEw);
+    tubeOn = true;
+    view.setTubeEnabled(true);
+    view.setAirplane(true); // tube flying is airplane-frame
+    curl = 0; // flat while the rect loads; the tick rolls it when ready
+    view.setTubeCurl(0);
+    tubePending = teleport ? 'fly' : 'roll';
+    tubePendingSince = performance.now();
+    updateHint();
+  };
+  map.boxZoom.disable(); // shift+drag draws the tube rect instead
+  let drawAnchor = null;
+  map.on('mousedown', (e) => {
+    if (!e.originalEvent.shiftKey) return;
+    e.preventDefault(); // keep dragPan out of the gesture
+    drawAnchor = e.lngLat;
+  });
+  map.on('mousemove', (e) => {
+    if (drawAnchor) setRectData(normRect(drawAnchor, e.lngLat));
+  });
+  map.on('mouseup', (e) => {
+    if (!drawAnchor) return;
+    const r = normRect(drawAnchor, e.lngLat);
+    drawAnchor = null;
+    // an accidental shift-click, not a rect (under ~30 m each way)
+    if (r[2] - r[0] < 3e-4 && r[3] - r[1] < 3e-4) { setRectData(tubeRect); return; }
+    tubeRect = r;
+    setRectData(r);
+    if (view.ready()) applyTube(r, true);
   });
 
   // locked-mode wheel zoom: handle it ourselves with an unanimated setZoom,
@@ -353,7 +532,8 @@
   };
 
   // for devtools poking and automated testing
-  window.__demo = { view, map, marker, isFollowing: () => following };
+  window.__demo = { view, map, marker, isFollowing: () => following,
+    tube: () => ({ rect: tubeRect, on: tubeOn, curl }) };
 
   let lastSynced = { lat: 1e9, lon: 1e9 };
   let saveTimer = 0;
@@ -370,6 +550,20 @@
       gain = START.gain;
       ortho = !!START.ortho;
       view.setOrtho(ortho);
+      // restore a saved tube rect; if it was rolled, it rolls up again from
+      // flat (the camera pose is already wherever it was saved)
+      if (START.tube && START.tube.rect) {
+        tubeRect = START.tube.rect;
+        tubeAxisEw = START.tube.ewAxis !== false;
+        updateAxisBtn();
+        setRectData(tubeRect);
+        if (START.tube.on) {
+          applyTube(tubeRect, false); // reload + roll in place at the saved pose
+          if (START.roll) view.setRoll(START.roll); // restore the bank angle
+        } else {
+          view.setTubeRect(tubeRect[0], tubeRect[1], tubeRect[2], tubeRect[3], tubeAxisEw);
+        }
+      }
       updateHint();
     }
 
@@ -390,39 +584,83 @@
     // parallel projection has no meaningful elevation to pedestal along
     if (!!keys.KeyZ !== !!keys.KeyX) {
       if (ortho) {
-        view.zoomOrtho(Math.pow(0.9, (dt / 150) * (keys.KeyZ ? -1 : 1)));
+        view.zoomOrtho(Math.pow(0.9, (dt / 150) * (keys.KeyZ ? 1 : -1)));
       } else {
         const p = view.getPose();
-        view.setFov(p.fov * Math.pow(0.9, (dt / 150) * (keys.KeyZ ? 1 : -1)));
+        view.setFov(p.fov * Math.pow(0.9, (dt / 150) * (keys.KeyZ ? -1 : 1)));
       }
     }
-    if (ortho && !!keys.KeyE !== !!keys.KeyQ) {
-      view.zoomOrtho(Math.pow(0.9, (dt / 150) * (keys.KeyE ? 1 : -1))); // E out, Q in
+    if (ortho && !!keys.KeyR !== !!keys.KeyF) {
+      view.zoomOrtho(Math.pow(0.9, (dt / 150) * (keys.KeyR ? 1 : -1))); // R out, F in
     }
 
     const flying = dragging || yaw !== 0 || pitch !== 0 || orbitH !== 0 || orbitV !== 0
-      || keys.KeyW || keys.KeyS || keys.KeyA || keys.KeyD || keys.KeyQ || keys.KeyE;
+      || keys.KeyW || keys.KeyS || keys.KeyA || keys.KeyD || keys.KeyQ || keys.KeyE
+      || keys.KeyR || keys.KeyF;
     if (flying && !following) following = true;
 
-    view.fly(yaw, pitch,
+    // in tube mode Q/E become the roll axis (airplane style) and R/F boom
+    // along the camera's own up — the body-frame counterpart of A/D
+    const roll = tubeOn ? ((keys.KeyE ? 1 : 0) - (keys.KeyQ ? 1 : 0)) * 1.5 * rot : 0;
+    view.fly(yaw, pitch, roll,
       !!keys.KeyW, !!keys.KeyS, !!keys.KeyA, !!keys.KeyD,
-      !ortho && !!keys.KeyE, !ortho && !!keys.KeyQ,
+      (tubeOn || !ortho) && !!keys.KeyR,
+      (tubeOn || !ortho) && !!keys.KeyF,
       slow, !!keys.Space, gain, dt);
     yaw = 0;
     pitch = 0;
     view.frame(dt);
 
     if (view.ready() && posed) {
+      // stage 2+3 of the tube pipeline: the engine locks ground level as
+      // soon as the rect is covered at measurement resolution (well before
+      // full res), then we fly in and roll while the rest keeps streaming
+      // into the rolled tube. after 20s (a download stuck or failed), force
+      // the measurement with what's resident
+      const tubeInfoEl = document.getElementById('tubeinfo');
+      if (tubeOn) {
+        let ti = view.getTubeInfo();
+        if (tubePending) {
+          if (now - tubePendingSince > 20000 && !ti.groundLocked) {
+            view.lockTubeGround();
+            ti = view.getTubeInfo();
+          }
+          if (ti.groundLocked) {
+            if (tubePending === 'fly') flyIntoTube(tubeRect);
+            tubePending = null;
+          }
+        }
+        const parts = [];
+        if (tubePending || ti.nodesLoaded < ti.nodesWanted)
+          parts.push(`loading ${ti.nodesLoaded}/${ti.nodesWanted} tiles`);
+        if (!tubePending && curl !== curlTarget) parts.push('rolling…');
+        tubeInfoEl.style.display = parts.length ? '' : 'none';
+        if (parts.length) tubeInfoEl.textContent = 'tube: ' + parts.join(' · ');
+      } else {
+        tubeInfoEl.style.display = 'none';
+      }
+      // ease the roll toward closed; ~.7s time constant reads as the
+      // ground curling up rather than snapping
+      if (tubeOn && !tubePending && curl !== curlTarget) {
+        curl += (curlTarget - curl) * (1 - Math.exp(-dt / 700));
+        if (Math.abs(curlTarget - curl) < 0.001) curl = curlTarget;
+        view.setTubeCurl(curl);
+      }
       const p = view.getPose();
-      setMarkerHeading(p.heading);
-      if (Math.abs(p.lat - lastSynced.lat) > 1e-7 || Math.abs(p.lon - lastSynced.lon) > 1e-7) {
-        lastSynced = { lat: p.lat, lon: p.lon };
-        marker.setLngLat([p.lon, p.lat]);
+      // in tube mode the marker shows the camera in unrolled tube
+      // coordinates — the spot on the rect whose imagery is wrapped around
+      // the camera — rather than the now-meaningless ecef point under it
+      const tp = tubeOn ? view.getTubePose() : null;
+      const m = tp || p;
+      setMarkerHeading(m.heading);
+      if (Math.abs(m.lat - lastSynced.lat) > 1e-7 || Math.abs(m.lon - lastSynced.lon) > 1e-7) {
+        lastSynced = { lat: m.lat, lon: m.lon };
+        marker.setLngLat([m.lon, m.lat]);
       }
       // runs every frame (not just on movement) so the ease finishes
       // converging even after the camera stops; paused while the pointer is
       // down on the map so drag gestures aren't cancelled mid-flight
-      if (following && !mapPointerDown) followMarker({ lat: p.lat, lng: p.lon }, dt);
+      if (following && !mapPointerDown) followMarker({ lat: m.lat, lng: m.lon }, dt);
       if (pickDebug) updatePickDebug();
 
       saveTimer += dt;

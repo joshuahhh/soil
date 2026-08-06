@@ -211,6 +211,12 @@ void renderSetTransform(render_ctx_t &ctx, const float *m16) {
 	memcpy(ctx.transform, m16, sizeof(ctx.transform));
 }
 
+// tube mode is gl-only for now (see rocktree_gl.h); no-ops keep the shared
+// core compiling against this backend
+void renderSetTube(render_ctx_t &ctx, bool on, const float *local_to_clip16,
+		float r_eff, float half_len, float half_wid) {}
+void renderSetTubeNode(render_ctx_t &ctx, const float *m16) {}
+
 void bufferMesh(rocktree_t::node_t::mesh_t &mesh) {
 	if (mesh.buffered) fprintf(stderr, "mesh already buffered\n"), abort();
 	auto device = metal_device;
