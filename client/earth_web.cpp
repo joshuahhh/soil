@@ -165,6 +165,10 @@ struct EarthView {
 		if (w <= 0 || h <= 0) return;
 		ctx.width = w;
 		ctx.height = h;
+		// terrain hug wants the finest tiles under the camera selected even
+		// when the view frustum culls them (see earth_core ground column)
+		earth.ground_column_on = terrain_follow && !camera.ortho && !camera.airplane;
+		earth.ground_column_point = camera.eye;
 		renderFrameBegin(ctx, nullptr, w, h, sky_color);
 		earth.updateAndDraw(ctx, camera, w, h, dt_ms);
 		renderFrameEnd(ctx);
@@ -246,6 +250,17 @@ struct EarthView {
 	void setAirplane(bool on) {
 		camera.airplane = on;
 		if (on) alignAirplaneUp(camera);
+	}
+
+	// terrain hug: ground-frame flight where "level" means a fixed height
+	// above the mesh instead of a fixed sphere radius — cruising follows
+	// hills and buildings; R/F changes the offset. the offset locks to the
+	// current height above the mesh on the first frame that can measure it
+	bool terrain_follow = false;
+	double follow_height = NAN;
+	void setTerrainFollow(bool on) {
+		terrain_follow = on;
+		follow_height = NAN;
 	}
 
 	// ortho zoom: dolly along the boresight, which scales the derived view
@@ -336,7 +351,26 @@ struct EarthView {
 		in.view_frame = view_frame;
 		in.speed_gain = gain;
 		in.dt_ms = dt_ms;
+		auto hugging = terrain_follow && !camera.airplane && !camera.ortho;
+		if (hugging && !isnan(follow_height))
+			in.altitude_override = fmax(5.0, follow_height); // speed from true height
+		auto r_before = camera.eye.norm();
 		applyCameraInput(camera, in, planetRadius());
+		if (hugging) {
+			// radial movement (pedestal, view-frame boom) adjusts the offset;
+			// cruise then holds it over whatever the mesh does below
+			follow_height += camera.eye.norm() - r_before;
+			auto g = earth.groundRadiusUnder(camera.eye);
+			if (g > 0) {
+				if (isnan(follow_height)) follow_height = camera.eye.norm() - g;
+				follow_height = fmax(2.0, follow_height);
+				// ease onto the target height so rooftop edges read as a
+				// glide, not a bounce
+				auto k = 1.0 - exp(-dt_ms / 250.0);
+				auto r = camera.eye.norm();
+				camera.eye = camera.eye.normalized() * (r + (g + follow_height - r) * k);
+			}
+		}
 	}
 };
 
@@ -380,6 +414,7 @@ EMSCRIPTEN_BINDINGS(earth) {
 		.function("setOrtho", &EarthView::setOrtho)
 		.function("getOrtho", &EarthView::getOrtho)
 		.function("setAirplane", &EarthView::setAirplane)
+		.function("setTerrainFollow", &EarthView::setTerrainFollow)
 		.function("orbit", &EarthView::orbit)
 		.function("zoomOrtho", &EarthView::zoomOrtho)
 		.function("panOrtho", &EarthView::panOrtho)

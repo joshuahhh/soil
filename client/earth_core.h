@@ -20,6 +20,14 @@ struct earth_core_t {
 	// print per-frame scheduler state (bench mode)
 	bool log_sched = false;
 
+	// terrain-hug ground column: when the shell sets this, selection always
+	// includes the finest tiles in the vertical column under the given point
+	// even when the view frustum culls them — the ground query needs real
+	// mesh there, not whichever coarse ancestor happens to be on screen
+	// (see groundRadiusUnder)
+	bool ground_column_on = false;
+	Vector3d ground_column_point = Vector3d::Zero();
+
 	// tube mode: a geodetic rectangle of terrain is rolled into a cylinder in
 	// the vertex shader (the inception effect). selection switches from
 	// frustum culling + camera-driven lod to "every node whose obb touches
@@ -300,6 +308,23 @@ struct earth_core_t {
 		return raycast_mesh;
 	}
 
+	// ecef radius of the mesh directly under (or over) a point: ray straight
+	// down from 2km above it, which clears any building. -1 when nothing
+	// trustworthy is resident there. the resolution gate matters: the ray
+	// tests drawn (frustum-visible) nodes, and looking at the horizon often
+	// culls the fine tile directly below the camera — the ray then hits a
+	// coarse ancestor whose surface sits tens of meters off (terrain hug
+	// would plunge toward it). better to answer "don't know" and let the
+	// caller hold altitude until fine mesh is visible again
+	double groundRadiusUnder(const Vector3d &p) {
+		Vector3d up = p.normalized();
+		Vector3d hit;
+		double mpt;
+		if (raycast(up * (p.norm() + 2000.0), -up, hit, &mpt) != raycast_mesh) return -1;
+		if (mpt > 10.0) return -1; // coarse filler, not the real surface
+		return hit.norm();
+	}
+
 	// distance along the boresight to the actual drawn terrain, for the
 	// ortho view extent and ortho zoom/pan anchoring. the sphere-datum
 	// centerDistance sits ~4.5km off the real mesh (sphere radius vs the
@@ -375,6 +400,15 @@ struct earth_core_t {
 
 		auto frustum_planes = getFrustumPlanes(viewprojection); // for obb culling
 
+		// the down-ray of the terrain-hug ground column (cast from above any
+		// building, like groundRadiusUnder's)
+		Vector3d col_origin = Vector3d::Zero(), col_dir = -Vector3d::UnitZ();
+		if (ground_column_on) {
+			Vector3d cup = ground_column_point.normalized();
+			col_origin = cup * (ground_column_point.norm() + 2000.0);
+			col_dir = -cup;
+		}
+
 		const std::string octs[] = { "0", "1", "2", "3", "4", "5", "6", "7" };
 		std::vector<std::pair<std::string, rocktree_t::bulk_t *>> valid = { std::make_pair("", current_bulk) };
 		decltype(valid) next_valid;
@@ -431,7 +465,13 @@ struct earth_core_t {
 					// cull outside frustum using obb
 					// todo: check if it could cull more
 					cnt_cull++;
-					if (tube_on) {
+					// ground-column nodes skip culling and the lod cutoff:
+					// the ground query wants the finest mesh under the
+					// camera regardless of where the view points
+					auto in_column = ground_column_on
+						&& rayHitsObb(col_origin, col_dir, node->obb, INFINITY);
+					if (in_column) {
+					} else if (tube_on) {
 						// tube mode culls against the rect, not the view: the
 						// whole slab is drawn wherever the camera looks. box
 						// test in the rect's local frame, obb conservatively
@@ -450,10 +490,10 @@ struct earth_core_t {
 					}
 					cnt_lod++;
 
-					// level of detail: tube mode always descends — the fixed
-					// rect wants the finest imagery available, regardless of
-					// where the camera is (the node cap below bounds the total)
-					if (!tube_on) {
+					// level of detail: tube mode and the ground column always
+					// descend — both want the finest data available there,
+					// regardless of the camera view
+					if (!tube_on && !in_column) {
 						auto texels_per_meter = 1.0f / node->meters_per_texel;
 						auto wh = width < height ? width : height;
 						double r;

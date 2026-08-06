@@ -153,6 +153,10 @@ struct camera_input_t {
 	bool slow = false;        // momentary precision (x0.1)
 	double speed_gain = 1.0;  // sticky multiplier owned by the shell
 	double dt_ms = 0;
+	// when set (not nan), used for the altitude-proportional speed instead
+	// of the sphere-datum altitude — e.g. true height above the mesh, which
+	// the sphere altitude misses by kilometers where the datums diverge
+	double altitude_override = NAN;
 };
 
 void applyCameraInput(camera_t &cam, const camera_input_t &in, double planet_radius) {
@@ -215,11 +219,12 @@ void applyCameraInput(camera_t &cam, const camera_input_t &in, double planet_rad
 
 	// movement: speed proportional to altitude, so apparent (screen-space)
 	// motion is constant and approaching the ground eases in exponentially.
-	// altitude is a proxy for distance to the terrain being looked at; good
-	// enough until we track real terrain height under the camera
+	// altitude is a proxy for distance to the terrain being looked at; the
+	// shell can override it with real height above the mesh (terrain hug)
 	const auto altitude_per_second = 1.0;
 	const auto min_speed = 5.0; // m/s floor so we don't freeze at ground level
-	auto altitude = cam.eye.norm() - planet_radius;
+	auto altitude = isnan(in.altitude_override)
+		? cam.eye.norm() - planet_radius : in.altitude_override;
 	// the floor stays absolute so zoomed-in ground-level flight can still move
 	auto speed = fmax(min_speed, altitude * altitude_per_second * zoom_scale);
 	auto mag = speed * (in.dt_ms / 1000.0) * (in.slow ? 0.1 : 1.0) * in.speed_gain;

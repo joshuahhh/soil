@@ -59,7 +59,7 @@
   // per-mode control hints; the active one is set by updateHint() below
   const HINTS = {
     persp: 'WASD move · R/F up/down · hold space: view-frame · arrows/drag look · ' +
-      'Z/X zoom · shift slow · O ortho · C pick debug · L lod debug · click map to teleport · ' +
+      'Z/X zoom · shift slow · G hug terrain · O ortho · C pick debug · L lod debug · click map to teleport · ' +
       '⇧drag map: tube rect',
     ortho: 'WASD/drag pan · arrows orbit around center · wheel/Z/X/R/F zoom · ' +
       'shift slow · O perspective · C pick debug · L lod debug · click map to teleport · ' +
@@ -154,7 +154,7 @@
     try {
       localStorage.setItem('earth-view', JSON.stringify({
         lat: p.lat, lon: p.lon, alt: p.alt, heading: p.heading, tilt: p.tilt,
-        roll: p.roll, fov: p.fov, zoom: map.getZoom(), gain, ortho,
+        roll: p.roll, fov: p.fov, zoom: map.getZoom(), gain, ortho, hug,
         tube: tubeRect ? { rect: tubeRect, on: tubeOn, ewAxis: tubeAxisEw } : null,
       }));
     } catch (e) {}
@@ -225,10 +225,11 @@
   // frame: W/S dolly along the view, Q/E boom along view-up. arrows pan/tilt
   // so no mouse is needed. Z/X zoom (fov). -/= sticky speed gain. shift slow
   const keys = {};
-  const handled = new Set(['KeyW','KeyA','KeyS','KeyD','KeyQ','KeyE','KeyR','KeyF','KeyZ','KeyX','KeyO','KeyC','KeyL','KeyT',
+  const handled = new Set(['KeyW','KeyA','KeyS','KeyD','KeyQ','KeyE','KeyR','KeyF','KeyZ','KeyX','KeyG','KeyO','KeyC','KeyL','KeyT',
     'Space','ArrowLeft','ArrowRight','ArrowUp','ArrowDown','Minus','Equal']);
   let gain = 1; // re-initialized from the saved view once it loads
   let ortho = false;
+  let hug = false; // terrain hug: hold height above the mesh, not the sphere
   let debugLod = false;
   const updateHint = () => {
     document.getElementById('hint').textContent =
@@ -236,7 +237,8 @@
       // T only does anything once a rect exists
       + (!tubeOn && tubeRect ? ' · T roll tube · esc clear' : '');
     document.getElementById('speed').textContent =
-      `-/= speed x${gain >= 1 ? gain : '1/' + (1/gain)}`;
+      `-/= speed x${gain >= 1 ? gain : '1/' + (1/gain)}`
+      + (hug && !tubeOn && !ortho ? ' · hugging terrain' : '');
   };
   canvas.addEventListener('keydown', (e) => {
     // browser/os shortcuts (cmd-R reload etc.) pass through untouched
@@ -246,6 +248,8 @@
     if (e.code === 'Minus' && !e.repeat) { gain = Math.max(1/16, gain/2); updateHint(); }
     if (e.code === 'Equal' && !e.repeat) { gain = Math.min(16, gain*2); updateHint(); }
     if (e.code === 'KeyO' && !e.repeat) { ortho = !ortho; view.setOrtho(ortho); updateHint(); }
+    // terrain hug: cruise at a fixed height above the mesh (normal mode only)
+    if (e.code === 'KeyG' && !e.repeat) { hug = !hug; view.setTerrainFollow(hug); updateHint(); }
     if (e.code === 'KeyC' && !e.repeat) setPickDebug(!pickDebug);
     // like the native app's L key: tint octants red where a finer tile is
     // wanted but not yet downloaded
@@ -550,6 +554,8 @@
       gain = START.gain;
       ortho = !!START.ortho;
       view.setOrtho(ortho);
+      hug = !!START.hug;
+      view.setTerrainFollow(hug);
       // restore a saved tube rect; if it was rolled, it rolls up again from
       // flat (the camera pose is already wherever it was saved)
       if (START.tube && START.tube.rect) {
