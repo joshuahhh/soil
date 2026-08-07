@@ -125,6 +125,21 @@ struct earth_core_t {
 		return true;
 	}
 
+	// a rect-local point mapped onto the rolled tube, in the same local
+	// frame — the exact warp the vertex shader applies (rocktree_gl.h),
+	// so cpu-side distances match what is actually drawn. used by the lod
+	// walk to measure camera-to-node proximity through the roll: geometry
+	// across the tube's diameter is a couple of radii away (overhead), not
+	// half a circumference
+	Vector3d tubeWarp(const Vector3d &l) const {
+		auto R = tube_radius / fmax(tube_curl, 1e-3);
+		auto th = l.y() / R;
+		auto rho = fmax(R - l.z(), 0.05 * R);
+		auto ze = R - rho;
+		auto hs = sin(0.5 * th);
+		return Vector3d(l.x(), rho * sin(th), 2.0 * R * hs * hs + ze * cos(th));
+	}
+
 	// terrain elevation converges several lod levels before the imagery
 	// does: mesh at this resolution already carries the ground to within a
 	// few meters, so the roll can start ~two orders of magnitude fewer tiles
@@ -569,6 +584,14 @@ struct earth_core_t {
 			col_dir = -cup;
 		}
 
+		// the camera folded into the rect-local frame, for tube-mode lod
+		// distances (the camera flies inside the rolled tube, so its local
+		// position is already on the rolled side of the warp)
+		Vector3d tube_eye_local = Vector3d::Zero();
+		if (tube_on)
+			tube_eye_local = (tube_local_from_globe
+				* Vector4d(eye.x(), eye.y(), eye.z(), 1.0)).head<3>();
+
 		const std::string octs[] = { "0", "1", "2", "3", "4", "5", "6", "7" };
 		std::vector<std::pair<std::string, rocktree_t::bulk_t *>> valid = { std::make_pair("", current_bulk) };
 		decltype(valid) next_valid;
@@ -637,6 +660,10 @@ struct earth_core_t {
 					// camera regardless of where the view points
 					auto in_column = ground_column_on
 						&& rayHitsObb(col_origin, col_dir, node->obb, INFINITY);
+					Vector3d tube_c = Vector3d::Zero(); // node center in the rect-local frame
+					if (tube_on)
+						tube_c = (tube_local_from_globe * Vector4d(
+							node->obb.center.x(), node->obb.center.y(), node->obb.center.z(), 1.0)).head<3>();
 					if (in_column) {
 					} else if (tube_on) {
 						// tube mode culls against the rect, not the view: the
@@ -644,12 +671,10 @@ struct earth_core_t {
 						// test in the rect's local frame, obb conservatively
 						// widened to its bounding sphere; z allows terrain
 						// heights (everest) plus a little below sea level
-						Vector3d c = (tube_local_from_globe * Vector4d(
-							node->obb.center.x(), node->obb.center.y(), node->obb.center.z(), 1.0)).head<3>();
 						auto margin = node->obb.extents.norm();
-						if (fabs(c.x()) > tube_half_len + margin
-							|| fabs(c.y()) > tube_half_wid + margin
-							|| c.z() > 9000 + margin || c.z() < -1500 - margin) {
+						if (fabs(tube_c.x()) > tube_half_len + margin
+							|| fabs(tube_c.y()) > tube_half_wid + margin
+							|| tube_c.z() > 9000 + margin || tube_c.z() < -1500 - margin) {
 							continue;
 						}
 					} else if (obb_frustum_outside == classifyObbFrustum(&node->obb, frustum_planes)) {
@@ -661,14 +686,20 @@ struct earth_core_t {
 					}
 					cnt_lod++;
 
-					// level of detail: tube mode and the ground column always
-					// descend — both want the finest data available there,
-					// regardless of the camera view
+					// level of detail: the ground column always descends — it
+					// wants the finest mesh there regardless of the camera
+					// view. tube mode descends by distance measured through
+					// the roll (below), with an unconditional floor one level
+					// past tube_lock_mpt so tubeLockGround's strict coverage
+					// test can always be satisfied and the roll animation has
+					// decent imagery over the whole rect
 					// EARTH_LOD_SCALE=n: draw n-times coarser than the
 					// standard target (lod experiment knob)
 					static const double lod_scale = getenv("EARTH_LOD_SCALE")
 						? atof(getenv("EARTH_LOD_SCALE")) : 1.0;
-					if (!tube_on && !in_column) {
+					auto tube_floor = tube_on
+						&& node->meters_per_texel > tube_lock_mpt * 0.5;
+					if (!in_column && !tube_floor) {
 						auto texels_per_meter = 1.0f / node->meters_per_texel;
 						auto wh = width < height ? width : height;
 						double r;
@@ -677,8 +708,16 @@ struct earth_core_t {
 							// every depth, set entirely by the view extent
 							r = 2.0 * wh * tan(0.125 * M_PI) / ortho_half_extent;
 						} else {
+							// distance to the node: straight-line, or in tube
+							// mode through the warp — both endpoints on the
+							// rolled side, so lod tracks proximity in the tube
+							// as flown (the wall overhead is near, the far end
+							// of the axis is far)
+							auto dist = tube_on
+								? (tubeWarp(tube_c) - tube_eye_local).norm()
+								: (eye - node->obb.center).norm();
 							auto t = Affine3d().Identity();
-							t.translate(eye + (eye - node->obb.center).norm() * direction);
+							t.translate(eye + dist * direction);
 							auto m = viewprojection * t;
 							auto s = m(3, 3);
 							// zooming (narrowing the fov) magnifies the scene, so it
@@ -702,9 +741,10 @@ struct earth_core_t {
 				}
 			}
 			if (next_valid.size() == 0) break;
-			// full resolution over a large rect can outgrow the memory quota
-			// (the potential set is never evicted); stop descending at a
-			// uniform level once the set is big enough
+			// backstop only: distance lod bounds the set on its own for any
+			// sane rect (a floor level over the rect plus fine rings near the
+			// camera); this catches a degenerate rect before it can outgrow
+			// the memory quota
 			if (tube_on && potential_nodes.size() > 3000) break;
 			valid = next_valid;
 			next_valid.clear();
