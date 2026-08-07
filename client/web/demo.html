@@ -18,6 +18,19 @@
   body { display: flex; }
   #map, #right { flex: 1; height: 100%; }
   #right { position: relative; }
+  /* the strip between the panes; hovering it reveals an arrow that collapses
+     the map so the 3d view gets the whole window (and back) */
+  #divider { flex: 0 0 8px; position: relative; background: #333; z-index: 20; }
+  #expandbtn { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+               width: 22px; height: 48px; padding: 0; border: 0; border-radius: 4px;
+               color: #fff; background: rgba(0,0,0,.55); font: 14px sans-serif;
+               cursor: pointer; opacity: 0; transition: opacity .15s; }
+  #divider:hover #expandbtn { opacity: 1; }
+  body.full3d #map { display: none; }
+  /* the axis switch sits over the map's corner; without the map it's noise */
+  body.full3d #axisbtn { display: none; }
+  /* divider is at the window's left edge now: keep the arrow fully on-screen */
+  body.full3d #expandbtn { left: 0; transform: translateY(-50%); }
   #globe { width: 100%; height: 100%; display: block; outline: none; }
   /* pick debug: reticle at the exact screen center of the 3d view (what the
      center raycast should be looking through) plus a readout of the hit */
@@ -41,6 +54,7 @@
              border-radius: 4px; cursor: pointer; user-select: none; }
 </style>
 <div id="map"></div>
+<div id="divider"><button id="expandbtn" title="expand 3d view">◀</button></div>
 <div id="right"><canvas id="globe" tabindex="0"></canvas>
   <svg id="cross" width="33" height="33" viewBox="-16 -16 32 32">
     <g stroke="#000" stroke-width="3.5" fill="none" opacity=".6">
@@ -139,7 +153,7 @@
   // view state (camera pose, fov, speed gain, map zoom) persists in
   // localstorage so a reload puts you back where you were
   // the seattle skyline from out on elliott bay
-  const DEFAULT_VIEW = { lat: 47.5980, lon: -122.3750, alt: 800, heading: 65, tilt: -12, fov: 45, zoom: 12, gain: 1, ortho: false, tube: null };
+  const DEFAULT_VIEW = { lat: 47.5980, lon: -122.3750, alt: 800, heading: 65, tilt: -12, fov: 45, zoom: 12, gain: 1, ortho: false, tube: null, full3d: false };
   const START = (() => {
     try {
       const v = JSON.parse(localStorage.getItem('earth-view'));
@@ -154,7 +168,7 @@
     try {
       localStorage.setItem('earth-view', JSON.stringify({
         lat: p.lat, lon: p.lon, alt: p.alt, heading: p.heading, tilt: p.tilt,
-        roll: p.roll, fov: p.fov, zoom: map.getZoom(), gain, ortho, hug,
+        roll: p.roll, fov: p.fov, zoom: map.getZoom(), gain, ortho, hug, full3d,
         tube: tubeRect ? { rect: tubeRect, on: tubeOn, ewAxis: tubeAxisEw } : null,
       }));
     } catch (e) {}
@@ -186,6 +200,25 @@
     const el = document.getElementById('camIcon');
     if (el) el.style.transform = `rotate(${deg}deg)`;
   };
+
+  // expand the 3d view to the whole window: the arrow on the middle divider
+  // collapses the map pane; the divider stays at the left edge and its arrow
+  // flips to bring the map back. sticky across reloads via the saved view
+  const expandBtn = document.getElementById('expandbtn');
+  let full3d = false;
+  const setFull3d = (on) => {
+    full3d = on;
+    document.body.classList.toggle('full3d', on);
+    expandBtn.textContent = on ? '▶' : '◀';
+    expandBtn.title = on ? 'show map' : 'expand 3d view';
+    resize(); // the canvas backing store tracks its new client size
+    if (!on) map.resize();
+  };
+  expandBtn.addEventListener('click', () => {
+    setFull3d(!full3d);
+    canvas.focus(); // keep flight keys live (and space off the button)
+  });
+  if (START.full3d) setFull3d(true);
 
   // pick debug (C to toggle): a reticle at the exact center of the 3d view,
   // an orange dot on the map at what the center raycast hit (the orbit
