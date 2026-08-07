@@ -117,7 +117,9 @@ struct EarthView {
 		earth.setTubeRect(lat0 * M_PI / 180.0, lon0 * M_PI / 180.0,
 			lat1 * M_PI / 180.0, lon1 * M_PI / 180.0, ewAxis);
 	}
-	void setTubeEnabled(bool on) { earth.tube_on = on; }
+	// rolling or unrolling switches the hug datum (sphere radius vs tube
+	// radial), so a locked gap from the other mode is meaningless: re-lock
+	void setTubeEnabled(bool on) { earth.tube_on = on; follow_height = NAN; }
 	// force the ground measurement with whatever mesh is resident — the
 	// host's escape hatch when a stuck download keeps coverage incomplete
 	void lockTubeGround() { earth.tubeLockGround(false); }
@@ -352,10 +354,26 @@ struct EarthView {
 		in.speed_gain = gain;
 		in.dt_ms = dt_ms;
 		auto hugging = terrain_follow && !camera.airplane && !camera.ortho;
+		// tube hug: the same G, but the camera lives in the rolled
+		// cylinder's coordinates — "down" is outward along its radial, and
+		// the held height is the radial gap to the wall (tube flying is
+		// airplane-frame, so the two hug variants never overlap). movement
+		// and roll belong to the cylindrical walker below; the airplane
+		// branch only turns the head
+		auto tube_hugging = terrain_follow && earth.tube_on && camera.airplane;
+		// until the gap locks (wall below measurable), tube G flies as a
+		// plain airplane — never strand the camera unable to move
+		auto tube_locked = tube_hugging && !isnan(follow_height);
 		if (hugging && !isnan(follow_height))
 			in.altitude_override = fmax(5.0, follow_height); // speed from true height
+		auto in2 = in;
+		if (tube_locked) {
+			in2.forward = in2.back = in2.left = in2.right = false;
+			in2.raise = in2.lower = false;
+			in2.roll = 0;
+		}
 		auto r_before = camera.eye.norm();
-		applyCameraInput(camera, in, planetRadius());
+		applyCameraInput(camera, in2, planetRadius());
 		if (hugging) {
 			// radial movement (pedestal, view-frame boom) adjusts the offset;
 			// cruise then holds it over whatever the mesh does below
@@ -369,6 +387,65 @@ struct EarthView {
 				auto k = 1.0 - exp(-dt_ms / 250.0);
 				auto r = camera.eye.norm();
 				camera.eye = camera.eye.normalized() * (r + (g + follow_height - r) * k);
+			}
+		}
+		if (tube_hugging) {
+			auto c = earth.tubeCyl(camera.eye);
+			double rho_wall;
+			if (!tube_locked) {
+				// the gap locks to the current height above the wall on the
+				// first frame that can measure it; the walker takes over
+				// next frame
+				if (earth.tubeWallRho(c.x, c.theta, rho_wall))
+					follow_height = fmax(2.0, rho_wall - c.rho);
+			} else {
+				// ground-frame cruise, transposed: forward/strafe slide along
+				// the wall (the view projected onto the axial+circumferential
+				// tangent plane), R/F changes the held gap. speed from the
+				// gap, the true distance to what you're skimming
+				auto zoom_scale = tan(camera.fov / 2.0) / tan(0.125 * M_PI);
+				auto speed = fmax(5.0, follow_height * zoom_scale);
+				auto mag = speed * (in.dt_ms / 1000.0) * (in.slow ? 0.1 : 1.0) * in.speed_gain;
+				auto fwd = (in.forward ? 1.0 : 0.0) - (in.back ? 1.0 : 0.0);
+				auto vert = (in.raise ? 1.0 : 0.0) - (in.lower ? 1.0 : 0.0);
+				auto lat = (in.right ? 1.0 : 0.0) - (in.left ? 1.0 : 0.0);
+				Vector3d up = -c.radial; // cylinder up: toward the axis
+				Vector3d sideways = camera.direction.cross(up);
+				// looking straight at the wall or the axis: any horizontal
+				// will do, take the axial one
+				if (sideways.norm() < 1e-9) sideways = earth.tube_axis;
+				sideways.normalize();
+				Vector3d horizontal = up.cross(sideways).normalized();
+				Vector3d step = (fwd * horizontal + lat * sideways) * mag;
+				// advance the cylindrical coordinates by the step's tangent
+				// components; the angle moves by arc length over the radius
+				auto x = c.x + step.dot(earth.tube_axis);
+				Vector3d tangential = earth.tube_axis.cross(c.radial);
+				auto theta = c.theta + step.dot(tangential) / fmax(1.0, c.rho);
+				follow_height = fmax(2.0, follow_height + vert * mag);
+				// glue: remeasure the wall under the new footprint and ease
+				// onto rho = wall - gap, so rooftop edges read as a glide,
+				// not a bounce. no measurement -> hold the current radius
+				auto k = 1.0 - exp(-dt_ms / 250.0);
+				auto rho = c.rho;
+				if (earth.tubeWallRho(x, theta, rho_wall))
+					rho += (fmax(1.0, rho_wall - follow_height) - rho) * k;
+				camera.eye = earth.tubeCylPoint(x, theta, rho);
+				// parallel transport: the frame turns with the angle it
+				// traveled, so a horizontal gaze stays horizontal all the
+				// way around the loop (walking the full circumference is one
+				// 2*pi rotation about the axis, as it should be)
+				AngleAxisd turn(theta - c.theta, earth.tube_axis);
+				camera.direction = (turn * camera.direction).normalized();
+				camera.body_up = (turn * camera.body_up).normalized();
+				// level to the cylinder: up is inward radial, eased so
+				// engaging G mid-bank rolls level instead of snapping (the
+				// hug owns the roll axis). the blend only degenerates with
+				// body up pointing straight at the wall; skip that frame
+				// rather than normalize a near-zero vector
+				Vector3d radial_new = earth.tubeCyl(camera.eye).radial;
+				Vector3d bu = camera.body_up - (radial_new + camera.body_up) * k;
+				if (bu.norm() > 1e-6) camera.body_up = bu.normalized();
 			}
 		}
 	}

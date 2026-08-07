@@ -140,6 +140,60 @@ struct earth_core_t {
 		return Vector3d(l.x(), rho * sin(th), 2.0 * R * hs * hs + ze * cos(th));
 	}
 
+	// the rolled tube's cylindrical coordinate system, for tube terrain hug
+	// (see earth_web fly): axial coordinate x along the tube axis, angle
+	// theta around it (0 at the wall's bottom, radial_l(theta) =
+	// (0, sin, -cos) in the rect-local frame), radial distance rho from the
+	// axis. the frame is right-handed with local +x = tube_axis, so a
+	// rotation by dtheta about tube_axis in globe space is exactly the
+	// transport that carries the frame at theta to the frame at theta+dtheta
+	struct tube_cyl_t {
+		double x, theta, rho;
+		Vector3d radial; // outward (toward the wall) unit radial, globe frame
+	};
+	tube_cyl_t tubeCyl(const Vector3d &p) const {
+		tube_cyl_t c;
+		auto R = tube_radius / fmax(tube_curl, 1e-3);
+		Vector3d l = (tube_local_from_globe
+			* Vector4d(p.x(), p.y(), p.z(), 1.0)).head<3>();
+		c.x = l.x();
+		c.theta = atan2(l.y(), R - l.z());
+		c.rho = Vector2d(l.y(), l.z() - R).norm();
+		Vector3d radial_l(0.0, sin(c.theta), -cos(c.theta));
+		c.radial = tube_globe_from_local.block<3, 3>(0, 0) * radial_l;
+		return c;
+	}
+
+	// globe position of cylindrical (x, theta, rho)
+	Vector3d tubeCylPoint(double x, double theta, double rho) const {
+		auto R = tube_radius / fmax(tube_curl, 1e-3);
+		return (tube_globe_from_local
+			* Vector4d(x, rho * sin(theta), R - rho * cos(theta), 1.0)).head<3>();
+	}
+
+	// the wall's radial distance at (x, theta): unroll the angle back onto
+	// the rect (the meshes are stored unrolled; only the shader rolls them)
+	// and raycast straight down from above any terrain, like tubeLockGround's
+	// probes. theta wraps so walking around a closed tube's seam continues
+	// seamlessly. false while the mesh there is missing or coarse filler
+	// (same gate as groundRadiusUnder): better to hold and wait than glide
+	// toward a surface that sits tens of meters off
+	bool tubeWallRho(double x, double theta, double &rho_wall) {
+		if (!tube_on || tube_radius <= 0) return false;
+		auto R = tube_radius / fmax(tube_curl, 1e-3);
+		auto y = remainder(theta, 2.0 * M_PI) * R;
+		Vector3d origin = (tube_globe_from_local
+			* Vector4d(x, y, 10000.0, 1.0)).head<3>();
+		Vector3d hit;
+		double mpt;
+		if (raycast(origin, -tube_up, hit, &mpt) != raycast_mesh) return false;
+		if (mpt > 10.0) return false;
+		auto z_ground = (tube_local_from_globe
+			* Vector4d(hit.x(), hit.y(), hit.z(), 1.0)).z();
+		rho_wall = fmax(R - z_ground, 0.05 * R); // the warp's own clamp
+		return true;
+	}
+
 	// terrain elevation converges several lod levels before the imagery
 	// does: mesh at this resolution already carries the ground to within a
 	// few meters, so the roll can start ~two orders of magnitude fewer tiles
@@ -586,11 +640,15 @@ struct earth_core_t {
 
 		// the camera folded into the rect-local frame, for tube-mode lod
 		// distances (the camera flies inside the rolled tube, so its local
-		// position is already on the rolled side of the warp)
+		// position and view direction are already on the rolled side of
+		// the warp)
 		Vector3d tube_eye_local = Vector3d::Zero();
-		if (tube_on)
+		Vector3d tube_dir_local = Vector3d::UnitX();
+		if (tube_on) {
 			tube_eye_local = (tube_local_from_globe
 				* Vector4d(eye.x(), eye.y(), eye.z(), 1.0)).head<3>();
+			tube_dir_local = tube_local_from_globe.block<3, 3>(0, 0) * direction;
+		}
 
 		const std::string octs[] = { "0", "1", "2", "3", "4", "5", "6", "7" };
 		std::vector<std::pair<std::string, rocktree_t::bulk_t *>> valid = { std::make_pair("", current_bulk) };
@@ -598,6 +656,12 @@ struct earth_core_t {
 		// filled in bfs level order, so iterating it backwards visits children
 		// before parents (the order the draw loop's octant masking needs)
 		std::vector<std::pair<std::string, rocktree_t::node_t *>> potential_nodes;
+		// tube mode only: per-entry keep priority, parallel to potential_nodes
+		// and next_valid — how far past its lod target a node was requested
+		// (r over the required texels-per-meter). the floor and ground-column
+		// nodes carry effectively-infinite want. used by the node-budget
+		// backstop to shed the least-wanted additions first
+		std::vector<double> potential_want, next_want;
 
 		// downloaded nodes and bulk metadata are both lru caches with byte
 		// quotas (see the eviction sweep below); nothing is ever dropped on
@@ -612,6 +676,7 @@ struct earth_core_t {
 		// node culling and level of detail using breadth-first search
 		bool all_loaded = true;
 		for (;;) {
+			auto level_pot_start = potential_nodes.size();
 			for(auto cur2 : valid) {
 				auto cur = cur2.first;
 				auto bulk = cur2.second;
@@ -699,6 +764,7 @@ struct earth_core_t {
 						? atof(getenv("EARTH_LOD_SCALE")) : 1.0;
 					auto tube_floor = tube_on
 						&& node->meters_per_texel > tube_lock_mpt * 0.5;
+					auto tube_want = 1e30; // floor/column: never shed
 					if (!in_column && !tube_floor) {
 						auto texels_per_meter = 1.0f / node->meters_per_texel;
 						auto wh = width < height ? width : height;
@@ -708,21 +774,46 @@ struct earth_core_t {
 							// every depth, set entirely by the view extent
 							r = 2.0 * wh * tan(0.125 * M_PI) / ortho_half_extent;
 						} else {
+							// zooming (narrowing the fov) magnifies the scene, so it
+							// needs proportionally finer tiles. 1 at the default fov
+							auto zoom = tan(0.125 * M_PI) / tan(cam.fov / 2.0);
 							// distance to the node: straight-line, or in tube
 							// mode through the warp — both endpoints on the
 							// rolled side, so lod tracks proximity in the tube
 							// as flown (the wall overhead is near, the far end
 							// of the axis is far)
-							auto dist = tube_on
-								? (tubeWarp(tube_c) - tube_eye_local).norm()
-								: (eye - node->obb.center).norm();
+							double dist;
+							if (tube_on) {
+								Vector3d w = tubeWarp(tube_c) - tube_eye_local;
+								dist = w.norm();
+								// zoom magnifies only what's on screen. tube
+								// lod ignores the view direction on purpose
+								// (the whole slab stays resident), but the
+								// zoom boost must not: boosted in a full
+								// circle it floods the node backstop, whose
+								// uniform-level break then *coarsens* the
+								// very thing being zoomed at. boost only
+								// nodes whose rolled position can appear in
+								// the zoomed view — a cone test widened by
+								// the node's own angular size; the rest keep
+								// the default-fov target, i.e. unzoomed
+								// tube quality
+								if (zoom > 1.0 && dist > 1e-6) {
+									auto half_diag = atan(tan(cam.fov / 2.0)
+										* sqrt(1.0 + aspect_ratio * aspect_ratio));
+									auto node_ang = asin(fmin(1.0,
+										node->obb.extents.norm() / dist));
+									auto cos_ang = w.dot(tube_dir_local) / dist;
+									if (cos_ang < cos(fmin(M_PI, half_diag + node_ang)))
+										zoom = 1.0;
+								}
+							} else {
+								dist = (eye - node->obb.center).norm();
+							}
 							auto t = Affine3d().Identity();
 							t.translate(eye + dist * direction);
 							auto m = viewprojection * t;
 							auto s = m(3, 3);
-							// zooming (narrowing the fov) magnifies the scene, so it
-							// needs proportionally finer tiles. 1 at the default fov
-							auto zoom = tan(0.125 * M_PI) / tan(cam.fov / 2.0);
 							r = (2.0*(1.0/s)) * wh * zoom;
 						}
 						r /= lod_scale;
@@ -730,24 +821,67 @@ struct earth_core_t {
 							nxt.c_str(), texels_per_meter, r,
 							texels_per_meter > r ? "stop" : "descend", (int)node->dl_state.load());
 						if (texels_per_meter > r) continue;
+						// how far past its target this node was requested,
+						// scale-free (1 = barely wanted)
+						tube_want = r * node->meters_per_texel;
 					}
 
 					next_valid.push_back(std::make_pair(nxt, bulk));
+					if (tube_on) next_want.push_back(tube_want);
 
 					if (node->can_have_data) {
 						node->last_wanted_ms = now_ms;
 						potential_nodes.emplace_back(std::move(nxt), node);
+						if (tube_on) potential_want.push_back(tube_want);
 					}
 				}
 			}
 			if (next_valid.size() == 0) break;
-			// backstop only: distance lod bounds the set on its own for any
-			// sane rect (a floor level over the rect plus fine rings near the
-			// camera); this catches a degenerate rect before it can outgrow
-			// the memory quota
-			if (tube_on && potential_nodes.size() > 3000) break;
+			// node-budget backstop: distance lod bounds the set on its own for
+			// any sane rect (a floor level over the rect plus fine rings near
+			// the camera), but a degenerate rect or heavy zoom can overflow
+			// it. shed this level's least-wanted additions instead of breaking
+			// off the whole walk: a uniform break coarsens exactly the tiles
+			// with the highest demand (the zoomed-at building loses its lod as
+			// the fov narrows — backwards), while a want-ordered trim degrades
+			// everything evenly relative to its own target. reordering within
+			// one bfs level is fine: the draw loop only needs whole levels in
+			// order (children after parents when read backwards)
+			const size_t tube_node_cap = 3000;
+			if (tube_on && potential_nodes.size() > tube_node_cap) {
+				auto budget = tube_node_cap > level_pot_start
+					? tube_node_cap - level_pot_start : 0;
+				std::vector<size_t> idx(potential_nodes.size() - level_pot_start);
+				for (size_t i = 0; i < idx.size(); i++) idx[i] = level_pot_start + i;
+				std::sort(idx.begin(), idx.end(), [&](size_t a, size_t b) {
+					return potential_want[a] > potential_want[b]; });
+				// the weakest want that stays; nothing below it may descend
+				auto cutoff = budget > 0
+					? potential_want[idx[budget - 1]] : 1e300;
+				decltype(potential_nodes) kept_n(potential_nodes.begin(),
+					potential_nodes.begin() + level_pot_start);
+				std::vector<double> kept_w(potential_want.begin(),
+					potential_want.begin() + level_pot_start);
+				for (size_t i = 0; i < budget && i < idx.size(); i++) {
+					kept_n.push_back(std::move(potential_nodes[idx[i]]));
+					kept_w.push_back(potential_want[idx[i]]);
+				}
+				potential_nodes = std::move(kept_n);
+				potential_want = std::move(kept_w);
+				decltype(next_valid) nv;
+				std::vector<double> nw;
+				for (size_t i = 0; i < next_valid.size(); i++)
+					if (next_want[i] >= cutoff) {
+						nv.push_back(std::move(next_valid[i]));
+						nw.push_back(next_want[i]);
+					}
+				next_valid = std::move(nv);
+				next_want = std::move(nw);
+				if (next_valid.size() == 0) break;
+			}
 			valid = next_valid;
 			next_valid.clear();
+			next_want.clear();
 		}
 		auto t1 = ticksMs();
 		sec_bfs += t1 - t0;

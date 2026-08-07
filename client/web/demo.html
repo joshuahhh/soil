@@ -79,7 +79,7 @@
       'shift slow · O perspective · C pick debug · L lod debug · click map to teleport · ' +
       '⇧drag map: tube rect',
     tube: 'airplane controls — W/S thrust · A/D strafe · R/F up/down · arrows/drag pitch+yaw · Q/E roll · ' +
-      'Z/X zoom · shift slow · T unroll · esc clear tube · ⇧drag map: new rect',
+      'Z/X zoom · shift slow · G hug the wall · T unroll · esc clear tube · ⇧drag map: new rect',
   };
   document.getElementById('hint').textContent = HINTS.persp;
   document.getElementById('speed').textContent = '-/= speed x1';
@@ -271,7 +271,8 @@
       + (!tubeOn && tubeRect ? ' · T roll tube · esc clear' : '');
     document.getElementById('speed').textContent =
       `-/= speed x${gain >= 1 ? gain : '1/' + (1/gain)}`
-      + (hug && !tubeOn && !ortho ? ' · hugging terrain' : '');
+      + (hug && tubeOn ? ' · hugging the wall'
+        : hug && !ortho ? ' · hugging terrain' : '');
   };
   canvas.addEventListener('keydown', (e) => {
     // browser/os shortcuts (cmd-R reload etc.) pass through untouched
@@ -283,7 +284,8 @@
     // no ortho inside the tube: its extent/zoom anchoring assumes normal
     // terrain below, and a parallel projection of the tube reads as mush
     if (e.code === 'KeyO' && !e.repeat && !tubeOn) { ortho = !ortho; view.setOrtho(ortho); updateHint(); }
-    // terrain hug: cruise at a fixed height above the mesh (normal mode only)
+    // terrain hug: cruise at a fixed height above the mesh — over the
+    // sphere normally, radially above the wall inside the tube
     if (e.code === 'KeyG' && !e.repeat) { hug = !hug; view.setTerrainFollow(hug); updateHint(); }
     if (e.code === 'KeyC' && !e.repeat) setPickDebug(!pickDebug);
     // like the native app's L key: tint octants red where a finer tile is
@@ -645,7 +647,10 @@
     // in tube mode Q/E become the roll axis (airplane style) and R/F boom
     // along the camera's own up — the body-frame counterpart of A/D
     const roll = tubeOn ? ((keys.KeyE ? 1 : 0) - (keys.KeyQ ? 1 : 0)) * 1.5 * rot : 0;
-    view.fly(yaw, pitch, roll,
+    // thrusting steadies the hand: turning (keys and drag alike) drops to
+    // a fifth while W is held, so forward flight curves instead of veers
+    const turn = keys.KeyW ? 0.2 : 1;
+    view.fly(yaw * turn, pitch * turn, roll * turn,
       !!keys.KeyW, !!keys.KeyS, !!keys.KeyA, !!keys.KeyD,
       (tubeOn || !ortho) && !!keys.KeyR,
       (tubeOn || !ortho) && !!keys.KeyF,
