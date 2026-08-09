@@ -13,6 +13,8 @@
 <script src="coi-serviceworker.js"></script>
 <link rel="stylesheet" href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css">
 <script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
+<link rel="stylesheet" href="https://unpkg.com/@maplibre/maplibre-gl-geocoder@1.9.4/dist/maplibre-gl-geocoder.css">
+<script src="https://unpkg.com/@maplibre/maplibre-gl-geocoder@1.9.4/dist/maplibre-gl-geocoder.js"></script>
 <style>
   html, body { margin: 0; height: 100%; }
   body { display: flex; }
@@ -48,6 +50,8 @@
          flex-direction: column; align-items: flex-end; gap: 4px; }
   #hint, #speed { color: #fff; background: rgba(0,0,0,.55); font: 12px sans-serif;
                   padding: 6px 8px; border-radius: 4px; }
+  /* geolocate button and search box side by side in the map's top-left */
+  .maplibregl-ctrl-top-left { display: flex; align-items: flex-start; }
   /* tube axis switch, over the map's bottom-left corner */
   #axisbtn { position: fixed; left: 8px; bottom: 24px; z-index: 10; color: #fff;
              background: rgba(0,0,0,.55); font: 12px sans-serif; padding: 6px 8px;
@@ -382,6 +386,44 @@
     const p = view.getPose();
     view.setPose(pos.coords.latitude, pos.coords.longitude, p.alt, p.heading, p.tilt);
     following = true;
+  });
+
+  // place search: the standard maplibre-gl-geocoder control backed by OSM's
+  // nominatim api. flyTo is off — picking a result teleports the camera like
+  // a map click, and follow mode brings the map along on its own
+  const geocoder = new MaplibreGeocoder({
+    forwardGeocode: async (config) => {
+      const features = [];
+      try {
+        const resp = await fetch('https://nominatim.openstreetmap.org/search?'
+          + new URLSearchParams({ q: config.query, format: 'geojson', limit: 5 }));
+        for (const f of (await resp.json()).features) {
+          const center = f.geometry.type === 'Point' ? f.geometry.coordinates
+            : [(f.bbox[0] + f.bbox[2]) / 2, (f.bbox[1] + f.bbox[3]) / 2];
+          features.push({ type: 'Feature', geometry: { type: 'Point', coordinates: center },
+            place_name: f.properties.display_name, text: f.properties.display_name,
+            place_type: ['place'], center, bbox: f.bbox, properties: f.properties });
+        }
+      } catch (e) {}
+      return { features };
+    },
+  }, { maplibregl, marker: false, showResultMarkers: false, flyTo: false,
+    showResultsWhileTyping: false });
+  map.addControl(geocoder, 'top-left');
+  geocoder.on('result', ({ result }) => {
+    if (!view.ready()) return;
+    const p = view.getPose();
+    // altitude scaled to the result's footprint (a city needs more height
+    // than a street corner), clamped to something flyable
+    let alt = p.alt;
+    if (result.bbox) {
+      const [w, s, e, n] = result.bbox;
+      const spanM = Math.max((n - s), (e - w) * Math.cos(result.center[1] * Math.PI / 180)) * 111000;
+      alt = Math.min(20000, Math.max(200, spanM * 0.8));
+    }
+    view.setPose(result.center[1], result.center[0], alt, p.heading, p.tilt);
+    following = true;
+    canvas.focus(); // hand the keys back to flight controls
   });
 
   map.on('dragstart', () => { following = false; });
