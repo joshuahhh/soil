@@ -16,10 +16,9 @@ and renders in a split-screen demo next to a MapLibre slippy map.
 ./build.sh
 ```
 
-`setup.sh` downloads eigen and protobuf (pinned releases from their official
-homes) and compiles libprotobuf to wasm; it needs emscripten and curl, and
-nothing else lives outside the repo. `build.sh` then produces `web/earth.js` +
-`web/earth.wasm` (modularized, pthreads). Serve `web/`:
+`setup.sh` downloads pinned releases of eigen and protobuf and compiles
+libprotobuf to wasm; it needs emscripten and curl. `build.sh` then produces
+`web/earth.js` + `web/earth.wasm` (modularized, pthreads). Serve `web/`:
 
 ```
 ./serve.py
@@ -33,17 +32,16 @@ build needs (expect one automatic reload on first visit).
 
 #### Deploy
 
-Every push to main is built from source by
-[.github/workflows/deploy.yml](.github/workflows/deploy.yml) and published to
-GitHub Pages as an artifact — no build products are committed anywhere.
+Push to main. [.github/workflows/deploy.yml](.github/workflows/deploy.yml)
+builds from source and publishes `web/` to GitHub Pages as an artifact, taking
+about 90 seconds. No build products are committed; the deploy job needs the
+build job, so a failed build publishes nothing.
+
+To watch a run:
 
 ```
-./deploy-soil.sh
+gh run watch --repo joshuahhh/soil
 ```
-
-is the gated way to ship: it refuses a dirty tree, verifies the build locally,
-pushes, watches the workflow run for that exact commit, and smoke-tests the
-live wasm.
 
 #### Stuff we've removed
 
