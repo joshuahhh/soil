@@ -17,11 +17,7 @@ using namespace geo_globetrotter_proto_rocktree;
 #include "rocktree_math.h"
 
 // opengl helpers
-#ifdef EARTH_METAL
-#include "rocktree_metal.h"
-#else
 #include "rocktree_gl.h"
-#endif
 
 // nice
 #include <thread>

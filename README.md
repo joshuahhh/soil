@@ -1,19 +1,69 @@
-![header](header.png "Header image: 37.793647, -122.398938")
+Reverse-engineering undocumented parts of Google Earth, forked from [retroplasma/earth-reverse-engineering](https://github.com/retroplasma/earth-reverse-engineering) (now archived) and violently vibe-coded.
+This fork is web-only: the C++ engine compiles to WebAssembly
+and renders in a split-screen demo next to a MapLibre slippy map.
 
-Reverse-engineering undocumented parts of Google Earth. Similar work is done for Apple Maps [here](https://github.com/retroplasma/flyover-reverse-engineering).
+#### Layout
 
-#### Status
-The focus has been on the 3D satellite mode, which required digging into:
-- URL structures
-- octrees and conversion from geo coordinates
-- Protobuf formats of assets and metadata
-- postprocessing steps (e.g. unpacking of meshes and textures)
+- repo root — the engine (C++ → wasm via emscripten, `earth_web.cpp` +
+  `rocktree_*.h`) and its build/deploy scripts
+- [web/](./web/) — the app (`index.html`) and the build's js/wasm output
+- [proto/](./proto/) — protobuf schema for Google Earth's "rocktree" data
 
-Code was written and tested with various regions and cities:
-- [Flycam client](./client/) (C++, native + WebAssembly)
-- [Model exporter](./exporter/) (JS, works without photogrammetry or graphics debuggers)
+#### Build
 
-#### Info
+```
+./build.sh
+```
+
+Produces `web/earth.js` + `web/earth.wasm` (modularized, pthreads). Serve
+`web/`, e.g.:
+
+```
+python3 -m http.server -d web 8000
+```
+
+`coi-serviceworker.js` injects the cross-origin-isolation headers the pthread
+build needs (expect one automatic reload on first visit). Requires emscripten
+plus a protobuf build for it (`config_emscripten.sh` sets the paths).
+
+#### Deploy
+
+```
+./deploy-soil.sh "message"
+```
+
+Builds, sanity-checks the artifacts, copies them into the sibling `soil` repo
+(GitHub Pages), pushes, waits for the Pages build of that exact commit, and
+smoke-tests the live wasm. Each step is gated on the previous one succeeding.
+
+#### Stuff we've removed
+
+This fork used to carry upstream's native desktop client and a standalone
+emscripten app. We only use the web version these days, so they were stripped.
+Everything below lives in git history — commit `e92c1f1` is the last one that
+has it all. (Back then the engine lived in a `client/` subdirectory, since
+unwrapped into the repo root; the paths below are the historical ones.)
+
+- `client/main.cpp` — the native SDL app (macOS Metal / OpenGL, Linux GL),
+  which was also the standalone `./build.sh emscripten` target; `client/shell.html`
+  was its web shell
+- `client/rocktree_metal.h` — the Metal render backend (default on macOS
+  natively), plus the `EARTH_METAL` backend selection in `rocktree_types.h` /
+  `rocktree_util.h` and the `-DEARTH_USE_GL` A/B switch
+- `client/gl2/` — glad OpenGL loader for Windows/Linux native builds
+- `client/bench.sh`, `client/bench_plot.py` — the perf-regression harness
+  (`./main --bench` against reference frame captures). The untracked bench
+  data (`client/bench/`, `view_*.json` at the repo root) was never in git;
+  the view captures are archived in `../native-bench-archive.tar.gz`
+- the native and `emscripten` branches of `client/build.sh`
+- `exporter/` — upstream's Node.js model exporter (lat/long → octant lookup,
+  octant → textured `.obj` dump for Blender), untouched since upstream
+- `header.png` — the old README header image
+
+Note the web build still uses `rocktree_gl.h` (GLES2), `http.h`,
+`rocktree_http.h`, and `threads.h` — those look native-ish but are shared.
+
+#### Reverse-engineering notes (upstream)
 
 URL structure:
 ```
@@ -60,8 +110,3 @@ BulkMetaData:
     - Dump OBB to obj: https://gist.github.com/retroplasma/5698808bfaa63ffd03f751a84fa6ce14
     - Latlong to octant using OBB (unstable): https://github.com/retroplasma/earth-reverse-engineering/blob/443a3622ce9cb12cd4460cc6dc7999cc703ae67f/experimental_latlong_to_octant.js
 ```
-
-Related ideas: [Racing game](https://www.reddit.com/r/Showerthoughts/comments/aex25s/race_car_video_games_could_be_amazing_if_they/) , [Minimal client](https://github.com/kaylathedev/google-maps-3d-client). WebGL + CORS should work ([test](https://retroplasma.github.io/get_planetoid_metadata.html)).
-
-#### Important
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.

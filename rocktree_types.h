@@ -1,15 +1,6 @@
 #include <SDL_opengl.h>
 
-// renderer backend: Metal natively on macOS (Apple's OpenGL is deprecated,
-// frozen at 2.1 compat, and has high per-draw-call overhead), OpenGL
-// everywhere else (including the emscripten/WebGL build). build with
-// -DEARTH_USE_GL to force the GL backend on macOS for A/B comparison
-#if defined(__APPLE__) && !defined(EMSCRIPTEN) && !defined(EARTH_USE_GL)
-#define EARTH_METAL 1
-typedef void* render_handle_t; // retained id<MTLBuffer> / id<MTLTexture>
-#else
 typedef GLuint render_handle_t;
-#endif
 
 // whether the gpu can take dxt1 uploads. set by the render backend at init;
 // without it (android gpus, generally) node requests ask for jpg textures

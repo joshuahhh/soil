@@ -4,17 +4,17 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
-SOIL=../../soil
+SOIL=../soil
 MSG="${1:-deploy}"
 
-bash build.sh weblib
+bash build.sh
 
 # refuse to ship implausible artifacts (e.g. truncated by a full disk)
 test "$(stat -f%z web/earth.wasm)" -gt 500000
 test "$(stat -f%z web/earth.js)" -gt 50000
 
 cp web/earth.js web/earth.wasm web/ar.html web/coi-serviceworker.js "$SOIL"/
-cp web/demo.html "$SOIL"/index.html
+cp web/index.html "$SOIL"/index.html
 
 cd "$SOIL"
 git add -A

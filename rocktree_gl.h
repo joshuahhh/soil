@@ -105,8 +105,8 @@ void unbufferMesh(rocktree_t::node_t::mesh_t &mesh) {
 	glDeleteBuffers(1, &mesh.vertex_buffer); // auto: glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
 }
 
-// backend-neutral wrappers (the metal backend provides the same functions;
-// renderInit lives in main.cpp because the shader sources are there)
+// backend-neutral wrappers (a removed metal backend once provided the same
+// interface; the indirection is kept in case another backend returns)
 typedef gl_ctx_t render_ctx_t;
 
 #ifdef EARTH_WEBLIB
@@ -201,7 +201,7 @@ GLuint makeShader(const char* vert_src, const char* frag_src) {
 	glDeleteShader(frag_shader);
 	return program;
 }
-// backend init; the metal equivalent is renderInit in rocktree_metal.h
+// backend init
 void renderInit(render_ctx_t &ctx, void *) {
 	auto exts = (const char *)glGetString(GL_EXTENSIONS);
 	texture_s3tc_supported = texture_s3tc_supported && exts && strstr(exts, "s3tc");

@@ -63,11 +63,7 @@ typings/
 # other
 downloaded_files/
 
-client/main
-client/main.html
-client/main.js
-client/main.wasm
-client/emscripten_build.log
+emscripten_build.log
 *.o
 *.exe
 *.dll
@@ -78,13 +74,9 @@ client/emscripten_build.log
 *.pb.cc
 cache/
 
-view_*.json
-
-# benchmark rig output (reference images, per-run csvs, graphs)
-client/bench/
-
-# web library build output (web/demo.html and web/coi-serviceworker.js are sources)
-client/web/earth.js
-client/web/earth.wasm
-client/web/earth.worker.js
-client/web/coi-serviceworker.js
+# web library build output (web/demo.html and web/ar.html are sources;
+# web/coi-serviceworker.js is copied in from the repo root by build.sh)
+web/earth.js
+web/earth.wasm
+web/earth.worker.js
+web/coi-serviceworker.js
