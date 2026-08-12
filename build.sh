@@ -10,8 +10,17 @@ set -eu
 cd "$(dirname "$0")"
 source config_emscripten.sh
 echo build: weblib
-$EMSCRIPTEN_PROTOBUF_EXE --cpp_out=. proto/rocktree.proto
-cd crn && emcc -std=c++14 -O2 -c crn.cc -w && cd ..
+
+# both of these inputs are effectively frozen, and regenerating them costs
+# most of a local rebuild. `-nt` is also true when the target is missing, so a
+# fresh checkout (ci, always) still does the full work. crn.o doesn't track
+# crn's headers — delete it by hand on the rare occasion you touch them.
+if [ proto/rocktree.proto -nt proto/rocktree.pb.h ]; then
+	$EMSCRIPTEN_PROTOBUF_EXE --cpp_out=. proto/rocktree.proto
+fi
+if [ crn/crn.cc -nt crn/crn.o ]; then
+	(cd crn && emcc -std=c++14 -O2 -c crn.cc -w)
+fi
 
 mkdir -p web
 cp coi-serviceworker.js web/
