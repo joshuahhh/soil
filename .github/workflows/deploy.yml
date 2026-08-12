@@ -23,7 +23,7 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: install emsdk
         run: |
@@ -32,7 +32,7 @@ jobs:
           ~/emsdk/emsdk activate $EMSDK_VERSION
 
       - name: cache deps
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: deps
           key: deps-eigen3.3.7-protobuf21.12-emsdk${{ env.EMSDK_VERSION }}-v1
@@ -48,7 +48,7 @@ jobs:
           test "$(stat -c%s web/earth.wasm)" -gt 500000
           test "$(stat -c%s web/earth.js)" -gt 50000
 
-      - uses: actions/upload-pages-artifact@v3
+      - uses: actions/upload-pages-artifact@v5
         with:
           path: web
 
@@ -60,4 +60,4 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - id: deployment
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@v5
