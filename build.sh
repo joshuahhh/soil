@@ -10,7 +10,7 @@ cd crn && emcc -std=c++14 -O2 -c crn.cc -w && cd ..
 
 mkdir -p web
 cp coi-serviceworker.js web/
-emcc earth_web.cpp -O2 -std=c++17 -Wno-deprecated-declarations -I. -I./eigen/ \
+emcc earth_web.cpp -O2 -std=c++17 -Wno-deprecated-declarations -I. -Ideps/eigen \
 	-I$EMSCRIPTEN_PROTOBUF_SRC $EMSCRIPTEN_PROTOBUF_LIB crn/crn.o \
 	-DEARTH_WEBLIB \
 	-s MALLOC=mimalloc -Wno-pthreads-mem-growth \

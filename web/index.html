@@ -3,8 +3,8 @@
      an ordinary canvas on the right, two-way synced. tiles are cached in
      indexeddb via the js fetch hook.
 
-     serve this directory, e.g.:
-       ./build.sh weblib && python3 -m http.server -d web 8000
+     serve this directory (from the repo root):
+       ./build.sh && ./serve.py
      coi-serviceworker injects the cross-origin-isolation headers the pthread
      build needs (expect one automatic reload on first visit). -->
 <meta charset="utf-8">

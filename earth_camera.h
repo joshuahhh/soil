@@ -1,5 +1,5 @@
 // camera state and flying controls, independent of any windowing or input
-// backend. included after eigen (see main.cpp); part of the platform-free
+// backend. included after eigen (see earth_web.cpp); part of the platform-free
 // core so embedding shells (native window, web canvas) can own and drive the
 // camera directly
 

@@ -63,6 +63,9 @@ typings/
 # other
 downloaded_files/
 
+# pinned third-party deps fetched by setup.sh
+deps/
+
 emscripten_build.log
 *.o
 *.exe

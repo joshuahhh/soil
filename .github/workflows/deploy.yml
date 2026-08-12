@@ -1,0 +1,63 @@
+name: deploy
+# build the site from source and publish web/ to github pages as an artifact —
+# no build products ever land in git. deps are pinned: emsdk version here,
+# eigen/protobuf versions in setup.sh (cache key must track all three).
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+env:
+  EMSDK_VERSION: 4.0.21
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: install emsdk
+        run: |
+          git clone --depth 1 https://github.com/emscripten-core/emsdk ~/emsdk
+          ~/emsdk/emsdk install $EMSDK_VERSION
+          ~/emsdk/emsdk activate $EMSDK_VERSION
+
+      - name: cache deps
+        uses: actions/cache@v4
+        with:
+          path: deps
+          key: deps-eigen3.3.7-protobuf21.12-emsdk${{ env.EMSDK_VERSION }}-v1
+
+      - name: setup deps
+        run: source ~/emsdk/emsdk_env.sh && ./setup.sh
+
+      - name: build
+        run: source ~/emsdk/emsdk_env.sh && ./build.sh
+
+      - name: gate on artifact sizes
+        run: |
+          test "$(stat -c%s web/earth.wasm)" -gt 500000
+          test "$(stat -c%s web/earth.js)" -gt 50000
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: web
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

@@ -12,29 +12,38 @@ and renders in a split-screen demo next to a MapLibre slippy map.
 #### Build
 
 ```
+./setup.sh   # once per machine: fetches pinned deps into ./deps
 ./build.sh
 ```
 
-Produces `web/earth.js` + `web/earth.wasm` (modularized, pthreads). Serve
-`web/`, e.g.:
+`setup.sh` downloads eigen and protobuf (pinned releases from their official
+homes) and compiles libprotobuf to wasm; it needs emscripten and curl, and
+nothing else lives outside the repo. `build.sh` then produces `web/earth.js` +
+`web/earth.wasm` (modularized, pthreads). Serve `web/`:
 
 ```
-python3 -m http.server -d web 8000
+./serve.py
 ```
+
+(a thin http.server wrapper on port 8000 that disables caching, so browsers
+never run a stale wasm after a rebuild)
 
 `coi-serviceworker.js` injects the cross-origin-isolation headers the pthread
-build needs (expect one automatic reload on first visit). Requires emscripten
-plus a protobuf build for it (`config_emscripten.sh` sets the paths).
+build needs (expect one automatic reload on first visit).
 
 #### Deploy
 
+Every push to main is built from source by
+[.github/workflows/deploy.yml](.github/workflows/deploy.yml) and published to
+GitHub Pages as an artifact — no build products are committed anywhere.
+
 ```
-./deploy-soil.sh "message"
+./deploy-soil.sh
 ```
 
-Builds, sanity-checks the artifacts, copies them into the sibling `soil` repo
-(GitHub Pages), pushes, waits for the Pages build of that exact commit, and
-smoke-tests the live wasm. Each step is gated on the previous one succeeding.
+is the gated way to ship: it refuses a dirty tree, verifies the build locally,
+pushes, watches the workflow run for that exact commit, and smoke-tests the
+live wasm.
 
 #### Stuff we've removed
 
