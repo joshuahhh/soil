@@ -1,8 +1,13 @@
-#!/bin/sh
+#!/bin/bash
 # web-only build: compiles the engine into web/earth.js + web/earth.wasm as a
 # modularized library (createEarthModule) for web/index.html. the native and
 # standalone-emscripten targets were removed — see the root README's
 # "stuff we've removed" section to dig them out of git history.
+# bash, not sh: both this and config_emscripten.sh are bash (source,
+# BASH_SOURCE), and under dash the sourcing fails quietly and the protobuf
+# paths come out empty. -u turns that class of bug into an error.
+set -eu
+cd "$(dirname "$0")"
 source config_emscripten.sh
 echo build: weblib
 $EMSCRIPTEN_PROTOBUF_EXE --cpp_out=. proto/rocktree.proto
