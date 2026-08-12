@@ -6,7 +6,8 @@ and renders in a split-screen demo next to a MapLibre slippy map.
 
 - repo root — the engine (C++ → wasm via emscripten, `earth_web.cpp` +
   `rocktree_*.h`) and its build/deploy scripts
-- [web/](./web/) — the app (`index.html`) and the build's js/wasm output
+- [web/](./web/) — the split-screen app (`index.html`), the phone camera-match
+  page (`ar.html`), and the build's js/wasm output
 - [proto/](./proto/) — protobuf schema for Google Earth's "rocktree" data
 
 #### Build

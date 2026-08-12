@@ -77,9 +77,8 @@ emscripten_build.log
 *.pb.cc
 cache/
 
-# web library build output (web/demo.html and web/ar.html are sources;
+# web library build output (web/index.html and web/ar.html are sources;
 # web/coi-serviceworker.js is copied in from the repo root by build.sh)
 web/earth.js
 web/earth.wasm
-web/earth.worker.js
 web/coi-serviceworker.js

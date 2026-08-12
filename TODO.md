@@ -1,9 +1,7 @@
 # todo
 
-- **Update Eigen / manage the dependency better.** The tree vendors a full
-  copy of Eigen 3.3.7 (2018) in `eigen/`, committed directly. It still uses
-  `std::result_of`, which is deprecated in C++17 and gone in C++20 — the
-  build currently papers over this with `-Wno-deprecated-declarations`
-  (see build.sh). Upgrading to Eigen 3.4.x fixes that and would let the
-  warning suppression be removed; while at it, consider a git submodule or
-  a fetch step instead of a vendored copy so future upgrades are one-line.
+- **Update Eigen to 3.4.x.** `setup.sh` pins 3.3.7 (2018), which still uses
+  `std::result_of` — deprecated in C++17, gone in C++20. The build papers over
+  it with `-Wno-deprecated-declarations` (see build.sh); 3.4.x would let that
+  suppression go. It's a one-line version bump in setup.sh plus a cache-key
+  bump in .github/workflows/deploy.yml.
