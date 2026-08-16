@@ -77,13 +77,13 @@
   // per-mode control hints; the active one is set by updateHint() below
   const HINTS = {
     persp: 'WASD move · R/F up/down · hold space: view-frame · arrows/drag look · ' +
-      'Z/X zoom · shift slow · G hug terrain · O ortho · C pick debug · L lod debug · click map to teleport · ' +
-      '⇧drag map: tube rect',
+      'Z/X zoom · shift slow · G hug terrain · O ortho · C pick debug · L lod debug · 0 reset view · ' +
+      'click map to teleport · ⇧drag map: tube rect',
     ortho: 'WASD/drag pan · arrows orbit around center · wheel/Z/X/R/F zoom · ' +
-      'shift slow · O perspective · C pick debug · L lod debug · click map to teleport · ' +
-      '⇧drag map: tube rect',
+      'shift slow · O perspective · C pick debug · L lod debug · 0 reset view · ' +
+      'click map to teleport · ⇧drag map: tube rect',
     tube: 'airplane controls — W/S thrust · A/D strafe · R/F up/down · arrows/drag pitch+yaw · Q/E roll · ' +
-      'Z/X zoom · shift slow · G hug the wall · T unroll · esc clear tube · ⇧drag map: new rect',
+      'Z/X zoom · shift slow · G hug the wall · 0 reset view · T unroll · esc clear tube · ⇧drag map: new rect',
   };
   document.getElementById('hint').textContent = HINTS.persp;
   document.getElementById('speed').textContent = '-/= speed x1';
@@ -263,7 +263,7 @@
   // so no mouse is needed. Z/X zoom (fov). -/= sticky speed gain. shift slow
   const keys = {};
   const handled = new Set(['KeyW','KeyA','KeyS','KeyD','KeyQ','KeyE','KeyR','KeyF','KeyZ','KeyX','KeyG','KeyO','KeyC','KeyL','KeyT',
-    'Space','ArrowLeft','ArrowRight','ArrowUp','ArrowDown','Minus','Equal']);
+    'Space','ArrowLeft','ArrowRight','ArrowUp','ArrowDown','Minus','Equal','Digit0','Numpad0','Home']);
   let gain = 1; // re-initialized from the saved view once it loads
   let ortho = false;
   let hug = false; // terrain hug: hold height above the mesh, not the sphere
@@ -277,6 +277,23 @@
       `-/= speed x${gain >= 1 ? gain : '1/' + (1/gain)}`
       + (hug && tubeOn ? ' · hugging the wall'
         : hug && !ortho ? ' · hugging terrain' : '');
+  };
+  // 0 (or Home): back to the default view — the pose/fov/speed the demo
+  // opens with, level (no roll), out of ortho and terrain hug, map zoom
+  // reset and following again. the tube is left alone: esc clears it
+  const resetView = () => {
+    if (!view.ready()) return;
+    view.setPose(DEFAULT_VIEW.lat, DEFAULT_VIEW.lon, DEFAULT_VIEW.alt,
+      DEFAULT_VIEW.heading, DEFAULT_VIEW.tilt);
+    view.setFov(DEFAULT_VIEW.fov);
+    view.setRoll(0);
+    gain = DEFAULT_VIEW.gain;
+    if (ortho) { ortho = false; view.setOrtho(false); }
+    if (hug) { hug = false; view.setTerrainFollow(false); }
+    map.setZoom(DEFAULT_VIEW.zoom);
+    following = true;
+    followVel = prevMark = null; // a jump, not motion: don't lead the ease
+    updateHint();
   };
   canvas.addEventListener('keydown', (e) => {
     // browser/os shortcuts (cmd-R reload etc.) pass through untouched
@@ -292,6 +309,7 @@
     // sphere normally, radially above the wall inside the tube
     if (e.code === 'KeyG' && !e.repeat) { hug = !hug; view.setTerrainFollow(hug); updateHint(); }
     if (e.code === 'KeyC' && !e.repeat) setPickDebug(!pickDebug);
+    if ((e.code === 'Digit0' || e.code === 'Numpad0' || e.code === 'Home') && !e.repeat) resetView();
     // like the native app's L key: tint octants red where a finer tile is
     // wanted but not yet downloaded
     if (e.code === 'KeyL' && !e.repeat) { debugLod = !debugLod; view.setDebugLod(debugLod); }
