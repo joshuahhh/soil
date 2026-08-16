@@ -44,6 +44,26 @@
   #tubeinfo { position: absolute; left: 8px; bottom: 8px; z-index: 10; color: #fff;
               background: rgba(0,0,0,.55); font: 12px monospace; padding: 6px 8px;
               border-radius: 4px; pointer-events: none; display: none; }
+  /* reference image dropped onto the page: laid over the 3d view at adjustable
+     opacity so you can fly the camera until the render matches the photo.
+     under #cross so the reticle stays readable through it */
+  #overlay { position: absolute; inset: 0; width: 100%; height: 100%;
+             object-fit: contain; pointer-events: none; z-index: 4; }
+  #overlaybar { position: absolute; right: 8px; bottom: 8px; z-index: 11;
+                display: none; align-items: center; gap: 8px; color: #fff;
+                background: rgba(0,0,0,.55); font: 12px sans-serif;
+                padding: 4px 6px 4px 8px; border-radius: 4px; }
+  #overlaybar input { width: 90px; }
+  #overlayclose { border: 0; background: none; color: #fff; font: 14px sans-serif;
+                  cursor: pointer; padding: 0 3px; line-height: 1; }
+  body:not(.overlay) #overlay { display: none; }
+  body.overlay #overlaybar { display: flex; }
+  /* the pick readout lives in the same corner; get out of the bar's way */
+  body.overlay #pickinfo { bottom: 44px; }
+  /* drop target while an image is being dragged over the window */
+  body.dropping #right::after { content: ''; position: absolute; inset: 6px; z-index: 12;
+             border: 2px dashed rgba(255,255,255,.85); border-radius: 6px;
+             pointer-events: none; }
   /* top-right hud: controls hint and speed readout as separate boxes, each
      hugging its own content */
   #hud { position: fixed; right: 8px; top: 8px; z-index: 10; display: flex;
@@ -68,8 +88,13 @@
       <circle r="8"/><path d="M0,-14 V-5 M0,5 V14 M-14,0 H-5 M5,0 H14"/>
     </g>
   </svg>
+  <img id="overlay" alt="">
   <div id="pickinfo"></div>
   <div id="tubeinfo"></div>
+  <div id="overlaybar">
+    <input id="overlayblend" type="range" min="0" max="100" value="50" title="overlay opacity">
+    <button id="overlayclose" title="remove overlay">✕</button>
+  </div>
 </div>
 <div id="hud"><div id="hint"></div><div id="speed"></div></div>
 <div id="axisbtn"></div>
@@ -256,6 +281,56 @@
     }
   };
   setPickDebug(pickDebug);
+
+  // --- reference image overlay ----------------------------------------------
+  // drop an image file anywhere on the page and it lays over the 3d view, so
+  // you can steer the camera until the render lines up with the photo. the
+  // slider blends it against the render; the ✕ in the corner removes it.
+  // tab-life only: the file is never uploaded, saved, or persisted
+  const overlayImg = document.getElementById('overlay');
+  const overlayBlend = document.getElementById('overlayblend');
+  let overlayUrl = null;
+  const applyOverlayBlend = () => { overlayImg.style.opacity = overlayBlend.value / 100; };
+  const setOverlay = (file) => {
+    if (overlayUrl) URL.revokeObjectURL(overlayUrl);
+    overlayUrl = URL.createObjectURL(file);
+    overlayImg.src = overlayUrl;
+    document.body.classList.add('overlay');
+    applyOverlayBlend();
+    canvas.focus(); // the drop shouldn't cost you the flight keys
+  };
+  const clearOverlay = () => {
+    document.body.classList.remove('overlay');
+    overlayImg.removeAttribute('src');
+    if (overlayUrl) { URL.revokeObjectURL(overlayUrl); overlayUrl = null; }
+    canvas.focus();
+  };
+  overlayBlend.addEventListener('input', applyOverlayBlend);
+  document.getElementById('overlayclose').addEventListener('click', clearOverlay);
+  // dragover has to be cancelled or the browser navigates to the dropped file.
+  // a depth counter keeps the highlight steady as the drag crosses children
+  // (dragenter on a child fires before dragleave on its parent)
+  let dragDepth = 0;
+  const isImageDrag = (e) => [...(e.dataTransfer ? e.dataTransfer.items : [])]
+    .some((it) => it.kind === 'file' && (!it.type || it.type.startsWith('image/')));
+  addEventListener('dragenter', (e) => {
+    if (!isImageDrag(e)) return;
+    e.preventDefault();
+    if (++dragDepth === 1) document.body.classList.add('dropping');
+  });
+  addEventListener('dragover', (e) => { if (isImageDrag(e)) e.preventDefault(); });
+  addEventListener('dragleave', () => {
+    if (dragDepth && --dragDepth === 0) document.body.classList.remove('dropping');
+  });
+  addEventListener('drop', (e) => {
+    dragDepth = 0;
+    document.body.classList.remove('dropping');
+    const file = [...(e.dataTransfer ? e.dataTransfer.files : [])]
+      .find((f) => f.type.startsWith('image/'));
+    if (!file) return;
+    e.preventDefault();
+    setOverlay(file);
+  });
 
   // --- input on the canvas -> built-in flying controls ----------------------
   // ground frame: WASD cruise/truck, Q/E pedestal. hold Space for the view
