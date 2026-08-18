@@ -46,18 +46,73 @@
               border-radius: 4px; pointer-events: none; display: none; }
   /* reference image dropped onto the page: laid over the 3d view at adjustable
      opacity so you can fly the camera until the render matches the photo.
-     under #cross so the reticle stays readable through it */
-  #overlay { position: absolute; inset: 0; width: 100%; height: 100%;
-             object-fit: contain; pointer-events: none; z-index: 4; }
+     under #cross so the reticle stays readable through it.
+     placed by explicit left/top/width/height (see layoutOverlay) rather than
+     object-fit: its height is a fixed fraction of the viewport's, so resizing
+     the window or collapsing the map can't change which part of the frustum
+     a given point of the photo stands for — an alignment stays aligned */
+  #overlay { position: absolute; pointer-events: none; z-index: 4; }
   #overlaybar { position: absolute; right: 8px; bottom: 8px; z-index: 11;
                 display: none; align-items: center; gap: 8px; color: #fff;
                 background: rgba(0,0,0,.55); font: 12px sans-serif;
                 padding: 4px 6px 4px 8px; border-radius: 4px; }
-  #overlaybar input { width: 90px; }
+  #overlaybar input[type=range] { width: 90px; }
   #overlayclose { border: 0; background: none; color: #fff; font: 14px sans-serif;
                   cursor: pointer; padding: 0 3px; line-height: 1; }
+  #overlaypairs { border: 0; background: rgba(255,255,255,.15); color: #fff;
+                  font: 12px sans-serif; cursor: pointer; padding: 3px 7px;
+                  border-radius: 3px; }
+  body.align #overlaypairs { background: #ff7f0e; color: #000; }
   body:not(.overlay) #overlay { display: none; }
   body.overlay #overlaybar { display: flex; }
+
+  /* --- point-pair alignment -------------------------------------------------
+     each pair ties a point of the photo to a point on the mesh; the solver
+     nudges the camera until the two land on top of each other. the svg layer
+     draws both ends and the residual between them, over the photo */
+  #pairs { position: absolute; inset: 0; width: 100%; height: 100%;
+           z-index: 6; pointer-events: none; overflow: visible; display: none; }
+  body.align #pairs { display: block; }
+  #pairs .grab { pointer-events: auto; cursor: grab; }
+  #pairs .lbl { font: bold 10px sans-serif; fill: #fff; pointer-events: none;
+                paint-order: stroke; stroke: rgba(0,0,0,.7); stroke-width: 3px; }
+  /* the panel: pair list and solver controls. it lives in the hud's column
+     rather than floating in the same corner, so the two lay themselves out
+     instead of being kept apart by a hardcoded offset. min-height: 0 lets it
+     give way in a short window — #aplist takes up the slack by scrolling */
+  #alignpanel { display: none; flex-direction: column; gap: 6px; min-height: 0;
+                width: 236px; max-width: 100%; color: #fff;
+                background: rgba(0,0,0,.72); font: 12px sans-serif;
+                padding: 8px; border-radius: 5px; }
+  body.align #alignpanel { display: flex; }
+  #alignpanel .head { display: flex; align-items: center; justify-content: space-between;
+                      font-weight: bold; }
+  #alignpanel .row { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+  #alignpanel button { border: 0; border-radius: 3px; padding: 4px 8px; cursor: pointer;
+                       font: 12px sans-serif; background: rgba(255,255,255,.15); color: #fff; }
+  #alignpanel button:hover { background: rgba(255,255,255,.28); }
+  #alignpanel button:disabled { opacity: .4; cursor: default; }
+  #alignpanel button.primary { background: #ff7f0e; color: #000; font-weight: bold; }
+  #alignpanel .x { background: none; padding: 0 4px; font-size: 14px; }
+  #alignpanel label { display: flex; align-items: center; gap: 2px; }
+  #alignpanel input[type=range] { flex: 1; min-width: 0; }
+  #aplist { overflow-y: auto; min-height: 0; display: flex; flex-direction: column; gap: 2px; }
+  #aplist .pair { display: flex; align-items: center; gap: 6px; padding: 2px 4px;
+                  border-radius: 3px; cursor: pointer; font: 11px monospace; }
+  #aplist .pair:hover { background: rgba(255,255,255,.12); }
+  #aplist .pair.sel { background: rgba(255,127,14,.35); }
+  #aplist .pair .n { color: #ff7f0e; font-weight: bold; }
+  #aplist .pair .err { margin-left: auto; opacity: .8; }
+  #aplist .pair.off .err { color: #ff6b6b; }
+  #apstatus { font: 11px sans-serif; opacity: .85; line-height: 1.35; }
+  #alignpanel .tip { font: 10px sans-serif; opacity: .55; line-height: 1.35; }
+  /* the step-by-step prompt while a pair is being captured */
+  #apbanner { position: absolute; left: 50%; top: 12px; transform: translateX(-50%);
+              z-index: 14; display: none; color: #000; background: #ff7f0e;
+              font: bold 12px sans-serif; padding: 6px 10px; border-radius: 4px;
+              white-space: nowrap; pointer-events: none; }
+  body.capturing #apbanner { display: block; }
+  body.capturing #globe { cursor: crosshair; }
   /* the pick readout lives in the same corner; get out of the bar's way */
   body.overlay #pickinfo { bottom: 44px; }
   /* drop target while an image is being dragged over the window */
@@ -65,9 +120,12 @@
              border: 2px dashed rgba(255,255,255,.85); border-radius: 6px;
              pointer-events: none; }
   /* top-right hud: controls hint and speed readout as separate boxes, each
-     hugging its own content */
-  #hud { position: fixed; right: 8px; top: 8px; z-index: 10; display: flex;
-         flex-direction: column; align-items: flex-end; gap: 4px; }
+     hugging its own content. positioned inside #right, and capped to it: the
+     hint is a long line, and a fixed box anchored only by its right edge grew
+     leftwards across the divider and sat over the map */
+  #hud { position: absolute; right: 8px; top: 8px; z-index: 12; display: flex;
+         flex-direction: column; align-items: flex-end; gap: 4px;
+         max-width: calc(100% - 16px); max-height: calc(100% - 56px); }
   #hint, #speed { color: #fff; background: rgba(0,0,0,.55); font: 12px sans-serif;
                   padding: 6px 8px; border-radius: 4px; }
   /* geolocate button and search box side by side in the map's top-left */
@@ -89,21 +147,51 @@
     </g>
   </svg>
   <img id="overlay" alt="">
+  <svg id="pairs"></svg>
   <div id="pickinfo"></div>
   <div id="tubeinfo"></div>
+  <div id="apbanner"></div>
   <div id="overlaybar">
+    <button id="overlaypairs" title="point-pair alignment (P)">pairs</button>
     <input id="overlayblend" type="range" min="0" max="100" value="50" title="overlay opacity">
     <button id="overlayclose" title="remove overlay">✕</button>
   </div>
+  <div id="hud">
+    <div id="hint"></div>
+    <div id="speed"></div>
+    <div id="alignpanel">
+      <div class="head"><span>point pairs</span><button class="x" id="apclose" title="close panel">✕</button></div>
+      <div class="row">
+        <button id="apadd">+ add pair</button>
+        <button id="apsolve" class="primary">solve</button>
+      </div>
+      <div class="row">free:
+        <label><input type="checkbox" id="apfreepos" checked>position</label>
+        <label><input type="checkbox" id="apfreeaim" checked>aim</label>
+        <label><input type="checkbox" id="apfreefov" checked>fov</label>
+      </div>
+      <div id="aplist"></div>
+      <div id="apstatus"></div>
+      <div class="row">photo
+        <input id="apscale" type="range" min="10" max="400" title="photo size">
+        <button id="apfit" title="size the photo to fit the view">fit</button>
+      </div>
+      <div class="row">
+        <button id="apclear">clear pairs</button>
+        <button id="apforget">forget photo</button>
+      </div>
+      <div class="tip">drag either end of a pair to adjust it ·
+        shift-drag / shift-wheel on the view moves the photo</div>
+    </div>
+  </div>
 </div>
-<div id="hud"><div id="hint"></div><div id="speed"></div></div>
 <div id="axisbtn"></div>
 <script>
   // per-mode control hints; the active one is set by updateHint() below
   const HINTS = {
     persp: 'WASD move · R/F up/down · hold space: view-frame · arrows/drag look · ' +
       'Z/X zoom · shift slow · G hug terrain · O ortho · C pick debug · L lod debug · 0 reset view · ' +
-      'click map to teleport · ⇧drag map: tube rect',
+      'P point pairs · click map to teleport · ⇧drag map: tube rect',
     ortho: 'WASD/drag pan · arrows orbit around center · wheel/Z/X/R/F zoom · ' +
       'shift slow · O perspective · C pick debug · L lod debug · 0 reset view · ' +
       'click map to teleport · ⇧drag map: tube rect',
@@ -117,19 +205,30 @@
 <script>
 (async () => {
   // --- indexeddb byte cache -------------------------------------------------
+  // 'tiles' holds downloaded rocktree bytes; 'app' holds page state too big for
+  // localstorage (right now just the reference photo's blob)
   const db = await new Promise((res, rej) => {
-    const r = indexedDB.open('earth-cache', 1);
-    r.onupgradeneeded = () => r.result.createObjectStore('tiles');
+    const r = indexedDB.open('earth-cache', 2);
+    r.onupgradeneeded = () => {
+      const d = r.result;
+      if (!d.objectStoreNames.contains('tiles')) d.createObjectStore('tiles');
+      if (!d.objectStoreNames.contains('app')) d.createObjectStore('app');
+    };
     r.onsuccess = () => res(r.result);
     r.onerror = () => rej(r.error);
   });
-  const idbGet = (key) => new Promise((res) => {
-    const t = db.transaction('tiles').objectStore('tiles').get(key);
-    t.onsuccess = () => res(t.result);
-    t.onerror = () => res(undefined);
+  const idbGet = (key, store = 'tiles') => new Promise((res) => {
+    try {
+      const t = db.transaction(store).objectStore(store).get(key);
+      t.onsuccess = () => res(t.result);
+      t.onerror = () => res(undefined);
+    } catch (e) { res(undefined); }
   });
-  const idbPut = (key, bytes) => {
-    try { db.transaction('tiles', 'readwrite').objectStore('tiles').put(bytes, key); } catch (e) {}
+  const idbPut = (key, bytes, store = 'tiles') => {
+    try { db.transaction(store, 'readwrite').objectStore(store).put(bytes, key); } catch (e) {}
+  };
+  const idbDel = (key, store = 'tiles') => {
+    try { db.transaction(store, 'readwrite').objectStore(store).delete(key); } catch (e) {}
   };
 
   // --- module + view --------------------------------------------------------
@@ -168,10 +267,17 @@
   };
 
   const canvas = document.getElementById('globe');
+  // the reference-overlay section installs its relayout here. deliberately
+  // var: resize() runs (and setFull3d can call it) long before that section
+  // is evaluated, and reading a let/const from its dead zone would throw
+  var afterResize = null;
   const resize = () => {
     const dpr = window.devicePixelRatio || 1;
     canvas.width = Math.round(canvas.clientWidth * dpr);
     canvas.height = Math.round(canvas.clientHeight * dpr);
+    // the overlay is placed in viewport-relative terms, so it follows
+    // window resizes and the map pane collapsing/expanding
+    if (afterResize) afterResize();
   };
   resize();
   addEventListener('resize', resize);
@@ -286,23 +392,86 @@
   // drop an image file anywhere on the page and it lays over the 3d view, so
   // you can steer the camera until the render lines up with the photo. the
   // slider blends it against the render; the ✕ in the corner removes it.
-  // tab-life only: the file is never uploaded, saved, or persisted
+  // the file never leaves the browser, but it is kept (in indexeddb, next to
+  // the tile cache) so a reload comes back to the same photo — the point pairs
+  // hanging off it would be meaningless without it
+  const rightEl = document.getElementById('right');
   const overlayImg = document.getElementById('overlay');
   const overlayBlend = document.getElementById('overlayblend');
   let overlayUrl = null;
+  // where the photo sits over the viewport. scale is its height as a fraction
+  // of the viewport's, cx/cy its center as a fraction of the viewport — all
+  // relative, so a window resize rescales the photo with the frustum instead
+  // of sliding the picture through it
+  let ov = { scale: 1, cx: 0.5, cy: 0.5 };
   const applyOverlayBlend = () => { overlayImg.style.opacity = overlayBlend.value / 100; };
-  const setOverlay = (file) => {
+  // the photo's box in viewport pixels; null until the image has decoded
+  const overlayBox = () => {
+    if (!overlayImg.naturalWidth || !overlayImg.naturalHeight) return null;
+    const W = rightEl.clientWidth, H = rightEl.clientHeight;
+    const h = ov.scale * H, w = h * overlayImg.naturalWidth / overlayImg.naturalHeight;
+    return { x: ov.cx * W - w / 2, y: ov.cy * H - h / 2, w, h };
+  };
+  const layoutOverlay = () => {
+    const b = overlayBox();
+    if (!b) return;
+    overlayImg.style.left = b.x + 'px';
+    overlayImg.style.top = b.y + 'px';
+    overlayImg.style.width = b.w + 'px';
+    overlayImg.style.height = b.h + 'px';
+  };
+  // photo coordinates (0..1 across the image) <-> viewport pixels. pairs are
+  // stored in photo coordinates so moving or resizing the photo carries them
+  const photoToView = (u, v) => {
+    const b = overlayBox();
+    return b ? { x: b.x + u * b.w, y: b.y + v * b.h } : null;
+  };
+  const viewToPhoto = (x, y) => {
+    const b = overlayBox();
+    return b ? { u: (x - b.x) / b.w, v: (y - b.y) / b.h } : null;
+  };
+  // "fit": the largest scale that keeps the whole photo inside the viewport —
+  // the old object-fit: contain behaviour, now just a preset
+  const fitOverlay = () => {
+    if (!overlayImg.naturalWidth) return;
+    const W = rightEl.clientWidth, H = rightEl.clientHeight;
+    ov.scale = Math.min(1, W / (H * (overlayImg.naturalWidth / overlayImg.naturalHeight)));
+    ov.cx = ov.cy = 0.5;
+    layoutOverlay();
+  };
+  afterResize = layoutOverlay; // see the declaration above the resize handler
+  const setOverlay = (file, keepPlacement) => {
     if (overlayUrl) URL.revokeObjectURL(overlayUrl);
     overlayUrl = URL.createObjectURL(file);
+    // the photo is only shown once it has decoded: its placement needs the
+    // natural size, and revealing it before that flashes the image at full
+    // resolution across the viewport
+    overlayImg.onload = () => {
+      if (!keepPlacement) fitOverlay();
+      layoutOverlay();
+      document.body.classList.add('overlay');
+      applyOverlayBlend();
+      alignRefresh();
+    };
+    overlayImg.onerror = () => {
+      overlayUrl = null;
+      idbDel('ref-image', 'app');
+    };
     overlayImg.src = overlayUrl;
-    document.body.classList.add('overlay');
-    applyOverlayBlend();
     canvas.focus(); // the drop shouldn't cost you the flight keys
   };
+  // the ✕ is the "get rid of it" button: the photo goes, and so do the point
+  // pairs, which are anchored to points of that picture and mean nothing
+  // without it. the panel's "clear pairs" is the narrower one
   const clearOverlay = () => {
     document.body.classList.remove('overlay');
     overlayImg.removeAttribute('src');
     if (overlayUrl) { URL.revokeObjectURL(overlayUrl); overlayUrl = null; }
+    idbDel('ref-image', 'app');
+    refImageKey = null;
+    clearPairs();
+    alignRefresh();
+    saveAlign();
     canvas.focus();
   };
   overlayBlend.addEventListener('input', applyOverlayBlend);
@@ -329,7 +498,16 @@
       .find((f) => f.type.startsWith('image/'));
     if (!file) return;
     e.preventDefault();
-    setOverlay(file);
+    // pairs are anchored to points of a particular photo, so a different
+    // photo drops them — but re-dropping the same file (same name and size)
+    // is a reload, not a new subject, and keeps them
+    const key = file.name + ':' + file.size;
+    const same = key === refImageKey;
+    refImageKey = key;
+    if (!same) clearPairs();
+    setOverlay(file, same);
+    idbPut('ref-image', file, 'app');
+    saveAlign();
   });
 
   // --- input on the canvas -> built-in flying controls ----------------------
@@ -337,7 +515,7 @@
   // frame: W/S dolly along the view, Q/E boom along view-up. arrows pan/tilt
   // so no mouse is needed. Z/X zoom (fov). -/= sticky speed gain. shift slow
   const keys = {};
-  const handled = new Set(['KeyW','KeyA','KeyS','KeyD','KeyQ','KeyE','KeyR','KeyF','KeyZ','KeyX','KeyG','KeyO','KeyC','KeyL','KeyT',
+  const handled = new Set(['KeyW','KeyA','KeyS','KeyD','KeyQ','KeyE','KeyR','KeyF','KeyZ','KeyX','KeyG','KeyO','KeyC','KeyL','KeyT','KeyP',
     'Space','ArrowLeft','ArrowRight','ArrowUp','ArrowDown','Minus','Equal','Digit0','Numpad0','Home']);
   let gain = 1; // re-initialized from the saved view once it loads
   let ortho = false;
@@ -352,6 +530,9 @@
       `-/= speed x${gain >= 1 ? gain : '1/' + (1/gain)}`
       + (hug && tubeOn ? ' · hugging the wall'
         : hug && !ortho ? ' · hugging terrain' : '');
+    // point-pair alignment is perspective-only, so every mode switch has to
+    // re-decide whether its panel and markers belong on screen
+    alignRefresh();
   };
   // 0 (or Home): back to the default view — the pose/fov/speed the demo
   // opens with, level (no roll), out of ortho and terrain hug, map zoom
@@ -382,8 +563,15 @@
     if (e.code === 'KeyO' && !e.repeat && !tubeOn) { ortho = !ortho; view.setOrtho(ortho); updateHint(); }
     // terrain hug: cruise at a fixed height above the mesh — over the
     // sphere normally, radially above the wall inside the tube
-    if (e.code === 'KeyG' && !e.repeat) { hug = !hug; view.setTerrainFollow(hug); updateHint(); }
+    if (e.code === 'KeyG' && !e.repeat) {
+      hug = !hug;
+      view.setTerrainFollow(hug);
+      if (hug) stopSolve(); // the two fight over altitude — see startSolve
+      updateHint();
+    }
     if (e.code === 'KeyC' && !e.repeat) setPickDebug(!pickDebug);
+    // the point-pair panel; only does anything with a photo up, in perspective
+    if (e.code === 'KeyP' && !e.repeat) togglePanel();
     if ((e.code === 'Digit0' || e.code === 'Numpad0' || e.code === 'Home') && !e.repeat) resetView();
     // like the native app's L key: tint octants red where a finer tile is
     // wanted but not yet downloaded
@@ -417,16 +605,42 @@
       updateHint();
     }
   });
+  // the two clicks that mark a pair (photo point, then mesh point); the
+  // pointer handlers above keep the camera still while this is armed
+  canvas.addEventListener('click', (e) => {
+    if (!capture) return;
+    const r = rightEl.getBoundingClientRect();
+    const x = e.clientX - r.left, y = e.clientY - r.top;
+    captureClick(x, y, (x / r.width) * 2 - 1, 1 - (y / r.height) * 2);
+  });
   canvas.addEventListener('keyup', (e) => { keys[e.code] = false; });
   canvas.addEventListener('blur', () => { for (const k in keys) keys[k] = false; });
   let dragging = false, yaw = 0, pitch = 0;
+  let ovDragging = false; // shift+drag slides the reference photo instead
   canvas.addEventListener('pointerdown', (e) => {
+    canvas.focus();
+    // while marking a pair, a click on the view is the mark — don't also
+    // grab the camera and swing it away from what was clicked
+    if (capture) return;
+    if (e.shiftKey && document.body.classList.contains('overlay')) {
+      ovDragging = true;
+      canvas.setPointerCapture(e.pointerId);
+      return;
+    }
     dragging = true;
     canvas.setPointerCapture(e.pointerId);
-    canvas.focus();
   });
-  canvas.addEventListener('pointerup', () => { dragging = false; });
+  canvas.addEventListener('pointerup', () => {
+    dragging = false;
+    if (ovDragging) { ovDragging = false; saveAlign(); }
+  });
   canvas.addEventListener('pointermove', (e) => {
+    if (ovDragging) {
+      ov.cx += e.movementX / Math.max(1, rightEl.clientWidth);
+      ov.cy += e.movementY / Math.max(1, rightEl.clientHeight);
+      layoutOverlay();
+      return;
+    }
     if (!dragging) return;
     // grab-the-world: in perspective, dragging pulls the scene with the
     // pointer by looking around; in ortho it pans instead (WASD-equivalent
@@ -442,6 +656,15 @@
   // native app (which uses fov *= 0.9^wheel; setFov clamps to 1..100 deg)
   canvas.addEventListener('wheel', (e) => {
     e.preventDefault();
+    // shift+wheel resizes the reference photo rather than the view, the
+    // companion of shift+drag's reposition
+    if (e.shiftKey && document.body.classList.contains('overlay')) {
+      ov.scale = Math.max(0.05, Math.min(4, ov.scale * Math.pow(0.9, e.deltaY / 200)));
+      layoutOverlay();
+      scaleEl.value = Math.round(ov.scale * 100);
+      saveAlign();
+      return;
+    }
     // in ortho, zooming is a dolly (elevation is not a real degree of
     // freedom there); in perspective it narrows the fov like the native app
     if (ortho) { view.zoomOrtho(Math.pow(0.9, e.deltaY / 100)); return; }
@@ -709,9 +932,582 @@
     map.jumpTo({ center: [nlng, nlat] });
   };
 
+  // --- point-pair alignment -------------------------------------------------
+  // tie points of the reference photo to points on the mesh, then let a
+  // solver nudge the camera until each mesh point lands on its photo point.
+  // this is for the last mile — fly the view roughly into place by hand, mark
+  // three or four landmarks, and solve for the pose that reproduces the shot.
+  //
+  // perspective only, and never in the tube: the fit assumes the render is a
+  // pinhole image of fixed geometry, which a parallel projection isn't and
+  // the rolled tube's warp definitely isn't.
+  //
+  // the camera projection is reimplemented here rather than called through the
+  // engine, so a solver iteration costs no wasm round trips — it mirrors
+  // earth_camera.h's poseToCamera and rocktree_math.h's lookAt/perspective,
+  // and pickNdc on the wasm side is built from the same basis
+  const D2R = Math.PI / 180;
+  let planetR = 6371010; // refreshed from the engine as soon as it's ready
+
+  const vsub = (a, b) => [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
+  const vmul = (a, s) => [a[0] * s, a[1] * s, a[2] * s];
+  const vadd = (a, b) => [a[0] + b[0], a[1] + b[1], a[2] + b[2]];
+  const vdot = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+  const vcross = (a, b) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2],
+    a[0] * b[1] - a[1] * b[0]];
+  const vnorm = (a) => {
+    const n = Math.hypot(a[0], a[1], a[2]);
+    return n > 1e-12 ? vmul(a, 1 / n) : null;
+  };
+  const geoUpV = (lat, lon) => [Math.cos(lat) * Math.cos(lon),
+    Math.cos(lat) * Math.sin(lon), Math.sin(lat)]; // radians
+  const geoNorthV = (lat, lon) => [-Math.sin(lat) * Math.cos(lon),
+    -Math.sin(lat) * Math.sin(lon), Math.cos(lat)];
+  // a pair's mesh anchor as ecef meters. pickNdc reports the hit in spherical
+  // terms against the same radius, so this rebuilds the exact point
+  const ecefOf = (pr) => vmul(geoUpV(pr.lat * D2R, pr.lon * D2R), planetR + pr.alt);
+
+  // the basis lookAt builds for a pose: eye, boresight, screen-right, view-up
+  const poseBasis = (p) => {
+    const lat = p.lat * D2R, lon = p.lon * D2R;
+    const up = geoUpV(lat, lon);
+    const north = geoNorthV(lat, lon);
+    const east = vcross(north, up);
+    const horiz = vadd(vmul(north, Math.cos(p.heading * D2R)),
+      vmul(east, Math.sin(p.heading * D2R)));
+    const dir = vnorm(vadd(vmul(horiz, Math.cos(p.tilt * D2R)),
+      vmul(up, Math.sin(p.tilt * D2R))));
+    if (!dir) return null;
+    const right = vnorm(vcross(dir, up)); // straight up/down: right is undefined
+    if (!right) return null;
+    return { eye: vmul(up, planetR + p.alt), dir, right, vup: vcross(right, dir) };
+  };
+  // ecef -> viewport pixels; null when the point is behind the camera
+  const projectWith = (b, fovDeg, P, W, H) => {
+    const v = vsub(P, b.eye);
+    const z = vdot(v, b.dir);
+    if (!(z > 1e-6)) return null;
+    const t = Math.tan(fovDeg * D2R / 2);
+    const ndcX = vdot(v, b.right) / z / (t * (W / H));
+    const ndcY = vdot(v, b.vup) / z / t;
+    return { x: (ndcX * 0.5 + 0.5) * W, y: (0.5 - ndcY * 0.5) * H };
+  };
+
+  // --- state ---
+  let pairs = [];       // { u, v, lat, lon, alt } — photo coords + mesh anchor
+  let selPair = -1;
+  let panelOpen = false;
+  let refImageKey = null; // name:size of the stored photo, to spot a re-drop
+  const freeFlags = { pos: true, aim: true, fov: true };
+  const listEl = document.getElementById('aplist');
+  const statusEl = document.getElementById('apstatus');
+  const bannerEl = document.getElementById('apbanner');
+  const svgEl = document.getElementById('pairs');
+  const scaleEl = document.getElementById('apscale');
+  const solveBtn = document.getElementById('apsolve');
+  const addBtn = document.getElementById('apadd');
+
+  function saveAlign() {
+    try {
+      localStorage.setItem('earth-align', JSON.stringify({
+        pairs, ov, free: freeFlags, open: panelOpen, key: refImageKey,
+        opacity: +overlayBlend.value,
+      }));
+    } catch (e) {}
+  }
+  function clearPairs() {
+    pairs = [];
+    selPair = -1;
+    stopSolve();
+    buildMarkers();
+    renderList();
+    saveAlign();
+  }
+  // alignment is off in ortho and in the tube (see the note above), and
+  // pointless without a photo. called from updateHint, so every mode switch
+  // re-evaluates it
+  function alignRefresh() {
+    const on = panelOpen && document.body.classList.contains('overlay')
+      && !ortho && !tubeOn;
+    document.body.classList.toggle('align', on);
+    if (!on) { cancelCapture(); stopSolve(); }
+    scaleEl.value = Math.round(ov.scale * 100);
+    document.getElementById('apfreepos').checked = freeFlags.pos;
+    document.getElementById('apfreeaim').checked = freeFlags.aim;
+    document.getElementById('apfreefov').checked = freeFlags.fov;
+    buildMarkers();
+    renderList();
+  }
+
+  // --- markers ---
+  // rebuilt when the pair set changes; positions refresh every frame in tick
+  let markerEls = [];
+  const svgNode = (tag, attrs) => {
+    const el = document.createElementNS('http://www.w3.org/2000/svg', tag);
+    for (const k in attrs) el.setAttribute(k, attrs[k]);
+    return el;
+  };
+  function buildMarkers() {
+    svgEl.textContent = '';
+    markerEls = pairs.map((pr, i) => {
+      const line = svgNode('line', { stroke: '#fff', 'stroke-width': 1.5,
+        'stroke-dasharray': '4 3', opacity: .9 });
+      // the photo end (magenta) and the mesh end (cyan); the solver's job is
+      // to drive one onto the other
+      const photo = svgNode('circle', { r: 6, fill: 'none', stroke: '#ff2fd0',
+        'stroke-width': 2.5, class: 'grab' });
+      const photoDot = svgNode('circle', { r: 1.5, fill: '#ff2fd0' });
+      const mesh = svgNode('circle', { r: 6, fill: 'none', stroke: '#22d3ee',
+        'stroke-width': 2.5, class: 'grab' });
+      const meshDot = svgNode('circle', { r: 1.5, fill: '#22d3ee' });
+      const lbl = svgNode('text', { class: 'lbl' });
+      lbl.textContent = i + 1;
+      for (const el of [line, photo, photoDot, mesh, meshDot, lbl]) svgEl.appendChild(el);
+      hookDrag(photo, i, 'photo');
+      hookDrag(mesh, i, 'mesh');
+      return { line, photo, photoDot, mesh, meshDot, lbl };
+    });
+  }
+  // dragging an end adjusts that pair: the photo end moves within the picture,
+  // the mesh end re-picks whatever terrain is now under the pointer
+  let dragPair = null;
+  function hookDrag(el, i, which) {
+    el.addEventListener('pointerdown', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      dragPair = { i, which };
+      selPair = i;
+      renderList();
+      el.setPointerCapture(e.pointerId);
+    });
+    el.addEventListener('pointermove', (e) => {
+      if (!dragPair || dragPair.i !== i) return;
+      const r = rightEl.getBoundingClientRect();
+      const x = e.clientX - r.left, y = e.clientY - r.top;
+      const pr = pairs[i];
+      if (!pr) return;
+      if (which === 'photo') {
+        const p = viewToPhoto(x, y);
+        if (p) { pr.u = p.u; pr.v = p.v; }
+      } else {
+        const hit = view.pickNdc((x / r.width) * 2 - 1, 1 - (y / r.height) * 2);
+        if (hit) { pr.lat = hit.lat; pr.lon = hit.lon; pr.alt = hit.alt; }
+      }
+    });
+    const end = () => { if (dragPair) { dragPair = null; saveAlign(); } };
+    el.addEventListener('pointerup', end);
+    el.addEventListener('pointercancel', end);
+  }
+
+  // per-frame: place both ends, draw the residual between them, and report
+  // each pair's error. returns the rms pixel error over the usable pairs
+  let lastErrs = [];
+  const updateMarkers = () => {
+    const W = rightEl.clientWidth, H = rightEl.clientHeight;
+    const p = view.getPose();
+    const basis = poseBasis(p);
+    let sum = 0, n = 0;
+    lastErrs = pairs.map((pr, i) => {
+      const m = markerEls[i];
+      const tgt = photoToView(pr.u, pr.v);
+      const cur = basis ? projectWith(basis, p.fov, ecefOf(pr), W, H) : null;
+      if (!m) return null;
+      const sel = i === selPair;
+      const show = (el, on) => el.setAttribute('visibility', on ? 'visible' : 'hidden');
+      show(m.photo, !!tgt);
+      show(m.photoDot, !!tgt);
+      show(m.lbl, !!tgt);
+      show(m.mesh, !!cur);
+      show(m.meshDot, !!cur);
+      show(m.line, !!(tgt && cur));
+      m.photo.setAttribute('r', sel ? 8 : 6);
+      m.mesh.setAttribute('r', sel ? 8 : 6);
+      if (tgt) {
+        for (const el of [m.photo, m.photoDot]) {
+          el.setAttribute('cx', tgt.x);
+          el.setAttribute('cy', tgt.y);
+        }
+        m.lbl.setAttribute('x', tgt.x + 10);
+        m.lbl.setAttribute('y', tgt.y - 8);
+      }
+      if (cur) {
+        for (const el of [m.mesh, m.meshDot]) {
+          el.setAttribute('cx', cur.x);
+          el.setAttribute('cy', cur.y);
+        }
+      }
+      if (tgt && cur) {
+        m.line.setAttribute('x1', tgt.x);
+        m.line.setAttribute('y1', tgt.y);
+        m.line.setAttribute('x2', cur.x);
+        m.line.setAttribute('y2', cur.y);
+        const d = Math.hypot(cur.x - tgt.x, cur.y - tgt.y);
+        sum += d * d;
+        n++;
+        return d;
+      }
+      return null;
+    });
+    return n ? Math.sqrt(sum / n) : null;
+  };
+
+  // --- the pair list ---
+  // rows are built only when the pair set changes; their live numbers are
+  // patched in place every frame (rebuilding at frame rate would yank the
+  // delete buttons out from under a click)
+  let rowEls = [];
+  function renderList() {
+    listEl.textContent = '';
+    rowEls = pairs.map((pr, i) => {
+      const row = document.createElement('div');
+      row.className = 'pair' + (i === selPair ? ' sel' : '');
+      const n = document.createElement('span');
+      n.className = 'n';
+      n.textContent = i + 1;
+      const uv = document.createElement('span');
+      uv.textContent = pr.u.toFixed(2) + ',' + pr.v.toFixed(2);
+      const err = document.createElement('span');
+      err.className = 'err';
+      const del = document.createElement('button');
+      del.className = 'x';
+      del.textContent = '✕';
+      del.title = 'delete this pair';
+      del.addEventListener('click', (e) => {
+        e.stopPropagation();
+        pairs.splice(i, 1);
+        if (selPair >= pairs.length) selPair = -1;
+        buildMarkers();
+        renderList();
+        saveAlign();
+      });
+      row.append(n, uv, err, del);
+      row.addEventListener('click', () => {
+        selPair = selPair === i ? -1 : i;
+        renderList();
+      });
+      listEl.appendChild(row);
+      return { row, err };
+    });
+    updateStatus(null);
+  }
+  // the live readout: per-pair pixel error and the overall rms
+  function updateStatus(rms) {
+    rowEls.forEach((r, i) => {
+      const e = lastErrs[i];
+      r.err.textContent = e == null ? 'off-screen' : Math.round(e) + 'px';
+      r.row.classList.toggle('off', e == null);
+    });
+    const k = dofCount();
+    const need = Math.ceil(k / 2);
+    const bits = [`${pairs.length} pair${pairs.length === 1 ? '' : 's'} · ${k} free parameter${k === 1 ? '' : 's'}`];
+    if (rms != null) bits.push(`rms ${rms.toFixed(1)}px`);
+    if (!k) bits.push('nothing to solve for — tick a group');
+    else if (pairs.length && pairs.length < need)
+      bits.push(`under-determined: ${need} pairs would pin all ${k} down`);
+    statusEl.textContent = bits.join(' · ');
+  }
+  const dofCount = () => (freeFlags.pos ? 3 : 0) + (freeFlags.aim ? 2 : 0)
+    + (freeFlags.fov ? 1 : 0);
+
+  // --- capturing a new pair ---
+  // two clicks: first the point in the photo, then the same feature on the
+  // terrain. the photo is dimmed for the second click so you can see the mesh
+  let capture = null;
+  let blendBeforeCapture = null;
+  const setBanner = (t) => { bannerEl.textContent = t; };
+  function startCapture() {
+    if (!document.body.classList.contains('align')) return;
+    capture = { stage: 'photo' };
+    document.body.classList.add('capturing');
+    setBanner('click the point in the photo   (esc to cancel)');
+    addBtn.textContent = 'cancel';
+    canvas.focus();
+  }
+  function cancelCapture() {
+    if (!capture) return;
+    capture = null;
+    document.body.classList.remove('capturing');
+    if (blendBeforeCapture != null) {
+      overlayBlend.value = blendBeforeCapture;
+      applyOverlayBlend();
+      blendBeforeCapture = null;
+    }
+    addBtn.textContent = '+ add pair';
+  }
+  const captureClick = (x, y, ndcX, ndcY) => {
+    if (capture.stage === 'photo') {
+      const p = viewToPhoto(x, y);
+      if (!p || p.u < 0 || p.u > 1 || p.v < 0 || p.v > 1) {
+        setBanner('that is outside the photo — click inside it');
+        return;
+      }
+      capture = { stage: 'mesh', u: p.u, v: p.v };
+      // fade the photo down so the terrain under it is clickable by eye
+      blendBeforeCapture = +overlayBlend.value;
+      overlayBlend.value = Math.min(blendBeforeCapture, 15);
+      applyOverlayBlend();
+      setBanner('now click the same feature on the terrain   (esc to cancel)');
+      return;
+    }
+    const hit = view.pickNdc(ndcX, ndcY);
+    if (!hit) {
+      setBanner('no terrain there — it may still be loading. try again');
+      return;
+    }
+    pairs.push({ u: capture.u, v: capture.v, lat: hit.lat, lon: hit.lon, alt: hit.alt });
+    selPair = pairs.length - 1;
+    cancelCapture();
+    buildMarkers();
+    renderList();
+    saveAlign();
+  };
+
+  // --- the solver -----------------------------------------------------------
+  // levenberg–marquardt on the pose: gauss-newton where the local model is
+  // trusted, gradient descent where it isn't, with a numeric jacobian (the
+  // projection is six cheap parameters, so finite differences cost nothing).
+  // it's a local method by design — this is for fine-tuning a view that is
+  // already roughly right, not for solving the pose from scratch.
+  //
+  // the parameters are local deltas rather than the pose itself: metres east /
+  // north / up instead of degrees of latitude and longitude, so every column
+  // of the jacobian has comparable scale and the normal equations stay
+  // conditioned wherever on the globe you are
+  const paramSpecs = () => {
+    const s = [];
+    if (freeFlags.pos) s.push('e', 'n', 'u');
+    if (freeFlags.aim) s.push('h', 't');
+    if (freeFlags.fov) s.push('f');
+    return s;
+  };
+  const stepFor = (spec, base) => (spec === 'e' || spec === 'n' || spec === 'u')
+    ? Math.max(0.02, Math.abs(base.alt) * 1e-4) // metres
+    : 1e-3; // degrees
+  const applyDelta = (base, specs, d) => {
+    const p = { lat: base.lat, lon: base.lon, alt: base.alt,
+      heading: base.heading, tilt: base.tilt, fov: base.fov };
+    const mPerDeg = (planetR + Math.max(0, base.alt)) * D2R;
+    specs.forEach((s, i) => {
+      const x = d[i];
+      if (s === 'e') p.lon += x / Math.max(1e-6, mPerDeg * Math.cos(base.lat * D2R));
+      else if (s === 'n') p.lat += x / mPerDeg;
+      else if (s === 'u') p.alt += x;
+      else if (s === 'h') p.heading += x;
+      else if (s === 't') p.tilt += x;
+      else if (s === 'f') p.fov += x;
+    });
+    // the same limits the engine enforces, so an accepted step survives
+    // being handed to setPose/setFov unchanged
+    p.lat = Math.max(-89.9, Math.min(89.9, p.lat));
+    p.alt = Math.max(1, p.alt);
+    p.tilt = Math.max(-89.5, Math.min(89.5, p.tilt));
+    p.fov = Math.max(1, Math.min(100, p.fov));
+    return p;
+  };
+  // residual vector: signed pixel offsets, mesh point minus photo point.
+  // null if any pair is unusable in this pose (behind the camera) — such a
+  // step is simply rejected rather than fitted to a wrapped-around projection
+  const residuals = (p, W, H) => {
+    const b = poseBasis(p);
+    if (!b) return null;
+    const out = [];
+    for (const pr of pairs) {
+      const s = projectWith(b, p.fov, ecefOf(pr), W, H);
+      const t = photoToView(pr.u, pr.v);
+      if (!s || !t) return null;
+      out.push(s.x - t.x, s.y - t.y);
+    }
+    return out.length ? out : null;
+  };
+  const costOf = (r) => r ? r.reduce((a, x) => a + x * x, 0) : Infinity;
+  // dense gauss-jordan with partial pivoting; k is at most 6
+  const solveLinear = (A, b) => {
+    const k = b.length;
+    const M = A.map((row, i) => row.concat([b[i]]));
+    for (let c = 0; c < k; c++) {
+      let piv = c;
+      for (let r = c + 1; r < k; r++)
+        if (Math.abs(M[r][c]) > Math.abs(M[piv][c])) piv = r;
+      if (!(Math.abs(M[piv][c]) > 1e-14)) return null; // singular
+      [M[c], M[piv]] = [M[piv], M[c]];
+      for (let r = 0; r < k; r++) {
+        if (r === c) continue;
+        const f = M[r][c] / M[c][c];
+        for (let j = c; j <= k; j++) M[r][j] -= f * M[c][j];
+      }
+    }
+    const x = [];
+    for (let i = 0; i < k; i++) x.push(M[i][k] / M[i][i]);
+    return x.every(Number.isFinite) ? x : null;
+  };
+  let solving = false, lambda = 1e-3, solveIters = 0, stalls = 0;
+  // one accepted step (or one give-up) per call; the tick runs it a few times
+  // a frame so the camera visibly settles onto the answer. returns true when
+  // there's nothing left to do
+  const solveStep = () => {
+    if (!view.ready() || !pairs.length) return true;
+    const specs = paramSpecs();
+    const k = specs.length;
+    if (!k) return true;
+    const W = rightEl.clientWidth, H = rightEl.clientHeight;
+    const base = view.getPose();
+    const r0 = residuals(base, W, H);
+    if (!r0) return true; // nothing usable to fit from here
+    const cost0 = costOf(r0);
+    const n = r0.length;
+
+    const J = [];
+    for (let j = 0; j < k; j++) {
+      const h = stepFor(specs[j], base);
+      const d = new Array(k).fill(0);
+      d[j] = h;
+      let rp = residuals(applyDelta(base, specs, d), W, H);
+      let denom = h;
+      if (!rp) { // forward step fell off a clamp: difference backwards instead
+        d[j] = -h;
+        rp = residuals(applyDelta(base, specs, d), W, H);
+        denom = -h;
+      }
+      const col = new Array(n).fill(0);
+      if (rp) for (let i = 0; i < n; i++) col[i] = (rp[i] - r0[i]) / denom;
+      J.push(col);
+    }
+    const A = [], g = [];
+    for (let a = 0; a < k; a++) {
+      A.push(new Array(k).fill(0));
+      let ga = 0;
+      for (let i = 0; i < n; i++) ga += J[a][i] * r0[i];
+      g.push(-ga);
+    }
+    for (let a = 0; a < k; a++) for (let b = a; b < k; b++) {
+      let s = 0;
+      for (let i = 0; i < n; i++) s += J[a][i] * J[b][i];
+      A[a][b] = A[b][a] = s;
+    }
+    // raise the damping until a step actually improves the fit; each failure
+    // pulls the step shorter and more gradient-like
+    for (let attempt = 0; attempt < 8; attempt++) {
+      const Ad = A.map((row, a) => row.map((x, b) =>
+        a === b ? x * (1 + lambda) + 1e-9 : x));
+      const step = solveLinear(Ad, g);
+      if (step) {
+        const cand = applyDelta(base, specs, step);
+        const cost = costOf(residuals(cand, W, H));
+        if (cost < cost0) {
+          view.setPose(cand.lat, cand.lon, cand.alt, cand.heading, cand.tilt);
+          view.setFov(cand.fov);
+          following = true; // the map should come along
+          lambda = Math.max(1e-9, lambda / 3);
+          const rel = (cost0 - cost) / Math.max(cost0, 1e-12);
+          stalls = rel < 1e-7 ? stalls + 1 : 0;
+          return stalls >= 3 || ++solveIters >= 400;
+        }
+      }
+      lambda *= 6;
+      if (lambda > 1e12) return true; // no downhill direction left: converged
+    }
+    return false;
+  };
+  function stopSolve() {
+    solving = false;
+    solveBtn.textContent = 'solve';
+  }
+  const startSolve = () => {
+    if (solving) { stopSolve(); return; }
+    if (!pairs.length) return;
+    // terrain hug and the solver fight over altitude: the hug re-eases the
+    // eye toward ground + held height inside every fly() call, including the
+    // zero-input one the tick always makes, so it partly undoes each step
+    // before the next one measures its residual. drop it rather than restore
+    // it afterwards — putting it back would just pull the camera off the fit
+    if (hug) {
+      hug = false;
+      view.setTerrainFollow(false);
+      updateHint();
+    }
+    solving = true;
+    lambda = 1e-3;
+    solveIters = 0;
+    stalls = 0;
+    solveBtn.textContent = 'stop';
+    canvas.focus();
+  };
+
+  // --- wiring ---
+  addBtn.addEventListener('click', () => {
+    if (capture) cancelCapture(); else startCapture();
+  });
+  solveBtn.addEventListener('click', startSolve);
+  document.getElementById('apclear').addEventListener('click', clearPairs);
+  document.getElementById('apforget').addEventListener('click', clearOverlay);
+  document.getElementById('apclose').addEventListener('click', () => {
+    panelOpen = false;
+    alignRefresh();
+    saveAlign();
+    canvas.focus();
+  });
+  const togglePanel = () => {
+    panelOpen = !panelOpen;
+    alignRefresh();
+    saveAlign();
+    canvas.focus();
+  };
+  document.getElementById('overlaypairs').addEventListener('click', togglePanel);
+  for (const [id, key] of [['apfreepos', 'pos'], ['apfreeaim', 'aim'], ['apfreefov', 'fov']]) {
+    document.getElementById(id).addEventListener('change', (e) => {
+      freeFlags[key] = e.target.checked;
+      renderList();
+      saveAlign();
+    });
+  }
+  scaleEl.addEventListener('input', () => {
+    ov.scale = Math.max(0.05, scaleEl.value / 100);
+    layoutOverlay();
+    saveAlign();
+  });
+  document.getElementById('apfit').addEventListener('click', () => {
+    fitOverlay();
+    scaleEl.value = Math.round(ov.scale * 100);
+    saveAlign();
+    canvas.focus();
+  });
+  overlayBlend.addEventListener('change', saveAlign);
+  // esc cancels a capture in progress wherever the focus happens to be (the
+  // canvas keydown handler's esc clears the tube, and the two never coexist)
+  addEventListener('keydown', (e) => {
+    if (e.code === 'Escape' && capture) cancelCapture();
+  });
+
+  // --- restore --------------------------------------------------------------
+  // pairs, photo placement and solver settings ride in localstorage next to
+  // the view; the photo's bytes are too big for that and live in indexeddb
+  (async () => {
+    let saved = null;
+    try { saved = JSON.parse(localStorage.getItem('earth-align')); } catch (e) {}
+    if (saved) {
+      if (saved.ov) ov = { ...ov, ...saved.ov };
+      if (saved.free) Object.assign(freeFlags, saved.free);
+      if (Number.isFinite(saved.opacity)) {
+        overlayBlend.value = saved.opacity;
+        applyOverlayBlend();
+      }
+      panelOpen = !!saved.open;
+      refImageKey = saved.key || null;
+      if (Array.isArray(saved.pairs))
+        pairs = saved.pairs.filter((p) => p && Number.isFinite(p.u) && Number.isFinite(p.v)
+          && Number.isFinite(p.lat) && Number.isFinite(p.lon) && Number.isFinite(p.alt));
+    }
+    const blob = await idbGet('ref-image', 'app');
+    if (blob) setOverlay(blob, true); // keepPlacement: the saved ov is the truth
+    else { pairs = []; refImageKey = null; } // orphaned without their photo
+    alignRefresh();
+  })();
+
   // for devtools poking and automated testing
   window.__demo = { view, map, marker, isFollowing: () => following,
-    tube: () => ({ rect: tubeRect, on: tubeOn, curl }) };
+    tube: () => ({ rect: tubeRect, on: tubeOn, curl }),
+    align: () => ({ pairs, solving, dof: dofCount(), errs: lastErrs }),
+    solve: startSolve };
 
   let lastSynced = { lat: 1e9, lon: 1e9 };
   let saveTimer = 0;
@@ -723,6 +1519,9 @@
     if (view.ready() && !posed) {
       // once the planet metadata is in, jump to the start (or saved) pose
       posed = true;
+      // the datum setPose's altitude and every pick are measured from; the
+      // alignment math rebuilds ecef points against it
+      planetR = view.planetRadius();
       view.setPose(START.lat, START.lon, START.alt, START.heading, START.tilt);
       view.setFov(START.fov);
       gain = START.gain;
@@ -845,6 +1644,16 @@
       // down on the map so drag gestures aren't cancelled mid-flight
       if (following && !mapPointerDown) followMarker({ lat: m.lat, lng: m.lon }, dt);
       if (pickDebug) updatePickDebug();
+
+      // point-pair alignment: run the solver (a few steps a frame, so the
+      // camera visibly settles onto the fit instead of snapping to it), then
+      // redraw the pair markers against wherever the camera ended up
+      if (document.body.classList.contains('align')) {
+        if (solving) {
+          for (let i = 0; i < 4 && solving; i++) if (solveStep()) stopSolve();
+        }
+        updateStatus(updateMarkers());
+      }
 
       saveTimer += dt;
       if (saveTimer > 1000) {

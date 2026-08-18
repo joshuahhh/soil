@@ -18,6 +18,8 @@
 //   view.orbit(headingDeg, tiltDeg);               // revolve around the screen-center point
 //   view.zoomOrtho(factor);                        // ortho zoom (boresight dolly), >1 zooms in
 //   view.pickCenter();                             // {lat,lon,alt,dist,src} under the crosshair, or null
+//   view.pickNdc(nx, ny);                          // the same pick through any viewport point (ndc, perspective only)
+//   view.planetRadius();                           // meters; the datum setPose's alt and the picks are measured from
 
 #include <fstream>
 #include <time.h>
@@ -331,6 +333,38 @@ struct EarthView {
 		return o;
 	}
 
+	// the same pick through an arbitrary point of the viewport, in normalized
+	// device coordinates (-1..1, +y up). perspective only — the host's point-
+	// pair alignment is a pinhole fit, and neither a parallel projection nor
+	// the rolled tube's warp is one. the reported lat/lon/alt is spherical, so
+	// the host can rebuild the exact ecef point as geoUp(lat,lon)*(R+alt)
+	val pickNdc(double nx, double ny) {
+		if (!earth.ready() || camera.ortho || earth.tube_on) return val::null();
+		int w, h;
+		emscripten_webgl_get_drawing_buffer_size(gl, &w, &h);
+		if (w <= 0 || h <= 0) return val::null();
+		// the frustum ray, built from the same basis lookAt derives (right =
+		// direction x up, view-up = right x direction)
+		Vector3d world_up = camera.eye.normalized();
+		Vector3d right = camera.direction.cross(world_up);
+		if (right.norm() < 1e-9) return val::null(); // looking straight down the axis
+		right.normalize();
+		Vector3d up = right.cross(camera.direction).normalized();
+		auto t = tan(camera.fov / 2.0);
+		Vector3d dir = (camera.direction + right * (nx * t * ((double)w / h))
+			+ up * (ny * t)).normalized();
+		Vector3d hit;
+		if (earth.raycast(camera.eye, dir, hit) == earth_core_t::raycast_miss)
+			return val::null();
+		auto r = hit.norm();
+		val o = val::object();
+		o.set("lat", asin(hit.z() / r) * 180.0 / M_PI);
+		o.set("lon", atan2(hit.y(), hit.x()) * 180.0 / M_PI);
+		o.set("alt", r - planetRadius());
+		o.set("dist", (hit - camera.eye).norm());
+		return o;
+	}
+
 	// built-in flying controls; the host translates its pointer/keyboard
 	// events into this (yaw/pitch in radians for this frame). view_frame
 	// switches forward/back and raise/lower from ground-frame cruise/pedestal
@@ -496,6 +530,8 @@ EMSCRIPTEN_BINDINGS(earth) {
 		.function("zoomOrtho", &EarthView::zoomOrtho)
 		.function("panOrtho", &EarthView::panOrtho)
 		.function("pickCenter", &EarthView::pickCenter)
+		.function("pickNdc", &EarthView::pickNdc)
+		.function("planetRadius", &EarthView::planetRadius)
 		.function("setTubeRect", &EarthView::setTubeRect)
 		.function("setTubeEnabled", &EarthView::setTubeEnabled)
 		.function("lockTubeGround", &EarthView::lockTubeGround)
