@@ -1,4 +1,7 @@
-#include <SDL_opengl.h>
+#include <GLES3/gl3.h>
+// gl3.h has no extension enums; the s3tc/dxt formats live here (gl2ext is the
+// shared extension header — it applies to gles3 contexts too)
+#include <GLES2/gl2ext.h>
 
 struct gl_ctx_t {
 	int width, height; // weblib: canvas drawable size, set by the shell
@@ -203,8 +206,17 @@ GLuint makeShader(const char* vert_src, const char* frag_src) {
 }
 // backend init
 void renderInit(render_ctx_t &ctx, void *) {
-	auto exts = (const char *)glGetString(GL_EXTENSIONS);
-	texture_s3tc_supported = texture_s3tc_supported && exts && strstr(exts, "s3tc");
+	// gles 3.0 dropped the single-string GL_EXTENSIONS query — it returns null
+	// here, and taking that as "no s3tc" would silently push every texture
+	// down the jpeg path. enumerate with glGetStringi instead
+	GLint ext_count = 0;
+	glGetIntegerv(GL_NUM_EXTENSIONS, &ext_count);
+	bool has_s3tc = false;
+	for (GLint i = 0; i < ext_count && !has_s3tc; i++) {
+		auto e = (const char *)glGetStringi(GL_EXTENSIONS, i);
+		if (e && strstr(e, "s3tc")) has_s3tc = true;
+	}
+	texture_s3tc_supported = texture_s3tc_supported && has_s3tc;
 	if (!texture_s3tc_supported)
 		printf("no s3tc on this gpu; using jpg textures\n");
 	glEnable(GL_DEPTH_TEST);
@@ -215,6 +227,7 @@ void renderInit(render_ctx_t &ctx, void *) {
 	auto lw = getenv("EARTH_LINE_WIDTH");
 	glLineWidth(lw ? (float)atof(lw) : 2.0f);
 	ctx.program = makeShader(
+		"#version 300 es\n"
 		"uniform mat4 transform;"
 		// tube mode: vertices go mesh -> rect-local frame (x along the tube
 		// axis, y across, z up), roll across-offset y into an angle around a
@@ -230,13 +243,13 @@ void renderInit(render_ctx_t &ctx, void *) {
 		"uniform vec2 uv_scale;"
 		"uniform bool octant_mask[8];"
 		"uniform bool stale_mask[8];"
-		"attribute vec3 position;"
-		"attribute float octant;"
-		"attribute vec2 texcoords;"
-		"varying vec2 v_texcoords;"
-		"varying float v_stale;"
-		"varying float v_mask;"
-		"varying vec2 v_rect;"
+		"in vec3 position;"
+		"in float octant;"
+		"in vec2 texcoords;"
+		"out vec2 v_texcoords;"
+		"out float v_stale;"
+		"out float v_mask;"
+		"out vec2 v_rect;"
 		"void main() {"
 		// masking: a triangle is dropped only when ALL its vertices are in
 		// masked octants (v_mask interpolates to 0 -> fragment discard).
@@ -274,30 +287,29 @@ void renderInit(render_ctx_t &ctx, void *) {
 		"	gl_Position = p;"
 		"}",
 
-		"#ifdef GL_ES\n"
-		// real mobile gpus execute mediump as fp16, which garbles atlas uv
-		// interpolation; use highp where the hardware offers it
-		"#ifdef GL_FRAGMENT_PRECISION_HIGH\n"
+		"#version 300 es\n"
+		// gles 3.0 requires highp in fragment shaders, so the "use highp if the
+		// hardware has it, else mediump" dance webgl1 needed is gone — and with
+		// it the fp16 path that garbled atlas uv interpolation on mobile gpus
 		"precision highp float;\n"
-		"#else\n"
-		"precision mediump float;\n"
-		"#endif\n"
-		"#endif\n"
-		"uniform sampler2D texture;"
+		// not "texture": that names a built-in function in gles 3.00, and a
+		// uniform of the same name would hide it
+		"uniform sampler2D tex;"
 		"uniform bool debug_lod;"
 		"uniform bool tube_on;"
-		"varying vec2 v_texcoords;"
-		"varying float v_stale;"
-		"varying float v_mask;"
-		"varying vec2 v_rect;"
+		"in vec2 v_texcoords;"
+		"in float v_stale;"
+		"in float v_mask;"
+		"in vec2 v_rect;"
+		"out vec4 frag_color;"
 		"void main() {"
 		"	if (v_mask < 0.004) discard;"
 		// tube mode: clip the slab to the drawn rectangle, so tiles straddling
 		// the edge (and geometry rolled past the seam) end cleanly
 		"	if (tube_on && (abs(v_rect.x) > 1.0 || abs(v_rect.y) > 1.0)) discard;"
-		"	vec3 c = texture2D(texture, v_texcoords).rgb;"
+		"	vec3 c = texture(tex, v_texcoords).rgb;"
 		"	if (debug_lod) c = mix(c, vec3(1.0, 0.0, 0.0), v_stale * 0.5);"
-		"	gl_FragColor = vec4(c, 1.0);"
+		"	frag_color = vec4(c, 1.0);"
 		"}"
 	);
 	glUseProgram(ctx.program);
@@ -311,7 +323,7 @@ void renderInit(render_ctx_t &ctx, void *) {
 	ctx.octant_mask_loc = glGetUniformLocation(ctx.program, "octant_mask");
 	ctx.stale_mask_loc = glGetUniformLocation(ctx.program, "stale_mask");
 	ctx.debug_lod_loc = glGetUniformLocation(ctx.program, "debug_lod");
-	ctx.texture_loc = glGetUniformLocation(ctx.program, "texture");
+	ctx.texture_loc = glGetUniformLocation(ctx.program, "tex");
 	ctx.position_loc = glGetAttribLocation(ctx.program, "position");
 	ctx.octant_loc = glGetAttribLocation(ctx.program, "octant");
 	ctx.texcoords_loc = glGetAttribLocation(ctx.program, "texcoords");

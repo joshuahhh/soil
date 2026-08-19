@@ -30,7 +30,7 @@
 #include <emscripten.h>
 #include <emscripten/html5.h>
 #include <emscripten/bind.h>
-#include <GLES2/gl2.h>
+#include <GLES3/gl3.h>
 
 #include <math.h>
 #include <Eigen/Dense>
@@ -92,7 +92,9 @@ struct EarthView {
 		emscripten_webgl_init_context_attributes(&attr);
 		attr.depth = 1;
 		attr.antialias = 0;
-		attr.majorVersion = 1;
+		// webgl 2 (gles 3.0): wanted for mipmapping non-power-of-two textures,
+		// which webgl 1 forbids — see rocktree_gl bufferMesh
+		attr.majorVersion = 2;
 		gl = emscripten_webgl_create_context(canvas_selector.c_str(), &attr);
 		if (gl <= 0) {
 			fprintf(stderr, "webgl context creation failed on '%s' (%d)\n", canvas_selector.c_str(), (int)gl);

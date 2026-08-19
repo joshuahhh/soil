@@ -29,6 +29,7 @@ emcc earth_web.cpp -O2 -std=c++17 -Wno-deprecated-declarations -I. -Ideps/eigen 
 	-DEARTH_WEBLIB \
 	-s MALLOC=mimalloc -Wno-pthreads-mem-growth \
 	-s USE_SDL=2 -s FETCH=1 -s USE_PTHREADS=1 \
+	-s MAX_WEBGL_VERSION=2 -s MIN_WEBGL_VERSION=2 \
 	-s INITIAL_MEMORY=536870912 -s ALLOW_MEMORY_GROWTH=1 -s MAXIMUM_MEMORY=4294967296 \
 	-s PTHREAD_POOL_SIZE="'navigator.hardwareConcurrency'" \
 	--bind -s MODULARIZE=1 -s EXPORT_NAME=createEarthModule \

@@ -49,10 +49,16 @@ export async function captureShot(page, base, shot, { timeoutMs = 120000 } = {})
     // switches on: s3tc picks compressed vs jpeg textures (rocktree_gl
     // renderInit), highp picks the fragment precision branch
     env = await page.evaluate(() => {
-      const gl = document.getElementById('globe').getContext('webgl');
+      // ask for the context the engine actually created: once a canvas holds a
+      // webgl2 context, getContext('webgl') returns null, and probing the wrong
+      // type silently reports "no s3tc, no highp" for a canvas that has both
+      const c = document.getElementById('globe');
+      const gl = c.getContext('webgl2') || c.getContext('webgl');
       const d = gl && gl.getExtension('WEBGL_debug_renderer_info');
       return {
         renderer: gl ? (d ? gl.getParameter(d.UNMASKED_RENDERER_WEBGL) : gl.getParameter(gl.RENDERER)) : null,
+        contextVersion: gl ? (typeof WebGL2RenderingContext !== 'undefined'
+          && gl instanceof WebGL2RenderingContext ? 2 : 1) : null,
         s3tc: !!(gl && gl.getExtension('WEBGL_compressed_texture_s3tc')),
         highp: !!(gl && gl.getShaderPrecisionFormat(gl.FRAGMENT_SHADER, gl.HIGH_FLOAT).precision),
         webgl2: !!document.createElement('canvas').getContext('webgl2'),

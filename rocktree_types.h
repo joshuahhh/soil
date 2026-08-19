@@ -1,4 +1,4 @@
-#include <SDL_opengl.h>
+#include <GLES3/gl3.h>
 
 typedef GLuint render_handle_t;
 
