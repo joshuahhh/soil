@@ -1,0 +1,14 @@
+{
+  "name": "soil-render-tests",
+  "private": true,
+  "type": "module",
+  "description": "render-test harness: headless capture + side-by-side comparison report",
+  "scripts": {
+    "capture": "node capture.mjs",
+    "report": "node report.mjs",
+    "bless": "node capture.mjs --bless"
+  },
+  "devDependencies": {
+    "playwright": "^1.62.1"
+  }
+}

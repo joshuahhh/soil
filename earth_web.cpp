@@ -159,6 +159,53 @@ struct EarthView {
 	void setSkyColor(int rgb) { sky_color = rgb; }
 	void setDebugLod(bool on) { earth.debug_lod = on; }
 
+	// --- test/profiling hooks -------------------------------------------
+	// the engine's own frame accounting, read back rather than only printed
+	// to the console. the section times are the last 2s window's per-frame
+	// averages (see earth_core's avg_*); note `draw` is command-submission
+	// time, not gpu time — webgl is asynchronous, so it measures the cost of
+	// crossing into the browser, which is what the per-node bind sequence
+	// dominates. the node counts are the current frame's
+	val getStats() {
+		val o = val::object();
+		o.set("bfsMs", earth.avg_bfs);
+		o.set("dlMs", earth.avg_dl);
+		o.set("evictMs", earth.avg_evict);
+		o.set("drawMs", earth.avg_draw);
+		o.set("fps", earth.avg_fps);
+		o.set("octantsWalked", (double)earth.avg_oct);
+		o.set("nodesCulled", (double)earth.avg_cull);
+		o.set("nodesLodTested", (double)earth.avg_lod);
+		o.set("nodesWanted", earth.stat_nodes_wanted);
+		o.set("nodesLoaded", earth.stat_nodes_loaded);
+		o.set("nodesDrawn", (int)earth.drawn_nodes.size());
+		o.set("sceneComplete", earth.scene_complete);
+		return o;
+	}
+
+	// the set of nodes the last walk actually drew, with the octant mask each
+	// was drawn under. this is the direct output of lod selection + frustum
+	// culling + eviction, so a golden capture of it is a far sharper
+	// regression signal than pixels: it is text, it diffs readably, and it
+	// is immune to gpu-dependent dxt decoding. sorted by path so the list is
+	// stable across runs (drawn_nodes' order follows hash-map iteration)
+	val getDrawnNodes() {
+		std::vector<std::pair<std::string, uint8_t>> rows;
+		rows.reserve(earth.drawn_nodes.size());
+		for (auto &kv : earth.drawn_nodes)
+			rows.push_back({ kv.first->request.node_key().path(), kv.second });
+		std::sort(rows.begin(), rows.end());
+		val arr = val::array();
+		for (size_t i = 0; i < rows.size(); i++) {
+			val o = val::object();
+			o.set("path", rows[i].first);
+			o.set("level", (int)rows[i].first.size());
+			o.set("mask", (int)rows[i].second);
+			arr.set((int)i, o);
+		}
+		return arr;
+	}
+
 	// one frame; the host calls this from requestAnimationFrame. drawable
 	// size follows the canvas backing store (host sets canvas.width/height)
 	void frame(double dt_ms) {
@@ -539,6 +586,8 @@ EMSCRIPTEN_BINDINGS(earth) {
 		.function("getTubeInfo", &EarthView::getTubeInfo)
 		.function("setSkyColor", &EarthView::setSkyColor)
 		.function("setDebugLod", &EarthView::setDebugLod)
+		.function("getStats", &EarthView::getStats)
+		.function("getDrawnNodes", &EarthView::getDrawnNodes)
 		.function("fly", &EarthView::fly);
 	emscripten::function("createView", &createView, emscripten::allow_raw_pointers());
 	emscripten::function("deliverFetch", &deliverFetch);

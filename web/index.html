@@ -283,7 +283,26 @@
   resize();
   addEventListener('resize', resize);
 
-  if (new URLSearchParams(location.search).has('jpg')) Module.forceJpgTextures();
+  const QS = new URLSearchParams(location.search);
+  if (QS.has('jpg')) Module.forceJpgTextures();
+  // headless capture mode (?test=1&lat=..&lon=..&alt=..&heading=..&tilt=..&fov=..):
+  // the pose comes from the url instead of localstorage, nothing is saved back,
+  // the 3d view takes the whole window so the canvas size is just the viewport,
+  // and the frame step is a fixed dt. that last one doesn't make a run bit-exact
+  // — tile arrival is still wall-clock — but it does stop the eviction sweep and
+  // every animation ease from depending on the machine's frame rate.
+  // window.__test below is the driver's api
+  const TEST = QS.has('test') ? {
+    dt: Number(QS.get('dt')) || 1000 / 60,
+    pose: ['lat', 'lon', 'alt', 'heading', 'tilt', 'fov'].reduce((o, k) => {
+      if (QS.has(k)) o[k] = Number(QS.get(k));
+      return o;
+    }, {
+      // flags, not numbers, so they take the same route but parse differently
+      ortho: QS.get('ortho') === '1',
+      hug: QS.get('hug') === '1',
+    }),
+  } : null;
   const view = Module.createView('#globe', fetchTile);
 
   // view state (camera pose, fov, speed gain, map zoom) persists in
@@ -291,6 +310,9 @@
   // the seattle skyline from out on elliott bay
   const DEFAULT_VIEW = { lat: 47.5980, lon: -122.3750, alt: 800, heading: 65, tilt: -12, fov: 45, zoom: 12, gain: 1, ortho: false, tube: null, full3d: false };
   const START = (() => {
+    // test mode ignores saved state entirely: a capture must not depend on
+    // whatever pose the last interactive session happened to leave behind
+    if (TEST) return { ...DEFAULT_VIEW, ...TEST.pose, full3d: true };
     try {
       const v = JSON.parse(localStorage.getItem('earth-view'));
       if (v && Number.isFinite(v.lat) && Number.isFinite(v.lon) && Number.isFinite(v.alt))
@@ -299,6 +321,7 @@
     return DEFAULT_VIEW;
   })();
   const saveView = () => {
+    if (TEST) return; // captures never write back over the user's saved view
     if (!view.ready()) return;
     const p = view.getPose();
     try {
@@ -1516,8 +1539,10 @@
   let lastSynced = { lat: 1e9, lon: 1e9 };
   let saveTimer = 0;
   let last = performance.now();
+  let frameCount = 0;
+  let pendingShot = null; // resolver for an in-flight __test.shot()
   const tick = (now) => {
-    const dt = Math.min(100, now - last);
+    const dt = TEST ? TEST.dt : Math.min(100, now - last);
     last = now;
 
     if (view.ready() && !posed) {
@@ -1665,8 +1690,47 @@
         saveView();
       }
     }
+    frameCount++;
+    // a capture has to read the canvas in the same task that drew it: the
+    // context is created without preserveDrawingBuffer, so the backbuffer is
+    // undefined once the browser composites the frame
+    if (pendingShot) {
+      const resolve = pendingShot;
+      pendingShot = null;
+      resolve(canvas.toDataURL('image/png'));
+    }
     requestAnimationFrame(tick);
   };
   requestAnimationFrame(tick);
+
+  // --- headless capture api -------------------------------------------------
+  // the driver (tools/capture.mjs) talks to the page through this. kept out of
+  // the TEST guard so it's also usable by hand from the devtools console
+  window.__test = {
+    stats: () => view.ready() ? view.getStats() : null,
+    drawnNodes: () => view.ready() ? view.getDrawnNodes() : [],
+    frameCount: () => frameCount,
+    // resolves with a png data url, captured at the end of the next frame
+    shot: () => new Promise((resolve) => { pendingShot = resolve; }),
+    // settle until the scene reports itself fully loaded for `stable`
+    // consecutive frames, or `timeoutMs` elapses. sceneComplete alone is not
+    // enough to wait on: a download that keeps failing resets its node to a
+    // stub rather than to a failed state (see rocktree_types.h
+    // setFailedDownloading), so it is retried forever and the flag can stay
+    // false indefinitely. the timeout is therefore load-bearing, and the
+    // caller is told which way it ended rather than it being papered over
+    settle: async ({ timeoutMs = 120000, stable = 5 } = {}) => {
+      const t0 = performance.now();
+      let run = 0;
+      for (;;) {
+        await new Promise((r) => requestAnimationFrame(r));
+        const st = view.ready() ? view.getStats() : null;
+        run = st && st.sceneComplete ? run + 1 : 0;
+        if (run >= stable) return { complete: true, ms: performance.now() - t0, stats: st };
+        if (performance.now() - t0 > timeoutMs)
+          return { complete: false, ms: performance.now() - t0, stats: st };
+      }
+    },
+  };
 })();
 </script>

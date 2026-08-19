@@ -1,0 +1,74 @@
+[
+  {
+    "name": "seattle-skyline",
+    "note": "the default view: low oblique across elliott bay at the downtown towers. dense fine tiles, lots of vertical geometry",
+    "lat": 47.598,
+    "lon": -122.375,
+    "alt": 800,
+    "heading": 65,
+    "tilt": -12,
+    "fov": 45
+  },
+  {
+    "name": "rainier-oblique",
+    "note": "big terrain relief at distance \u2014 exercises the horizon far plane and coarse-tile lod out to the skyline",
+    "lat": 46.7,
+    "lon": -121.9,
+    "alt": 4200,
+    "heading": 110,
+    "tilt": -8,
+    "fov": 45
+  },
+  {
+    "name": "grand-canyon-low",
+    "note": "low over strong relief: the case where terrain-hug and the ground column matter, and where seam cracks show up worst",
+    "lat": 36.06,
+    "lon": -112.14,
+    "alt": 2600,
+    "heading": 20,
+    "tilt": -25,
+    "fov": 45
+  },
+  {
+    "name": "manhattan-down",
+    "note": "steep look-down on dense urban mesh \u2014 heavy fine-tile counts, good draw-submission load",
+    "lat": 40.7075,
+    "lon": -74.0125,
+    "alt": 1400,
+    "heading": 340,
+    "tilt": -60,
+    "fov": 45
+  },
+  {
+    "name": "globe-high",
+    "note": "orbital altitude: coarse levels only, and the altitude/2 near plane branch",
+    "lat": 20.0,
+    "lon": -40.0,
+    "alt": 9000000,
+    "heading": 0,
+    "tilt": -90,
+    "fov": 45
+  },
+  {
+    "name": "alps-ortho",
+    "note": "orthographic projection over mountains \u2014 the separate ortho extent/clip path",
+    "lat": 45.98,
+    "lon": 7.66,
+    "alt": 6000,
+    "heading": 180,
+    "tilt": -55,
+    "fov": 45,
+    "ortho": true
+  },
+  {
+    "name": "seattle-jpg",
+    "note": "same view as seattle-skyline but with ?jpg \u2014 forces texture_s3tc_supported=false, so this is the no-s3tc jpeg texture path (rocktree_gl renderInit). no browser here lacks s3tc, so this flag is the only way that branch runs",
+    "lat": 47.598,
+    "lon": -122.375,
+    "alt": 800,
+    "heading": 65,
+    "tilt": -12,
+    "fov": 45,
+    "jpg": true
+  }
+]

@@ -31,6 +31,117 @@ never run a stale wasm after a rebuild)
 `coi-serviceworker.js` injects the cross-origin-isolation headers the pthread
 build needs (expect one automatic reload on first visit).
 
+#### Render tests
+
+[tools/](./tools/) captures the 3d view headlessly and builds a side-by-side
+report against a set of committed reference images. It tests the web build —
+the thing we actually ship — by driving the real page in Chromium.
+
+```
+cd tools && npm install && npx playwright install chromium firefox webkit  # once
+node tools/capture.mjs          # capture every shot into tools/out/current
+node tools/report.mjs --open    # build + open the comparison report
+node tools/capture.mjs --bless  # promote the current captures to reference
+node tools/browsers.mjs --open  # render every shot in all three browsers
+```
+
+There are two harnesses because there are two questions. `capture.mjs` +
+`report.mjs` ask *"did my change alter rendering?"* — one browser, against
+blessed references. `browsers.mjs` asks *"does it still render right
+everywhere?"* — every browser, against each other, no references at all. Both
+answer with images, since an image is the assertion that needs no advance
+knowledge of how a thing might break.
+
+The views live in [tools/shots.json](./tools/shots.json) — add one and it gets
+captured. `capture.mjs` takes a shot name to do just that one.
+
+The report sorts by pixel diff, most-changed first, with per-card wipe, blink,
+and diff-heatmap views. **The pixel diff is triage, not a verdict**: it cannot
+distinguish "Google reshot the imagery" from "we broke the shader", so its only
+job is to put the suspicious shots in front of a human first. Two signals next
+to it are categorical:
+
+- **the drawn-node set** — the direct output of lod selection, frustum culling
+  and eviction, exported via `getDrawnNodes()`. Text, so it diffs readably, and
+  immune to both imagery churn and gpu-dependent DXT decoding. If pixels moved
+  but the node set is identical, it's almost certainly new imagery.
+- **the tile-load badge** — `nodesLoaded/nodesWanted` on every shot.
+
+That second one matters more than it looks. `sceneComplete()` is not something
+you can simply wait on: a download that keeps failing resets its node to a
+*stub* rather than to a failed state (`setFailedDownloading` in
+[rocktree_types.h](./rocktree_types.h)), so it is retried forever and the flag
+can never arrive — which is why the interactive tube path has its own 20s
+bailout. The driver therefore always has a timeout, and a capture that trips it
+is still written, just labelled `INCOMPLETE` with its tile count, rather than
+silently passing off a half-loaded frame as a golden.
+
+`?test=1` on [web/index.html](./web/index.html) is what makes this work: the
+pose comes from the query string instead of localStorage, nothing is saved
+back, the 3d view takes the whole window, and `view.frame()` gets a fixed dt so
+eviction and the animation eases don't depend on the machine's frame rate.
+`window.__test` (`settle`, `shot`, `stats`, `drawnNodes`) is the driver's API
+and is also handy by hand from the devtools console.
+
+Two runs come out bit-identical (0.00%), because captures are pinned to one
+config: headless Chromium, which rasterises with **SwiftShader on the CPU**,
+not the machine's GPU. That's deliberate — no driver variance, and it would run
+on a GPU-less CI box — but it means the goldens are only comparable against
+that same config. Each sidecar records the renderer string, and the report
+flags a pair whose renderers differ, since a rasteriser change moves pixels on
+its own. `--gpu` captures headed instead (ANGLE/Metal on a Mac) if you want a
+real-GPU set; it needs its own references.
+
+`tools/reference/` is committed (~7MB for six shots); `tools/out/` is not.
+
+#### Cross-browser check
+
+`node tools/browsers.mjs` renders every shot in Chromium, Firefox and WebKit
+and builds `tools/out/browsers.html` with the engines side by side.
+
+This has no reference images and nothing to bless: the columns are compared
+**to each other within one run**, so imagery drift hits every column equally
+and cancels out. Chromium is the anchor column only because there has to be
+one; it isn't a source of truth.
+
+Cross-engine diffs are never zero — rasterisers round differently — so the
+percentages are a sort key, not a threshold. The point is that a person looks
+at three columns at once, which is the only thing that catches the failures no
+assertion would think to check for: garbled UV interpolation, z-fighting, a
+channel swap, missing crack-fill lines, geometry inside out. `--browsers
+chromium,firefox` narrows it.
+
+Two things worth knowing from the current run. All three engines report s3tc,
+highp and WebGL2, and Firefox and WebKit use the **real GPU** (Apple M1 / Apple
+GPU) where headless Chromium uses SwiftShader — so Firefox doubles as a
+free real-hardware capture. And drawn-node counts come out *identical* across
+all three on every shot, which is the useful invariant: tile selection is
+browser-independent, so any visual difference between columns is rasterisation
+alone, never engine logic.
+
+Because no available browser lacks s3tc, the `seattle-jpg` shot passes `?jpg`
+(`forceJpgTextures`) to force the no-s3tc JPEG texture path in `renderInit`
+explicitly. The shader's `mediump` branch still can't be reached here at all:
+desktop GPUs execute `mediump` as fp32 regardless of what the shader declares,
+so the fp16 UV garbling it guards against only appears on real mobile silicon.
+
+There are no fixtures: tiles come from Google's live servers, so imagery does
+drift under you. That's a deliberate trade — recognising "the imagery updated"
+by eye is easy, and a frozen tile corpus is real ongoing weight.
+
+#### Profiling
+
+The engine's per-frame accounting is exported to JS as `view.getStats()`:
+section times (`bfsMs`, `dlMs`, `evictMs`, `drawMs`), the bfs work counters,
+and the node want/have/drawn counts. It's also still printed to the console
+every 2s. `drawMs` is command-*submission* time, not GPU time — WebGL is
+asynchronous, so it measures the cost of crossing into the browser, which the
+per-node bind sequence in [rocktree_gl.h](./rocktree_gl.h) dominates. Real GPU
+timing would need `EXT_disjoint_timer_query_webgl2`, which is WebGL2-only.
+
+`capture.mjs` records these into each shot's sidecar json, so the report shows
+them as reference→current alongside the images.
+
 #### Deploy
 
 Push to main. [.github/workflows/deploy.yml](.github/workflows/deploy.yml)

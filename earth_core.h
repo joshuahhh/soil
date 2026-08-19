@@ -246,6 +246,11 @@ struct earth_core_t {
 	double sec_bfs = 0, sec_dl = 0, sec_evict = 0, sec_draw = 0;
 	long cnt_oct = 0, cnt_cull = 0, cnt_lod = 0;
 	int sec_frames = 0;
+	// the last 2s report's per-frame averages, kept (rather than only
+	// printed) so shells can read them back — see EarthView::getStats
+	double avg_bfs = 0, avg_dl = 0, avg_evict = 0, avg_draw = 0;
+	long avg_oct = 0, avg_cull = 0, avg_lod = 0;
+	int avg_fps = 0;
 	double sec_report_ms = 0, stats_report_ms = 0;
 	int evict_tick = 0;
 
@@ -1155,9 +1160,14 @@ struct earth_core_t {
 		sec_report_ms += dt_ms;
 		if (sec_report_ms > 2000 && sec_frames > 0) {
 			sec_report_ms = 0;
+			avg_bfs = sec_bfs / sec_frames; avg_dl = sec_dl / sec_frames;
+			avg_evict = sec_evict / sec_frames; avg_draw = sec_draw / sec_frames;
+			avg_oct = cnt_oct / sec_frames; avg_cull = cnt_cull / sec_frames;
+			avg_lod = cnt_lod / sec_frames;
+			avg_fps = sec_frames / 2;
 			printf("sections avg ms: bfs %.2f, dl %.2f, evict %.2f, draw %.2f (%d frames; per frame: oct %ld, cull %ld, lod %ld)\n",
-				sec_bfs / sec_frames, sec_dl / sec_frames, sec_evict / sec_frames, sec_draw / sec_frames,
-				sec_frames, cnt_oct / sec_frames, cnt_cull / sec_frames, cnt_lod / sec_frames);
+				avg_bfs, avg_dl, avg_evict, avg_draw,
+				sec_frames, avg_oct, avg_cull, avg_lod);
 			sec_bfs = sec_dl = sec_evict = sec_draw = 0;
 			cnt_oct = cnt_cull = cnt_lod = 0;
 			sec_frames = 0;

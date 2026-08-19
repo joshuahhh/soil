@@ -82,3 +82,6 @@ cache/
 web/earth.js
 web/earth.wasm
 web/coi-serviceworker.js
+
+# render-test working output (tools/reference/ IS committed — it's the goldens)
+tools/out/
