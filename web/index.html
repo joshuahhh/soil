@@ -22,7 +22,8 @@
   #right { position: relative; }
   /* the strip between the panes; hovering it reveals an arrow that collapses
      the map so the 3d view gets the whole window (and back) */
-  #divider { flex: 0 0 8px; position: relative; background: #333; z-index: 20; }
+  #divider { flex: 0 0 8px; position: relative; background: #333; z-index: 20;
+             cursor: pointer; }
   #expandbtn { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
                width: 22px; height: 48px; padding: 0; border: 0; border-radius: 4px;
                color: #fff; background: rgba(0,0,0,.55); font: 14px sans-serif;
@@ -340,6 +341,7 @@
   // collapses the map pane; the divider stays at the left edge and its arrow
   // flips to bring the map back. sticky across reloads via the saved view
   const expandBtn = document.getElementById('expandbtn');
+  const dividerEl = document.getElementById('divider');
   let full3d = false;
   const setFull3d = (on) => {
     full3d = on;
@@ -349,7 +351,9 @@
     resize(); // the canvas backing store tracks its new client size
     if (!on) map.resize();
   };
-  expandBtn.addEventListener('click', () => {
+  // the whole strip is the target, not just the arrow (the arrow is only the
+  // affordance); the button's own click bubbles up to here
+  dividerEl.addEventListener('click', () => {
     setFull3d(!full3d);
     canvas.focus(); // keep flight keys live (and space off the button)
   });
