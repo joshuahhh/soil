@@ -160,6 +160,11 @@ struct EarthView {
 	}
 	void setSkyColor(int rgb) { sky_color = rgb; }
 	void setDebugLod(bool on) { earth.debug_lod = on; }
+	// M key: mipmaps + anisotropy on the uncompressed texture path. the dxt
+	// path has no mip chain to switch to (crn ships a single level and
+	// glGenerateMipmap rejects compressed textures), so pair this with ?jpg
+	// to actually see the difference
+	void setMipmaps(bool on) { renderSetMipmaps(ctx, on); }
 
 	// --- test/profiling hooks -------------------------------------------
 	// the engine's own frame accounting, read back rather than only printed
@@ -588,6 +593,7 @@ EMSCRIPTEN_BINDINGS(earth) {
 		.function("getTubeInfo", &EarthView::getTubeInfo)
 		.function("setSkyColor", &EarthView::setSkyColor)
 		.function("setDebugLod", &EarthView::setDebugLod)
+		.function("setMipmaps", &EarthView::setMipmaps)
 		.function("getStats", &EarthView::getStats)
 		.function("getDrawnNodes", &EarthView::getDrawnNodes)
 		.function("fly", &EarthView::fly);

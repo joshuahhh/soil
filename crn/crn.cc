@@ -6,6 +6,14 @@
 extern "C" {
   unsigned int crn_get_decompressed_size(const void *src, unsigned int src_size, unsigned int level_index);
   void crn_decompress(const void *src, unsigned int src_size, void *dst, unsigned int dst_size, unsigned int level_index);
+  unsigned int crn_get_levels(const void *src, unsigned int src_size);
+}
+
+unsigned int crn_get_levels(const void *src, unsigned int src_size) {
+  crnd::crn_texture_info tex_info;
+  if (!crnd::crnd_get_texture_info(static_cast<const crn_uint8*>(src), src_size, &tex_info))
+    return 0;
+  return tex_info.m_levels;
 }
 
 unsigned int crn_get_decompressed_size(const void *src, unsigned int src_size, unsigned int level_index) {

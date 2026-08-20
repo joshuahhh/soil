@@ -191,10 +191,10 @@
   // per-mode control hints; the active one is set by updateHint() below
   const HINTS = {
     persp: 'WASD move · R/F up/down · hold space: view-frame · arrows/drag look · ' +
-      'Z/X zoom · shift slow · G hug terrain · O ortho · C pick debug · L lod debug · 0 reset view · ' +
+      'Z/X zoom · shift slow · G hug terrain · O ortho · C pick debug · L lod debug · M mipmaps · 0 reset view · ' +
       'P point pairs · click map to teleport · ⇧drag map: tube rect',
     ortho: 'WASD/drag pan · arrows orbit around center · wheel/Z/X/R/F zoom · ' +
-      'shift slow · O perspective · C pick debug · L lod debug · 0 reset view · ' +
+      'shift slow · O perspective · C pick debug · L lod debug · M mipmaps · 0 reset view · ' +
       'click map to teleport · ⇧drag map: tube rect',
     tube: 'airplane controls — W/S thrust · A/D strafe · R/F up/down · arrows/drag pitch+yaw · Q/E roll · ' +
       'Z/X zoom · shift slow · G hug the wall · 0 reset view · T unroll · esc clear tube · ⇧drag map: new rect',
@@ -542,15 +542,17 @@
   // frame: W/S dolly along the view, Q/E boom along view-up. arrows pan/tilt
   // so no mouse is needed. Z/X zoom (fov). -/= sticky speed gain. shift slow
   const keys = {};
-  const handled = new Set(['KeyW','KeyA','KeyS','KeyD','KeyQ','KeyE','KeyR','KeyF','KeyZ','KeyX','KeyG','KeyO','KeyC','KeyL','KeyT','KeyP',
+  const handled = new Set(['KeyW','KeyA','KeyS','KeyD','KeyQ','KeyE','KeyR','KeyF','KeyZ','KeyX','KeyG','KeyO','KeyC','KeyL','KeyM','KeyT','KeyP',
     'Space','ArrowLeft','ArrowRight','ArrowUp','ArrowDown','Minus','Equal','Digit0','Numpad0','Home']);
   let gain = 1; // re-initialized from the saved view once it loads
   let ortho = false;
   let hug = false; // terrain hug: hold height above the mesh, not the sphere
   let debugLod = false;
+  let mipmaps = true;
   const updateHint = () => {
     document.getElementById('hint').textContent =
       HINTS[tubeOn ? 'tube' : ortho ? 'ortho' : 'persp']
+        + (mipmaps ? '' : ' · MIPMAPS OFF')
       // T only does anything once a rect exists
       + (!tubeOn && tubeRect ? ' · T roll tube · esc clear' : '');
     document.getElementById('speed').textContent =
@@ -603,6 +605,14 @@
     // like the native app's L key: tint octants red where a finer tile is
     // wanted but not yet downloaded
     if (e.code === 'KeyL' && !e.repeat) { debugLod = !debugLod; view.setDebugLod(debugLod); }
+    // mipmap A/B. only bites on the uncompressed texture path, so it's the
+    // ?jpg build where you can see it — and it's motion that shows it, not a
+    // still frame: watch distant ground crawl as you fly
+    if (e.code === 'KeyM' && !e.repeat) {
+      mipmaps = !mipmaps;
+      view.setMipmaps(mipmaps);
+      updateHint();
+    }
     // roll/unroll the tube for the current rect (drawn by shift+drag on the
     // map). rolling up also flies into the tube mouth — watching the roll
     // from outside mostly shows the back of the sheet

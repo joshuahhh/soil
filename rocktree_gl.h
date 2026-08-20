@@ -22,6 +22,12 @@ struct gl_ctx_t {
 	GLint texcoords_loc;
 };
 
+// largest anisotropy the gpu offers, 1 if the extension is missing
+static float texture_max_aniso = 1.0f;
+// live A/B switch (M key). only the uncompressed path has a mip chain to
+// switch to, so this does nothing on dxt tiles
+static bool texture_mipmaps_on = true;
+
 void meshTexImage2d(const rocktree_t::node_t::mesh_t &mesh) {
 	switch (mesh.texture_format) {
 	case rocktree_t::texture_format_rgb:
@@ -54,11 +60,37 @@ void bufferMesh(rocktree_t::node_t::mesh_t &mesh) {
 
 	glGenTextures(1, &mesh.texture_buffer);
 	glBindTexture(GL_TEXTURE_2D, mesh.texture_buffer);
-	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR); // GL_NEAREST
 	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
 	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
 
 	meshTexImage2d(mesh);
+
+	// lod selection stops at the first level finer than one texel per pixel
+	// (see earth_core's texels_per_meter test), so minification is bounded —
+	// but that test uses distance to the node centre, which ignores
+	// foreshortening. at a grazing angle one axis is compressed several times
+	// over, and that's where an unmipmapped texture aliases.
+	//
+	// only the uncompressed path can build its own chain: glGenerateMipmap
+	// rejects compressed textures, and the crn files carry a single level
+	// (crn_get_levels == 1 on every tile sampled), so the dxt path would need
+	// its levels generated and re-encoded cpu-side.
+	//
+	// that covers more than it sounds like: jpeg is not merely the no-s3tc
+	// fallback this file's other comments imply — google serves a lot of
+	// nodes as jpeg regardless. measured over settled views: grand canyon
+	// 200/200 tiles jpeg, rainier 137/250, seattle 111/250, manhattan 24/100
+	if (mesh.texture_format == rocktree_t::texture_format_rgb) {
+		glGenerateMipmap(GL_TEXTURE_2D);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+		// trilinear alone picks its level from the *worst* axis, so it fixes
+		// the aliasing by blurring the other one; anisotropy is what keeps a
+		// grazing-angle tile sharp along its uncompressed axis
+		if (texture_max_aniso > 1.0f)
+			glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_MAX_ANISOTROPY_EXT, texture_max_aniso);
+	} else {
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+	}
 
 	mesh.buffered = true;
 }
@@ -78,6 +110,12 @@ void bindAndDrawMesh(const rocktree_t::node_t::mesh_t &mesh, uint8_t octant_mask
 	glUniform1iv(ctx.stale_mask_loc, 8, s);
 	glUniform1i(ctx.texture_loc, 0);
 	glBindTexture(GL_TEXTURE_2D, mesh.texture_buffer);
+	// per-draw rather than at upload so the M key can A/B it on a live scene:
+	// the temporal difference (shimmer as the camera moves) is the whole point
+	// and a still frame barely shows it
+	if (mesh.texture_format == rocktree_t::texture_format_rgb)
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER,
+			texture_mipmaps_on ? GL_LINEAR_MIPMAP_LINEAR : GL_LINEAR);
 	glBindBuffer(GL_ARRAY_BUFFER, mesh.vertex_buffer);
 	
 	glVertexAttribPointer(ctx.position_loc, 3, GL_UNSIGNED_BYTE, GL_FALSE, 8, (void*)0);
@@ -130,6 +168,8 @@ void renderFrameBegin(render_ctx_t &ctx, void *window, int width, int height, in
 	glClearColor((sky>>16 & 0xff) / 255.0f, (sky>>8 & 0xff) / 255.0f, (sky & 0xff) / 255.0f, 1.0f);
 	glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 }
+
+void renderSetMipmaps(render_ctx_t &ctx, bool on) { texture_mipmaps_on = on; }
 
 void renderSetDebugLod(render_ctx_t &ctx, bool debug_lod) {
 	glUniform1i(ctx.debug_lod_loc, debug_lod);
@@ -217,6 +257,15 @@ void renderInit(render_ctx_t &ctx, void *) {
 		if (e && strstr(e, "s3tc")) has_s3tc = true;
 	}
 	texture_s3tc_supported = texture_s3tc_supported && has_s3tc;
+	// anisotropic filtering is an extension in both webgl 1 and 2
+	for (GLint i = 0; i < ext_count; i++) {
+		auto e = (const char *)glGetStringi(GL_EXTENSIONS, i);
+		if (e && strstr(e, "texture_filter_anisotropic")) {
+			glGetFloatv(GL_MAX_TEXTURE_MAX_ANISOTROPY_EXT, &texture_max_aniso);
+			break;
+		}
+	}
+	printf("max anisotropy: %.0f\n", texture_max_aniso);
 	if (!texture_s3tc_supported)
 		printf("no s3tc on this gpu; using jpg textures\n");
 	glEnable(GL_DEPTH_TEST);
