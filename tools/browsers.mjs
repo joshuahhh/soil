@@ -82,7 +82,10 @@ const cards = shots.map((s) => ({
 
 const html = `<title>soil cross-browser render check</title>
 <style>${STYLE}
+  /* keep a whole row on screen; the real value is measured in js (see fit) */
+  :root { --imgmax: calc(100vh - 300px); }
   .grid { padding:16px; display:grid; gap:14px; }
+  .cell img { max-height:var(--imgmax); width:auto; max-width:100%; margin:0 auto; }
   .cell h3 small { color:var(--dim); font-weight:400; text-transform:none; letter-spacing:0; }
   .fail { padding:40px 12px; text-align:center; color:var(--bad); background:#0f1215;
           border-radius:4px; font-family:ui-monospace,Menlo,monospace; font-size:12px; }
@@ -167,6 +170,21 @@ for (const c of CARDS) {
     \`<tr><td class="v">\${b.browser}</td><td>\${b.meta?.env?.renderer || b.meta?.launchFailed || '—'}</td>
      <td>drawn \${b.meta?.nodesDrawn ?? '—'}</td></tr>\`).join('') + '</table>';
 }
+
+// keep one shot's row of browsers on screen: the chrome around the images
+// varies with how many lines the note wraps to, so measure rather than guess
+const fit = () => {
+  const hdr = document.querySelector('header').offsetHeight;
+  let chrome = 0;
+  for (const card of document.querySelectorAll('.card')) {
+    const img = card.querySelector('.cell img');
+    if (img) chrome = Math.max(chrome, card.offsetHeight - img.getBoundingClientRect().height);
+  }
+  document.documentElement.style.setProperty('--imgmax',
+    Math.max(140, innerHeight - hdr - chrome - 84) + 'px');
+};
+fit();
+addEventListener('resize', fit);
 
 const vals = Object.values(scores);
 document.getElementById('summary').textContent =

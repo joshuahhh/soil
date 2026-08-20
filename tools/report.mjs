@@ -14,6 +14,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright';
+import { STYLE } from './lib.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const OUT = path.join(HERE, 'out');
@@ -58,60 +59,42 @@ for (const name of names) {
 }
 
 const html = `<title>soil render report</title>
-<style>
-  :root { --bg:#15171a; --panel:#1e2126; --line:#2f343b; --fg:#e6e9ee; --dim:#98a2b0;
-          --ok:#3fb950; --warn:#d29922; --bad:#f85149; --accent:#58a6ff; }
-  * { box-sizing: border-box; }
-  body { margin:0; background:var(--bg); color:var(--fg);
-         font:14px/1.5 ui-sans-serif,-apple-system,system-ui,sans-serif; }
-  header { padding:20px 24px; border-bottom:1px solid var(--line); position:sticky; top:0;
-           background:var(--bg); z-index:10; display:flex; gap:20px; align-items:baseline;
-           flex-wrap:wrap; }
-  h1 { font-size:16px; margin:0; font-weight:600; letter-spacing:.01em; }
-  .sub { color:var(--dim); font-size:13px; }
-  main { padding:24px; display:flex; flex-direction:column; gap:24px; }
-  .card { background:var(--panel); border:1px solid var(--line); border-radius:8px;
-          overflow:hidden; }
-  .head { padding:12px 16px; display:flex; gap:10px; align-items:center; flex-wrap:wrap;
-          border-bottom:1px solid var(--line); }
-  .name { font-weight:600; font-family:ui-monospace,SFMono-Regular,Menlo,monospace; }
-  .badge { font-size:11px; padding:2px 8px; border-radius:999px; border:1px solid var(--line);
-           color:var(--dim); font-family:ui-monospace,Menlo,monospace; white-space:nowrap; }
-  .badge.ok { color:var(--ok); border-color:#23502f; }
-  .badge.warn { color:var(--warn); border-color:#5a4415; }
-  .badge.bad { color:var(--bad); border-color:#6b2226; }
-  .note { padding:8px 16px; color:var(--dim); font-size:12.5px; border-bottom:1px solid var(--line); }
-  .modes { margin-left:auto; display:flex; gap:2px; }
-  .modes button { background:#262b31; color:var(--dim); border:1px solid var(--line);
-                  padding:4px 11px; font:inherit; font-size:12px; cursor:pointer; }
-  .modes button:first-child { border-radius:5px 0 0 5px; }
-  .modes button:last-child { border-radius:0 5px 5px 0; }
-  .modes button[aria-pressed="true"] { background:var(--accent); color:#0b1117; border-color:var(--accent); }
-  .stage { padding:16px; display:grid; gap:12px; }
-  .stage.side { grid-template-columns:1fr 1fr; }
-  .pane { min-width:0; }
-  .pane h3 { margin:0 0 6px; font-size:11px; text-transform:uppercase; letter-spacing:.08em;
-             color:var(--dim); font-weight:600; }
-  img, canvas { width:100%; display:block; border-radius:4px; background:#0b0d10; }
-  .wrap { position:relative; }
-  .wrap .over { position:absolute; inset:0; overflow:hidden; }
-  .wrap .over img { position:absolute; top:0; left:0; height:100%; width:auto; max-width:none; }
-  input[type=range] { width:100%; margin-top:10px; accent-color:var(--accent); }
-  .nodes { padding:0 16px 16px; font-size:12px; font-family:ui-monospace,Menlo,monospace;
-           color:var(--dim); }
-  .nodes details { margin-top:6px; }
-  .nodes summary { cursor:pointer; }
-  .nodes pre { margin:6px 0 0; padding:10px; background:#0f1215; border-radius:5px;
-               max-height:220px; overflow:auto; font-size:11.5px; color:var(--fg); }
-  .missing { padding:28px 16px; color:var(--dim); text-align:center; }
-  table.t { border-collapse:collapse; font-size:11.5px; font-family:ui-monospace,Menlo,monospace; }
-  table.t td { padding:1px 12px 1px 0; color:var(--dim); }
-  table.t td.v { color:var(--fg); }
+<style>${STYLE}
+  /* one comparison at a time, so a card should fit the window without
+     scrolling the image out from under the header. the real value is measured
+     in js (see fit) — this is only the pre-measurement starting point */
+  :root { --imgmax: calc(100vh - 260px); }
+  .stage img, .stage canvas { max-width:100%; max-height:var(--imgmax);
+                              width:auto; height:auto; margin:0 auto; }
+  .stage .pane { display:flex; flex-direction:column; align-items:center; }
+  .stage .pane h3 { align-self:stretch; }
+  /* wipe: the image itself is the control — no slider to aim at */
+  .wipe { position:relative; display:inline-block; line-height:0; cursor:col-resize;
+          touch-action:none; }
+  .wipe .top { position:absolute; top:0; left:0; bottom:0; width:var(--pos,50%);
+               overflow:hidden; }
+  /* the clipped copy must render at exactly the base image's box, which its
+     own max-width can't give it inside a narrowed parent — js supplies it */
+  .wipe .top img { position:absolute; top:0; left:0; max-width:none; max-height:none;
+                   width:var(--w); height:var(--h); }
+  .wipe .line { position:absolute; top:0; bottom:0; left:var(--pos,50%); width:2px;
+                margin-left:-1px; background:var(--accent); pointer-events:none;
+                box-shadow:0 0 0 1px rgba(0,0,0,.5); }
+  .wipe .tag { position:absolute; top:8px; font:11px ui-monospace,Menlo,monospace;
+               background:rgba(0,0,0,.6); color:#fff; padding:2px 7px; border-radius:3px;
+               pointer-events:none; }
+  .wipe .tag.l { left:8px; } .wipe .tag.r { right:8px; }
 </style>
 <header>
   <h1>soil render report</h1>
   <span class="sub" id="summary">measuring…</span>
   <span class="sub">pixel diff orders the list; it does not judge. check the node-set and tile badges.</span>
+  <span class="modes" id="modes">
+    <button data-mode="side" aria-pressed="true">side by side</button>
+    <button data-mode="wipe">wipe</button>
+    <button data-mode="blink">blink</button>
+    <button data-mode="heat">diff</button>
+  </span>
 </header>
 <main id="main"></main>
 <script type="module">
@@ -131,7 +114,15 @@ const metaBadges = (m, label) => {
       \`\${label} \${m.nodesLoaded}/\${m.nodesWanted} tiles\${m.complete ? '' : ' · TIMED OUT'}\`);
 };
 
+// one blink clock for the whole page, so every card flips together instead of
+// each drifting on its own interval
+let blinkOn = false;
+const blinkSubs = new Set();
+setInterval(() => { blinkOn = !blinkOn; blinkSubs.forEach((f) => f(blinkOn)); }, 600);
+
 const main = document.getElementById('main');
+const cards = []; // { render, stop } per comparable card, driven by the header
+
 for (const c of CARDS) {
   const el = document.createElement('div');
   el.className = 'card';
@@ -148,12 +139,6 @@ for (const c of CARDS) {
           nodeDelta ? \`node set: +\${c.added.length} -\${c.removed.length} ~\${c.maskChanged.length}\` : 'node set identical') : ''}
       \${envMismatch(c) ? badge('bad', 'renderer differs from reference — pixel diff is not meaningful') : ''}
       <span class="badge" data-diff>diff …</span>
-      <span class="modes">
-        <button data-mode="side" aria-pressed="true">side by side</button>
-        <button data-mode="wipe">wipe</button>
-        <button data-mode="blink">blink</button>
-        <button data-mode="heat">diff</button>
-      </span>
     </div>
     \${m?.note ? \`<div class="note">\${m.note}</div>\` : ''}
     <div class="stage side"></div>
@@ -213,7 +198,7 @@ for (const c of CARDS) {
   diffBadge.className = 'badge ' + (Number.isNaN(pctChanged) ? 'bad' : pctChanged > 2 ? 'warn' : pctChanged > 0.05 ? '' : 'ok');
   diffBadge.textContent = Number.isNaN(pctChanged) ? 'size mismatch' : \`diff \${pctChanged.toFixed(2)}% px\`;
 
-  const t = (m, k, f = (v) => v) => m?.timings?.[k] != null ? f(m.timings[k]) : '—';
+  const t = (mm, k, f = (v) => v) => mm?.timings?.[k] != null ? f(mm.timings[k]) : '—';
   el.querySelector('.nodes').innerHTML = \`
     <table class="t"><tr>
       <td>drawn nodes</td><td class="v">\${c.ref.meta.nodesDrawn} → \${c.cur.meta.nodesDrawn}</td>
@@ -230,47 +215,87 @@ for (const c of CARDS) {
        ...c.maskChanged.map(p => '~ ' + p)].join('\\n')
     }</pre></details>\` : ''}\`;
 
+  let cleanup = null; // undo whatever the last mode installed
   const render = (mode) => {
+    if (cleanup) { cleanup(); cleanup = null; }
     if (mode === 'side') {
       stage.classList.add('side');
       stage.innerHTML = \`<div class="pane"><h3>reference</h3><img src="\${c.ref.uri}"></div>
                          <div class="pane"><h3>current</h3><img src="\${c.cur.uri}"></div>\`;
-    } else if (mode === 'heat') {
-      stage.classList.remove('side');
+      return;
+    }
+    stage.classList.remove('side');
+    if (mode === 'heat') {
       stage.innerHTML = heatUri
         ? \`<div class="pane"><h3>changed pixels</h3><img src="\${heatUri}"></div>\`
         : '<div class="missing">sizes differ — no diff</div>';
     } else if (mode === 'blink') {
-      stage.classList.remove('side');
       stage.innerHTML = \`<div class="pane"><h3 data-l>reference</h3><img data-b src="\${c.ref.uri}"></div>\`;
       const img = stage.querySelector('[data-b]'), lab = stage.querySelector('[data-l]');
-      let on = false;
-      const id = setInterval(() => {
-        on = !on;
+      const sub = (on) => {
         img.src = on ? c.cur.uri : c.ref.uri;
         lab.textContent = on ? 'current' : 'reference';
-      }, 600);
-      stage._stop = () => clearInterval(id);
-    } else {
-      stage.classList.remove('side');
-      stage.innerHTML = \`<div class="pane"><h3>reference ← wipe → current</h3>
-        <div class="wrap"><img src="\${c.ref.uri}">
-          <div class="over" style="width:50%"><img src="\${c.cur.uri}" style="width:\${W}px"></div>
-        </div><input type="range" min="0" max="100" value="50"></div>\`;
-      const over = stage.querySelector('.over'), range = stage.querySelector('input');
-      const sync = () => { over.querySelector('img').style.width = stage.querySelector('.wrap img').clientWidth + 'px'; };
-      new ResizeObserver(sync).observe(stage.querySelector('.wrap'));
-      range.oninput = () => { over.style.width = range.value + '%'; };
+      };
+      blinkSubs.add(sub);
+      sub(blinkOn);
+      cleanup = () => blinkSubs.delete(sub);
+    } else { // wipe
+      stage.innerHTML = \`<div class="pane"><h3>drag across the image — left is reference, right is current</h3>
+        <div class="wipe"><img class="base" src="\${c.ref.uri}">
+          <div class="top"><img src="\${c.cur.uri}"></div>
+          <div class="line"></div>
+          <span class="tag l">reference</span><span class="tag r">current</span>
+        </div></div>\`;
+      const wipe = stage.querySelector('.wipe'), base = stage.querySelector('.base');
+      // the clipped copy is absolutely positioned inside a narrowed box, so it
+      // needs the base's rendered size handed to it explicitly — and re-handed
+      // whenever the layout changes
+      const sync = () => {
+        wipe.style.setProperty('--w', base.clientWidth + 'px');
+        wipe.style.setProperty('--h', base.clientHeight + 'px');
+      };
+      const ro = new ResizeObserver(sync);
+      ro.observe(base);
       sync();
+      const move = (e) => {
+        const r = base.getBoundingClientRect();
+        wipe.style.setProperty('--pos',
+          Math.max(0, Math.min(r.width, e.clientX - r.left)) + 'px');
+      };
+      wipe.addEventListener('pointermove', move);
+      wipe.addEventListener('pointerdown', move);
+      cleanup = () => ro.disconnect();
     }
   };
-  el.querySelectorAll('.modes button').forEach((b) => b.onclick = () => {
-    if (stage._stop) { stage._stop(); stage._stop = null; }
-    el.querySelectorAll('.modes button').forEach((o) => o.setAttribute('aria-pressed', String(o === b)));
-    render(b.dataset.mode);
-  });
-  render('side');
+  cards.push({ render });
+  render(document.querySelector('#modes button[aria-pressed="true"]').dataset.mode);
 }
+
+// size the images so a whole card fits the window. a fixed subtraction can't
+// do this: the chrome above and below an image varies with the mode and with
+// how many lines the note wraps to, so measure it. chrome doesn't depend on
+// the image height, so one pass settles
+const fit = () => {
+  const hdr = document.querySelector('header').offsetHeight;
+  let chrome = 0;
+  for (const card of document.querySelectorAll('.card')) {
+    const img = card.querySelector('.stage img, .stage canvas');
+    if (img) chrome = Math.max(chrome, card.offsetHeight - img.getBoundingClientRect().height);
+  }
+  document.documentElement.style.setProperty('--imgmax',
+    Math.max(180, innerHeight - hdr - chrome - 56) + 'px');
+};
+
+// the mode is one decision for the whole page, not one per pair
+document.querySelectorAll('#modes button').forEach((b) => b.onclick = () => {
+  document.querySelectorAll('#modes button')
+    .forEach((o) => o.setAttribute('aria-pressed', String(o === b)));
+  for (const c of cards) c.render(b.dataset.mode);
+  fit();
+});
+
+fit();
+addEventListener('resize', fit);
 
 main.style.display = 'flex';
 const vals = Object.values(scores);
@@ -280,6 +305,7 @@ document.getElementById('summary').textContent =
   \`\${vals.filter(v => !v.complete).length} incomplete\`;
 window.__ready = true;
 </script>`;
+
 
 await fs.mkdir(OUT, { recursive: true });
 const file = path.join(OUT, 'report.html');
