@@ -142,6 +142,12 @@ aliasing is a distance problem the near field dilutes. The absolute number is
 meaningless; the ordering across configs is the point, because the scene and
 the nudge are identical.
 
+Every config is gated on the scene actually finishing: a score taken on a
+half-loaded frame measures which tiles happened to arrive, not how the renderer
+filters, and the row is marked meaningless rather than reported. That gate is
+load-bearing — without it the MSAA rows moved by more than the effect being
+measured.
+
 Result on `seattle-skyline` (lower is steadier):
 
 | config | whole frame | distant half |

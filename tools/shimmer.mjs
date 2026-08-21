@@ -19,7 +19,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { chromium } from 'playwright';
 import { serveWeb } from './serve.mjs';
-import { OUT, readShots, shotQuery } from './lib.mjs';
+import { OUT, readShots, shotQuery, comparisonPage } from './lib.mjs';
 
 const argv = process.argv.slice(2);
 const only = argv.filter((a) => !a.startsWith('--'));
@@ -36,12 +36,14 @@ const CONFIGS = [
 
 const { base, close } = await serveWeb();
 const browser = await chromium.launch();
+let bad = 0;
 const DIR = path.join(OUT, 'shimmer');
 await fs.mkdir(DIR, { recursive: true });
+const results = [];
 
 for (const shot of shots) {
   console.log(`\n${shot.name} — nudging heading by ${NUDGE}deg\n` + '-'.repeat(64));
-  console.log('config'.padEnd(30) + 'whole frame'.padStart(13) + 'distant half'.padStart(15));
+  console.log('config'.padEnd(30) + 'whole frame'.padStart(13) + 'distant half'.padStart(15) + '      loaded');
   // one context for every config, unlike capture.mjs: these render the same
   // scene, so they should share the page's indexeddb tile cache. only the
   // first config pays the download; the rest start warm. (msaa still needs a
@@ -54,12 +56,12 @@ for (const shot of shots) {
     await page.goto(`${base}/index.html?${q}`, { waitUntil: 'load' });
     await page.waitForFunction('window.__test && window.__test.stats() !== null', null, { timeout: 60000 });
     await page.evaluate((on) => window.__test.setMipmaps(on), cfg.mips);
-    await page.evaluate(() => window.__test.settle({ timeoutMs: 150000 }));
+    const s1 = await page.evaluate(() => window.__test.settle({ timeoutMs: 180000 }));
 
     const a = await page.evaluate(() => window.__test.shot());
     // move, let it re-settle (a nudge this small shouldn't change the tile set)
     await page.evaluate((d) => window.__test.nudgeHeading(d), NUDGE);
-    await page.evaluate(() => window.__test.settle({ timeoutMs: 60000, stable: 3 }));
+    const s2 = await page.evaluate(() => window.__test.settle({ timeoutMs: 90000, stable: 3 }));
     const b = await page.evaluate(() => window.__test.shot());
 
     const score = await page.evaluate(async ([ua, ub]) => {
@@ -84,13 +86,80 @@ for (const shot of shots) {
       return { all: allN ? all / allN : 0, far: farN ? far / farN : 0 };
     }, [a, b]);
 
-    await fs.writeFile(path.join(DIR, `${shot.name}-${cfg.mips?'mip':'nomip'}-${cfg.msaa?'msaa':'nomsaa'}.png`),
-      Buffer.from(b.split(',')[1], 'base64'));
-    console.log(cfg.name.padEnd(30) + score.all.toFixed(2).padStart(13) + score.far.toFixed(2).padStart(15));
+    // both halves of the pair, not just the second: blinking between them is
+    // the only way to actually see the shimmer the score is measuring
+    const tag = `${cfg.mips ? 'mip' : 'nomip'}-${cfg.msaa ? 'msaa' : 'nomsaa'}`;
+    for (const [suffix, uri] of [['before', a], ['after', b]])
+      await fs.writeFile(path.join(DIR, `${shot.name}-${tag}-${suffix}.png`),
+        Buffer.from(uri.split(',')[1], 'base64'));
+    const ok = s1.complete && s2.complete
+      && s1.stats?.nodesLoaded === s1.stats?.nodesWanted
+      && s2.stats?.nodesLoaded === s2.stats?.nodesWanted;
+    // a config scored on a partly-loaded scene is measuring which tiles
+    // happened to arrive, not how the renderer filters. don't let that pass
+    // as a result
+    console.log(cfg.name.padEnd(30) + score.all.toFixed(2).padStart(13)
+      + score.far.toFixed(2).padStart(15)
+      + (ok ? `      ${s2.stats.nodesLoaded}/${s2.stats.nodesWanted} tiles`
+            : `   *** NOT SETTLED (${s1.stats?.nodesLoaded}/${s1.stats?.nodesWanted} then ${s2.stats?.nodesLoaded}/${s2.stats?.nodesWanted}) — score is meaningless ***`));
+    if (!ok) bad++;
+    results.push({ shot: shot.name, cfg, tag, a, b, score, ok });
     await page.close();
   }
   await ctx.close();
 }
 await browser.close();
 close();
-console.log(`\nlower is steadier. frames in ${DIR}`);
+
+// --- report ---------------------------------------------------------------
+// two questions, so two kinds of card. within a config, blinking the nudge
+// pair *is* the shimmer: the same scene one pixel apart, so whatever jumps is
+// the aliasing you'd see as crawl in motion. across configs, the same pose
+// side by side shows what each one costs in sharpness.
+const scored = results.filter((r) => r.ok);
+const best = scored.length ? Math.min(...scored.map((r) => r.score.far)) : null;
+const rows = results.map((r) =>
+  `<tr class="${r.ok && r.score.far === best ? 'best' : ''}"><td>${r.cfg.name}</td>` +
+  `<td>${r.score.all.toFixed(2)}</td><td>${r.score.far.toFixed(2)}</td>` +
+  `<td>${r.ok ? 'settled' : 'NOT SETTLED'}</td></tr>`).join('');
+
+const cards = results.map((r) => ({
+  name: `${r.cfg.name} — the crawl`,
+  note: 'the same scene one pixel apart. in blink, whatever jumps is aliasing — that motion '
+      + 'is exactly what reads as shimmer while flying.',
+  badges: [
+    { cls: !r.ok ? 'bad' : r.score.far === best ? 'ok' : r.score.far > best * 1.1 ? 'warn' : '',
+      text: `distant-half churn ${r.score.far.toFixed(2)}` },
+    ...(r.ok ? [] : [{ cls: 'bad', text: 'scene never settled — score is meaningless' }]),
+  ],
+  a: { label: 'before nudge', uri: r.a },
+  b: { label: 'after nudge', uri: r.b },
+}));
+
+// and the head-to-heads that answer "what does each option actually change"
+const find = (mips, msaa) => results.find((r) => r.cfg.mips === mips && r.cfg.msaa === msaa);
+const pair = (x, y, name, note) => (x && y) ? [{ name, note, badges: [],
+  a: { label: x.cfg.name, uri: x.a }, b: { label: y.cfg.name, uri: y.a } }] : [];
+cards.push(
+  ...pair(find(true, false), find(true, true), 'msaa off vs on — same pose',
+    'static quality rather than shimmer. look at tower silhouettes and dense housing — then check '
+    + 'tile seams against sky, where msaa can leave the crack-fill lines only partly opaque, and '
+    + 'octant-mask boundaries, which use discard and so get no antialiasing at all.'),
+  ...pair(find(false, false), find(true, false), 'mipmaps off vs on — same pose',
+    'texture minification only, and only on the uncompressed tiles — the dxt half has no mip chain.'),
+);
+
+const html = comparisonPage({
+  title: 'soil shimmer report',
+  intro: `${results[0]?.shot ?? ''} · heading nudged ${NUDGE}deg · blink is the shimmer, lower churn is steadier`,
+  defaultMode: 'blink',
+  cards,
+  extraHtml: `<div class="metricbox" style="padding:14px 24px;border-bottom:1px solid var(--line)">
+    <table class="metric"><tr><th>config</th><th>whole frame</th><th>distant half</th><th>load</th></tr>
+    ${rows}</table></div>`,
+});
+const file = path.join(OUT, 'shimmer.html');
+await fs.writeFile(file, '<!doctype html><meta charset="utf-8">' + html);
+console.log(`\nlower is steadier. report: ${file}`);
+if (bad) console.log(`${bad} config(s) did not fully load — rerun before believing the table`);
+if (argv.includes('--open')) (await import('node:child_process')).exec(`open "${file}"`);

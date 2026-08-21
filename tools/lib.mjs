@@ -139,3 +139,153 @@ export const STYLE = `
   table.t td { padding:1px 12px 1px 0; color:var(--dim); vertical-align:top; }
   table.t td.v { color:var(--fg); }
 `;
+
+// A/B comparison page: a list of image pairs with one mode selector for the
+// whole page (side by side / wipe / blink / diff). shimmer.mjs uses it; the
+// golden report has its own copy with extra per-card machinery.
+//
+// cards: [{ name, note, badges: [{cls, text}], a: {label, uri}, b: {label, uri} }]
+export function comparisonPage({ title, intro, defaultMode = 'blink', cards, extraHtml = '' }) {
+  return `<title>${title}</title>
+<style>${STYLE}
+  :root { --imgmax: calc(100vh - 260px); }
+  .stage img { max-width:100%; max-height:var(--imgmax); width:auto; height:auto; margin:0 auto; }
+  .stage .pane { display:flex; flex-direction:column; align-items:center; }
+  .stage .pane h3 { align-self:stretch; }
+  .wipe { position:relative; display:inline-block; line-height:0; cursor:col-resize; touch-action:none; }
+  .wipe .top { position:absolute; top:0; left:0; bottom:0; width:var(--pos,50%); overflow:hidden; }
+  .wipe .top img { position:absolute; top:0; left:0; max-width:none; max-height:none;
+                   width:var(--w); height:var(--h); }
+  .wipe .line { position:absolute; top:0; bottom:0; left:var(--pos,50%); width:2px; margin-left:-1px;
+                background:var(--accent); pointer-events:none; box-shadow:0 0 0 1px rgba(0,0,0,.5); }
+  .wipe .tag { position:absolute; top:8px; font:11px ui-monospace,Menlo,monospace;
+               background:rgba(0,0,0,.6); color:#fff; padding:2px 7px; border-radius:3px; pointer-events:none; }
+  .wipe .tag.l { left:8px; } .wipe .tag.r { right:8px; }
+  table.metric { border-collapse:collapse; margin:0; font:12px ui-monospace,Menlo,monospace; }
+  table.metric th { text-align:right; padding:4px 14px; color:var(--dim); font-weight:600;
+                    border-bottom:1px solid var(--line); }
+  table.metric th:first-child { text-align:left; }
+  table.metric td { text-align:right; padding:4px 14px; }
+  table.metric td:first-child { text-align:left; color:var(--dim); }
+  table.metric tr.best td { color:var(--ok); }
+</style>
+<header>
+  <h1>${title}</h1>
+  <span class="sub">${intro}</span>
+  <span class="modes" id="modes">
+    <button data-mode="side">side by side</button>
+    <button data-mode="wipe">wipe</button>
+    <button data-mode="blink">blink</button>
+    <button data-mode="heat">diff</button>
+  </span>
+</header>
+${extraHtml}
+<main id="main"></main>
+<script type="module">
+const CARDS = ${JSON.stringify(cards)};
+const DEFAULT_MODE = ${JSON.stringify(defaultMode)};
+
+// one blink clock for the page, so cards flip together rather than drifting
+let blinkOn = false;
+const blinkSubs = new Set();
+setInterval(() => { blinkOn = !blinkOn; blinkSubs.forEach((f) => f(blinkOn)); }, 500);
+
+const load = (uri) => new Promise((r) => { const i = new Image(); i.onload = () => r(i); i.src = uri; });
+const main = document.getElementById('main');
+const rendered = [];
+
+for (const c of CARDS) {
+  const el = document.createElement('div');
+  el.className = 'card';
+  el.innerHTML = \`<div class="head"><span class="name">\${c.name}</span>
+      \${(c.badges || []).map((b) => \`<span class="badge \${b.cls || ''}">\${b.text}</span>\`).join('')}
+    </div>
+    \${c.note ? \`<div class="note">\${c.note}</div>\` : ''}
+    <div class="stage"></div>\`;
+  main.appendChild(el);
+  const stage = el.querySelector('.stage');
+
+  const [ia, ib] = await Promise.all([load(c.a.uri), load(c.b.uri)]);
+  const W = ia.naturalWidth, H = ia.naturalHeight;
+  let heatUri = '';
+  if (ib.naturalWidth === W && ib.naturalHeight === H) {
+    const px = (img) => { const cv = new OffscreenCanvas(W, H);
+      const x = cv.getContext('2d', { willReadFrequently: true }); x.drawImage(img, 0, 0);
+      return x.getImageData(0, 0, W, H).data; };
+    const pa = px(ia), pb = px(ib);
+    const heat = new OffscreenCanvas(W, H), hx = heat.getContext('2d');
+    const out = hx.createImageData(W, H);
+    for (let i = 0; i < pa.length; i += 4) {
+      const d = Math.max(Math.abs(pa[i]-pb[i]), Math.abs(pa[i+1]-pb[i+1]), Math.abs(pa[i+2]-pb[i+2]));
+      const t = Math.min(1, d / 64);
+      out.data[i] = 20 + t * 235; out.data[i+1] = 20 + (1-t) * 40;
+      out.data[i+2] = 24 + (1-t) * 40; out.data[i+3] = 255;
+    }
+    hx.putImageData(out, 0, 0);
+    heatUri = URL.createObjectURL(await heat.convertToBlob({ type: 'image/png' }));
+  }
+
+  let cleanup = null;
+  const render = (mode) => {
+    if (cleanup) { cleanup(); cleanup = null; }
+    stage.classList.toggle('side', mode === 'side');
+    if (mode === 'side') {
+      stage.innerHTML = \`<div class="pane"><h3>\${c.a.label}</h3><img src="\${c.a.uri}"></div>
+                         <div class="pane"><h3>\${c.b.label}</h3><img src="\${c.b.uri}"></div>\`;
+    } else if (mode === 'heat') {
+      stage.innerHTML = heatUri
+        ? \`<div class="pane"><h3>changed pixels</h3><img src="\${heatUri}"></div>\`
+        : '<div class="missing">sizes differ</div>';
+    } else if (mode === 'blink') {
+      stage.innerHTML = \`<div class="pane"><h3 data-l></h3><img data-b></div>\`;
+      const img = stage.querySelector('[data-b]'), lab = stage.querySelector('[data-l]');
+      const sub = (on) => { img.src = on ? c.b.uri : c.a.uri; lab.textContent = on ? c.b.label : c.a.label; };
+      blinkSubs.add(sub); sub(blinkOn);
+      cleanup = () => blinkSubs.delete(sub);
+    } else {
+      stage.innerHTML = \`<div class="pane"><h3>drag across the image</h3>
+        <div class="wipe"><img class="base" src="\${c.a.uri}">
+          <div class="top"><img src="\${c.b.uri}"></div><div class="line"></div>
+          <span class="tag l">\${c.a.label}</span><span class="tag r">\${c.b.label}</span>
+        </div></div>\`;
+      const wipe = stage.querySelector('.wipe'), base = stage.querySelector('.base');
+      const sync = () => { wipe.style.setProperty('--w', base.clientWidth + 'px');
+                           wipe.style.setProperty('--h', base.clientHeight + 'px'); };
+      const ro = new ResizeObserver(sync); ro.observe(base); sync();
+      const move = (e) => { const r = base.getBoundingClientRect();
+        wipe.style.setProperty('--pos', Math.max(0, Math.min(r.width, e.clientX - r.left)) + 'px'); };
+      wipe.addEventListener('pointermove', move);
+      wipe.addEventListener('pointerdown', move);
+      cleanup = () => ro.disconnect();
+    }
+  };
+  rendered.push(render);
+  render(DEFAULT_MODE);
+}
+
+const fit = () => {
+  const hdr = document.querySelector('header').offsetHeight;
+  const extra = document.querySelector('.metricbox')?.offsetHeight || 0;
+  let chrome = 0;
+  for (const card of document.querySelectorAll('.card')) {
+    const img = card.querySelector('.stage img');
+    if (img) chrome = Math.max(chrome, card.offsetHeight - img.getBoundingClientRect().height);
+  }
+  document.documentElement.style.setProperty('--imgmax',
+    Math.max(180, innerHeight - hdr - extra - chrome - 56) + 'px');
+};
+
+document.querySelectorAll('#modes button').forEach((b) => {
+  b.setAttribute('aria-pressed', String(b.dataset.mode === DEFAULT_MODE));
+  b.onclick = () => {
+    document.querySelectorAll('#modes button')
+      .forEach((o) => o.setAttribute('aria-pressed', String(o === b)));
+    for (const r of rendered) r(b.dataset.mode);
+    fit();
+  };
+});
+fit();
+addEventListener('resize', fit);
+window.__ready = true;
+</script>`;
+}
