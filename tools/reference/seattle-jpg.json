@@ -14,22 +14,23 @@
   },
   "env": {
     "renderer": "ANGLE (Google, Vulkan 1.3.0 (SwiftShader Device (LLVM 10.0.0) (0x0000C0DE)), SwiftShader driver)",
+    "contextVersion": 2,
     "s3tc": true,
     "highp": true,
     "webgl2": true
   },
   "rendered": true,
   "complete": true,
-  "settleMs": 55030,
-  "wallMs": 56241,
+  "settleMs": 397347,
+  "wallMs": 403148,
   "nodesWanted": 289,
   "nodesLoaded": 289,
   "nodesDrawn": 288,
   "timings": {
-    "bfsMs": 0.8835184733072917,
-    "dlMs": 0.04441121419270833,
-    "evictMs": 0.14863077799479166,
-    "drawMs": 0.34576822916666666,
+    "bfsMs": 0.9738932291666667,
+    "dlMs": 0.02821044921875,
+    "evictMs": 0.24800211588541668,
+    "drawMs": 0.46366984049479165,
     "fps": 60
   },
   "counters": {

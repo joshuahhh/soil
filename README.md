@@ -159,11 +159,18 @@ Result on `seattle-skyline` (lower is steadier):
 
 Mipmaps do nothing here and MSAA does the work, which says the shimmer on
 distant neighbourhoods is **geometric** — sub-pixel building silhouettes — not
-texture minification. Texture filtering cannot touch that. `?msaa=1` turns on
-multisampling (a context attribute, so it needs a page load, unlike the M key
-for mipmaps). One caveat on the metric: MSAA blurs, and blurrier images differ
-less under any change, so some of that 13% is the measurement rather than the
-phenomenon — the visual comparison in `tools/out/shimmer/` is the check.
+texture minification. Texture filtering cannot touch that. Multisampling is on
+by default as a result (4x is granted in all three browsers, and 4x is also
+`MAX_SAMPLES`); `?msaa=0` opts out. It's a context attribute, so unlike the M
+key for mipmaps it needs a page load rather than a live toggle.
+
+One caveat on the metric: MSAA blurs, and blurrier images differ less under any
+change, so some of that 13% is the measurement rather than the phenomenon — the
+blink view in the report is the check. And on cost: `fps` stayed at 60 and draw
+submission was flat or lower with it on, but that's SwiftShader at 1024x640
+hitting vsync, which means "not the bottleneck here", not "free". Retina
+resolution or a 90Hz stereo headset is a different budget, and WebGL 2 now
+offers `EXT_disjoint_timer_query_webgl2` if a real GPU number is ever needed.
 
 It writes `tools/out/shimmer.html`, which defaults to **blink** — and blinking
 the nudge pair *is* the shimmer, since the two frames are the same scene one

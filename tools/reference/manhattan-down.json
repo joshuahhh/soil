@@ -11,31 +11,31 @@
     "tilt": -60,
     "fov": 45
   },
-  "width": 1024,
-  "height": 640,
   "env": {
     "renderer": "ANGLE (Google, Vulkan 1.3.0 (SwiftShader Device (LLVM 10.0.0) (0x0000C0DE)), SwiftShader driver)",
+    "contextVersion": 2,
     "s3tc": true,
     "highp": true,
-    "ua": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/151.0.7922.34 Safari/537.36"
+    "webgl2": true
   },
+  "rendered": true,
   "complete": true,
-  "settleMs": 22229,
-  "wallMs": 23147,
+  "settleMs": 61827,
+  "wallMs": 63880,
   "nodesWanted": 111,
   "nodesLoaded": 111,
   "nodesDrawn": 111,
   "timings": {
-    "bfsMs": 0.41824951171875,
-    "dlMs": 0.017183430989583335,
-    "evictMs": 0.08805338541666667,
-    "drawMs": 0.16660970052083332,
+    "bfsMs": 0.400244140625,
+    "dlMs": 0.015769449869791667,
+    "evictMs": 0.07875162760416667,
+    "drawMs": 0.143157958984375,
     "fps": 60
   },
   "counters": {
-    "octantsWalked": 920,
-    "nodesCulled": 476,
-    "nodesLodTested": 303
+    "octantsWalked": 916,
+    "nodesCulled": 473,
+    "nodesLodTested": 300
   },
   "drawnNodes": [
     "02 00",
@@ -150,5 +150,7 @@
     "2160 00",
     "30 00"
   ],
-  "errors": []
+  "errors": [],
+  "width": 1024,
+  "height": 640
 }

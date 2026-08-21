@@ -77,8 +77,10 @@ struct js_fetcher_t : fetcher_t {
 static js_fetcher_t js_fetcher;
 
 // must be set before createView: msaa is a webgl context attribute, not
-// state that can be toggled on a live context
-static bool g_antialias = false;
+// state that can be toggled on a live context. on by default — the shimmer
+// on distant building silhouettes is geometric aliasing, which no amount of
+// texture filtering reaches (see tools/shimmer.mjs). ?msaa=0 opts out
+static bool g_antialias = true;
 
 struct EarthView {
 	render_ctx_t ctx = {};
@@ -95,9 +97,6 @@ struct EarthView {
 		EmscriptenWebGLContextAttributes attr;
 		emscripten_webgl_init_context_attributes(&attr);
 		attr.depth = 1;
-		// off by default as it always has been. ?msaa=1 turns it on: texture
-		// filtering does nothing for geometric aliasing, and distant building
-		// silhouettes are a lot of sub-pixel edges
 		attr.antialias = g_antialias;
 		// webgl 2 (gles 3.0). note the textures turn out to be power-of-two
 		// (256x512 and friends, measured over 295 tiles), so webgl 1 could

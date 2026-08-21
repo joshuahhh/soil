@@ -285,11 +285,11 @@
 
   const QS = new URLSearchParams(location.search);
   if (QS.has('jpg')) Module.forceJpgTextures();
-  // ?msaa=1: multisample the default framebuffer. mipmaps only fix texture
-  // minification; the crawling on distant building silhouettes is geometric
-  // aliasing, which needs this instead. context attribute, so it can't be a
-  // key toggle like M
-  if (QS.has('msaa')) Module.setAntialias(true);
+  // multisampling is on by default: mipmaps only fix texture minification,
+  // while the crawl on distant building silhouettes is geometric aliasing,
+  // which needs this instead. ?msaa=0 opts out (for a slow gpu, or to A/B it).
+  // context attribute, so it can't be a live key toggle like M
+  if (QS.has('msaa')) Module.setAntialias(QS.get('msaa') !== '0');
   // headless capture mode (?test=1&lat=..&lon=..&alt=..&heading=..&tilt=..&fov=..):
   // the pose comes from the url instead of localstorage, nothing is saved back,
   // the 3d view takes the whole window so the canvas size is just the viewport,

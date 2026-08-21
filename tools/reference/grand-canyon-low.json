@@ -11,25 +11,25 @@
     "tilt": -25,
     "fov": 45
   },
-  "width": 1024,
-  "height": 640,
   "env": {
     "renderer": "ANGLE (Google, Vulkan 1.3.0 (SwiftShader Device (LLVM 10.0.0) (0x0000C0DE)), SwiftShader driver)",
+    "contextVersion": 2,
     "s3tc": true,
     "highp": true,
-    "ua": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/151.0.7922.34 Safari/537.36"
+    "webgl2": true
   },
+  "rendered": true,
   "complete": true,
-  "settleMs": 21521,
-  "wallMs": 22244,
+  "settleMs": 109750,
+  "wallMs": 111799,
   "nodesWanted": 245,
   "nodesLoaded": 245,
   "nodesDrawn": 242,
   "timings": {
-    "bfsMs": 0.7869181315104167,
-    "dlMs": 0.021730550130208335,
-    "evictMs": 0.10136922200520833,
-    "drawMs": 0.3248697916666667,
+    "bfsMs": 0.7700968424479167,
+    "dlMs": 0.041400146484375,
+    "evictMs": 0.09686686197916666,
+    "drawMs": 0.29196370442708336,
     "fps": 60
   },
   "counters": {
@@ -281,5 +281,7 @@
     "2142 00",
     "31 00"
   ],
-  "errors": []
+  "errors": [],
+  "width": 1024,
+  "height": 640
 }

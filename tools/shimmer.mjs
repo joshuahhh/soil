@@ -60,7 +60,7 @@ for (const shot of shots) {
   const ctx = await browser.newContext({ viewport: { width: W, height: H }, deviceScaleFactor: 1 });
   for (const cfg of CONFIGS) {
     const q = shotQuery(shot);
-    if (cfg.msaa) q.set('msaa', '1');
+    q.set('msaa', cfg.msaa ? '1' : '0'); // explicit both ways: msaa now defaults on
     const page = await ctx.newPage();
     await page.goto(`${base}/index.html?${q}`, { waitUntil: 'load' });
     await page.waitForFunction('window.__test && window.__test.stats() !== null', null, { timeout: 60000 });
