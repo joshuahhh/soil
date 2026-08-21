@@ -76,6 +76,10 @@ struct js_fetcher_t : fetcher_t {
 };
 static js_fetcher_t js_fetcher;
 
+// must be set before createView: msaa is a webgl context attribute, not
+// state that can be toggled on a live context
+static bool g_antialias = false;
+
 struct EarthView {
 	render_ctx_t ctx = {};
 	camera_t camera = {
@@ -91,9 +95,14 @@ struct EarthView {
 		EmscriptenWebGLContextAttributes attr;
 		emscripten_webgl_init_context_attributes(&attr);
 		attr.depth = 1;
-		attr.antialias = 0;
-		// webgl 2 (gles 3.0): wanted for mipmapping non-power-of-two textures,
-		// which webgl 1 forbids — see rocktree_gl bufferMesh
+		// off by default as it always has been. ?msaa=1 turns it on: texture
+		// filtering does nothing for geometric aliasing, and distant building
+		// silhouettes are a lot of sub-pixel edges
+		attr.antialias = g_antialias;
+		// webgl 2 (gles 3.0). note the textures turn out to be power-of-two
+		// (256x512 and friends, measured over 295 tiles), so webgl 1 could
+		// have mipmapped them too — this buys the bitwise mask ops, the
+		// gpu-timing extension, and multiview for stereo, not mipmapping
 		attr.majorVersion = 2;
 		gl = emscripten_webgl_create_context(canvas_selector.c_str(), &attr);
 		if (gl <= 0) {
@@ -562,6 +571,8 @@ void deliverFetch(int i, bool ok, val bytes) {
 }
 
 // pretend the gpu lacks s3tc (jpg textures); call before createView
+void setAntialias(bool on) { g_antialias = on; }
+
 void forceJpgTextures() {
 	texture_s3tc_supported = false;
 }
@@ -600,4 +611,5 @@ EMSCRIPTEN_BINDINGS(earth) {
 	emscripten::function("createView", &createView, emscripten::allow_raw_pointers());
 	emscripten::function("deliverFetch", &deliverFetch);
 	emscripten::function("forceJpgTextures", &forceJpgTextures);
+	emscripten::function("setAntialias", &setAntialias);
 }

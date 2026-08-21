@@ -285,6 +285,11 @@
 
   const QS = new URLSearchParams(location.search);
   if (QS.has('jpg')) Module.forceJpgTextures();
+  // ?msaa=1: multisample the default framebuffer. mipmaps only fix texture
+  // minification; the crawling on distant building silhouettes is geometric
+  // aliasing, which needs this instead. context attribute, so it can't be a
+  // key toggle like M
+  if (QS.has('msaa')) Module.setAntialias(true);
   // headless capture mode (?test=1&lat=..&lon=..&alt=..&heading=..&tilt=..&fov=..):
   // the pose comes from the url instead of localstorage, nothing is saved back,
   // the 3d view takes the whole window so the canvas size is just the viewport,
@@ -1720,8 +1725,23 @@
     stats: () => view.ready() ? view.getStats() : null,
     drawnNodes: () => view.ready() ? view.getDrawnNodes() : [],
     frameCount: () => frameCount,
+    // shimmer measurement (tools/shimmer.mjs) drives these: toggle the texture
+    // filtering, then move the camera a fixed sub-degree amount and see how
+    // much the image churns
+    setMipmaps: (on) => { mipmaps = on; view.setMipmaps(on); updateHint(); },
+    nudgeHeading: (deg) => {
+      const p = view.getPose();
+      view.setPose(p.lat, p.lon, p.alt, p.heading + deg, p.tilt);
+    },
     // resolves with a png data url, captured at the end of the next frame
     shot: () => new Promise((resolve) => { pendingShot = resolve; }),
+    // for tools/shimmer.mjs: flip texture filtering, and move the camera by a
+    // fixed amount so the churn a small motion causes can be scored
+    setMipmaps: (on) => { mipmaps = on; view.setMipmaps(on); updateHint(); },
+    nudgeHeading: (deg) => {
+      const p = view.getPose();
+      view.setPose(p.lat, p.lon, p.alt, p.heading + deg, p.tilt);
+    },
     // settle until the scene reports itself fully loaded for `stable`
     // consecutive frames, or `timeoutMs` elapses. sceneComplete alone is not
     // enough to wait on: a download that keeps failing resets its node to a

@@ -129,6 +129,39 @@ There are no fixtures: tiles come from Google's live servers, so imagery does
 drift under you. That's a deliberate trade — recognising "the imagery updated"
 by eye is easy, and a frozen tile corpus is real ongoing weight.
 
+#### Shimmer
+
+`node tools/shimmer.mjs [shot]` measures temporal aliasing — the crawling you
+see on distant detail while the camera moves, which a still frame cannot show
+and which eyeballing cannot compare fairly across configurations.
+
+It settles a view, captures, nudges the heading by a fixed 0.05 degrees (about
+one pixel), captures again, and scores the mean absolute pixel change over the
+non-sky pixels — whole frame, and the upper half separately, since minification
+aliasing is a distance problem the near field dilutes. The absolute number is
+meaningless; the ordering across configs is the point, because the scene and
+the nudge are identical.
+
+Result on `seattle-skyline` (lower is steadier):
+
+| config | whole frame | distant half |
+| --- | --- | --- |
+| baseline | 7.83 | 13.41 |
+| mipmaps + 16x aniso | 7.83 | 13.40 |
+| msaa only | 6.84 | 11.52 |
+| mipmaps + msaa | 6.83 | 11.51 |
+
+Mipmaps do nothing here and MSAA does the work, which says the shimmer on
+distant neighbourhoods is **geometric** — sub-pixel building silhouettes — not
+texture minification. Texture filtering cannot touch that. `?msaa=1` turns on
+multisampling (a context attribute, so it needs a page load, unlike the M key
+for mipmaps). One caveat on the metric: MSAA blurs, and blurrier images differ
+less under any change, so some of that 13% is the measurement rather than the
+phenomenon — the visual comparison in `tools/out/shimmer/` is the check.
+
+Unlike `capture.mjs`, this shares one browser context across configs so the
+IndexedDB tile cache is reused; only the first config pays the download.
+
 #### Profiling
 
 The engine's per-frame accounting is exported to JS as `view.getStats()`:
