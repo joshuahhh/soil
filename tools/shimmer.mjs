@@ -34,12 +34,21 @@ const CONFIGS = [
   { name: 'mipmaps + msaa',              mips: true,  msaa: true  },
 ];
 
-const { base, close } = await serveWeb();
-const browser = await chromium.launch();
-let bad = 0;
 const DIR = path.join(OUT, 'shimmer');
 await fs.mkdir(DIR, { recursive: true });
-const results = [];
+// --report-only rebuilds the page from the last run's saved frames without
+// re-measuring, which otherwise costs a full settle per config
+const reportOnly = argv.includes('--report-only');
+let bad = 0;
+let results = [];
+
+if (reportOnly) {
+  results = JSON.parse(await fs.readFile(path.join(DIR, 'results.json'), 'utf8'));
+  bad = results.filter((r) => !r.ok).length;
+  console.log(`rebuilding from ${results.length} saved config(s)`);
+} else {
+const { base, close } = await serveWeb();
+const browser = await chromium.launch();
 
 for (const shot of shots) {
   console.log(`\n${shot.name} — nudging heading by ${NUDGE}deg\n` + '-'.repeat(64));
@@ -92,24 +101,30 @@ for (const shot of shots) {
     for (const [suffix, uri] of [['before', a], ['after', b]])
       await fs.writeFile(path.join(DIR, `${shot.name}-${tag}-${suffix}.png`),
         Buffer.from(uri.split(',')[1], 'base64'));
-    const ok = s1.complete && s2.complete
-      && s1.stats?.nodesLoaded === s1.stats?.nodesWanted
-      && s2.stats?.nodesLoaded === s2.stats?.nodesWanted;
-    // a config scored on a partly-loaded scene is measuring which tiles
-    // happened to arrive, not how the renderer filters. don't let that pass
-    // as a result
+    // the substantive condition is that every wanted tile was present for both
+    // captures. sceneComplete holding for five consecutive frames is stricter
+    // than that and gives false alarms: the nudge can shift the wanted set by
+    // a tile, so the flag flickers while the scene is in fact fully loaded.
+    // track it, but don't let it invalidate a score on its own
+    const loaded = (st) => st?.nodesWanted > 0 && st.nodesLoaded === st.nodesWanted;
+    const ok = loaded(s1.stats) && loaded(s2.stats);
+    const steady = s1.complete && s2.complete;
     console.log(cfg.name.padEnd(30) + score.all.toFixed(2).padStart(13)
       + score.far.toFixed(2).padStart(15)
-      + (ok ? `      ${s2.stats.nodesLoaded}/${s2.stats.nodesWanted} tiles`
-            : `   *** NOT SETTLED (${s1.stats?.nodesLoaded}/${s1.stats?.nodesWanted} then ${s2.stats?.nodesLoaded}/${s2.stats?.nodesWanted}) — score is meaningless ***`));
+      + (ok ? `      ${s1.stats.nodesLoaded}/${s1.stats.nodesWanted} then ${s2.stats.nodesLoaded}/${s2.stats.nodesWanted} tiles${steady ? '' : ' (flag flickered)'}`
+            : `   *** PARTLY LOADED (${s1.stats?.nodesLoaded}/${s1.stats?.nodesWanted} then ${s2.stats?.nodesLoaded}/${s2.stats?.nodesWanted}) — score is meaningless ***`));
     if (!ok) bad++;
-    results.push({ shot: shot.name, cfg, tag, a, b, score, ok });
+    results.push({ shot: shot.name, cfg, tag, score, ok, steady,
+      tiles: [`${s1.stats?.nodesLoaded}/${s1.stats?.nodesWanted}`,
+              `${s2.stats?.nodesLoaded}/${s2.stats?.nodesWanted}`] });
     await page.close();
   }
   await ctx.close();
 }
 await browser.close();
 close();
+await fs.writeFile(path.join(DIR, 'results.json'), JSON.stringify(results, null, 2));
+}
 
 // --- report ---------------------------------------------------------------
 // two questions, so two kinds of card. within a config, blinking the nudge
@@ -121,7 +136,12 @@ const best = scored.length ? Math.min(...scored.map((r) => r.score.far)) : null;
 const rows = results.map((r) =>
   `<tr class="${r.ok && r.score.far === best ? 'best' : ''}"><td>${r.cfg.name}</td>` +
   `<td>${r.score.all.toFixed(2)}</td><td>${r.score.far.toFixed(2)}</td>` +
-  `<td>${r.ok ? 'settled' : 'NOT SETTLED'}</td></tr>`).join('');
+  `<td>${r.ok ? (r.tiles || []).join(' then ') : 'PARTLY LOADED'}${
+     r.ok && r.steady === false ? ' (flag flickered)' : ''}</td></tr>`).join('');
+
+const uriFor = async (r, suffix) => 'data:image/png;base64,' +
+  (await fs.readFile(path.join(DIR, `${r.shot}-${r.tag}-${suffix}.png`))).toString('base64');
+for (const r of results) { r.a = await uriFor(r, 'before'); r.b = await uriFor(r, 'after'); }
 
 const cards = results.map((r) => ({
   name: `${r.cfg.name} — the crawl`,
@@ -130,7 +150,7 @@ const cards = results.map((r) => ({
   badges: [
     { cls: !r.ok ? 'bad' : r.score.far === best ? 'ok' : r.score.far > best * 1.1 ? 'warn' : '',
       text: `distant-half churn ${r.score.far.toFixed(2)}` },
-    ...(r.ok ? [] : [{ cls: 'bad', text: 'scene never settled — score is meaningless' }]),
+    ...(r.ok ? [] : [{ cls: 'bad', text: 'scene only partly loaded — score is meaningless' }]),
   ],
   a: { label: 'before nudge', uri: r.a },
   b: { label: 'after nudge', uri: r.b },

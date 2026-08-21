@@ -165,8 +165,24 @@ for mipmaps). One caveat on the metric: MSAA blurs, and blurrier images differ
 less under any change, so some of that 13% is the measurement rather than the
 phenomenon — the visual comparison in `tools/out/shimmer/` is the check.
 
+It writes `tools/out/shimmer.html`, which defaults to **blink** — and blinking
+the nudge pair *is* the shimmer, since the two frames are the same scene one
+pixel apart, so whatever jumps is the aliasing you'd see as crawl in motion.
+Below those it puts the head-to-heads at a fixed pose (msaa off vs on, mipmaps
+off vs on) for judging static quality instead.
+
 Unlike `capture.mjs`, this shares one browser context across configs so the
-IndexedDB tile cache is reused; only the first config pays the download.
+IndexedDB tile cache is reused; only the first config pays the download. Even
+so a run is minutes, so `--report-only` rebuilds the page from the last run's
+saved frames without re-measuring.
+
+Each config reports the tile counts for both captures. A score taken on a
+partly-loaded scene measures which tiles happened to arrive rather than how
+the renderer filters, so that's checked rather than assumed — but only tile
+completeness invalidates a score. `sceneComplete` holding across consecutive
+frames is stricter than that and gives false alarms, because a nudge can shift
+the wanted set by a tile and make the flag flicker on a scene that is in fact
+fully loaded.
 
 #### Profiling
 
