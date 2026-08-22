@@ -93,7 +93,7 @@ void http_cache_fetcher_t::fetch(const char* path, int i, fetch_thunk_t thunk) {
 	{
 		unsigned char* data; size_t len;
 		if (use_cache && readFile(cache_path, &data, &len)) {
-			printf("timing: cache %s at=%u\n", path, SDL_GetTicks());
+			if (g_log_timing) printf("timing: cache %s at=%u\n", path, SDL_GetTicks());
 			thunk(i, 0, data, len);
 			free(data);
 			free(cache_path);
@@ -105,7 +105,7 @@ void http_cache_fetcher_t::fetch(const char* path, int i, fetch_thunk_t thunk) {
 	char* url = (char*)malloc(strlen(base_url) + strlen(path) + 1);
 	strcpy(url, base_url); strcat(url, path);
 
-	printf("timing: web %s at=%u\n", path, SDL_GetTicks());
+	if (g_log_timing) printf("timing: web %s at=%u\n", path, SDL_GetTicks());
 	http_t* request = http_get(url, NULL);
 	free(url);
 	if (!request) {

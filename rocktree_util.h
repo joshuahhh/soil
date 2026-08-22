@@ -23,7 +23,15 @@ using namespace geo_globetrotter_proto_rocktree;
 #include <thread>
 #include <algorithm>
 #include <chrono>
+#include <atomic>
 
+
+// per-tile decode timing, off by default: it is one line per node and a
+// settling view decodes hundreds, which buries everything else in the
+// console. the shell turns it on (?timing on the web page) when the decode
+// pool is what's actually being looked at. written once at startup and read
+// from the decode threads, hence atomic
+static std::atomic<bool> g_log_timing{false};
 
 // ms timestamp for the timing: log lines (sdl-free so the web library can
 // compile this header without sdl)
@@ -168,8 +176,9 @@ void getBulk(BulkMetadataRequest req, rocktree_t::bulk_t *b, std::function<void(
 
 				auto bu = std::make_unique<BulkMetadata>(bulk);
 				populateBulk(b, std::move(bu));
-				printf("timing: decode bulk %s start=%u dur=%u\n",
-					b->request.node_key().path().c_str(), t0, timing_ms() - t0);
+				if (g_log_timing)
+					printf("timing: decode bulk %s start=%u dur=%u\n",
+						b->request.node_key().path().c_str(), t0, timing_ms() - t0);
 				cb(NULL);
 
 			}, b, cb, vec);
@@ -236,8 +245,9 @@ void getNode(NodeDataRequest req, rocktree_t::node_t *n, std::function<void(std:
 
 				auto nu = std::make_unique<NodeData>(node);
 				populateNode(n, std::move(nu));
-				printf("timing: decode node %s start=%u dur=%u\n",
-					n->request.node_key().path().c_str(), t0, timing_ms() - t0);
+				if (g_log_timing)
+					printf("timing: decode node %s start=%u dur=%u\n",
+						n->request.node_key().path().c_str(), t0, timing_ms() - t0);
 				cb(NULL);
     		}, n, cb, vec);		
 		}

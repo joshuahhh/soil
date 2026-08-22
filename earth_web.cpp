@@ -598,6 +598,9 @@ void deliverFetch(int i, bool ok, val bytes) {
 
 // pretend the gpu lacks s3tc (jpg textures); call before createView
 void setAntialias(bool on) { g_antialias = on; }
+// per-tile decode timing to the console (?timing). off by default: it is a
+// line per node, and a settling view decodes hundreds of them
+void setLogTiming(bool on) { g_log_timing = on; }
 
 void forceJpgTextures() {
 	texture_s3tc_supported = false;
@@ -642,4 +645,5 @@ EMSCRIPTEN_BINDINGS(earth) {
 	emscripten::function("deliverFetch", &deliverFetch);
 	emscripten::function("forceJpgTextures", &forceJpgTextures);
 	emscripten::function("setAntialias", &setAntialias);
+	emscripten::function("setLogTiming", &setLogTiming);
 }

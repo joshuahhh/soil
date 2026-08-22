@@ -319,6 +319,8 @@
   // which needs this instead. ?msaa=0 opts out (for a slow gpu, or to A/B it).
   // context attribute, so it can't be a live key toggle like M
   if (QS.has('msaa')) Module.setAntialias(QS.get('msaa') !== '0');
+  // per-tile decode timing on the console; a line per node, so off unless asked
+  if (QS.has('timing')) Module.setLogTiming(QS.get('timing') !== '0');
   // headless capture mode (?test=1&lat=..&lon=..&alt=..&heading=..&tilt=..&fov=..):
   // the pose comes from the url instead of localstorage, nothing is saved back,
   // the 3d view takes the whole window so the canvas size is just the viewport,

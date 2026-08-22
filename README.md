@@ -31,6 +31,13 @@ never run a stale wasm after a rebuild)
 `coi-serviceworker.js` injects the cross-origin-isolation headers the pthread
 build needs (expect one automatic reload on first visit).
 
+#### Tile cache and console
+
+Per-tile decode timing (`timing: decode node ... dur=...`) is off by default —
+it's a line per node and a settling view decodes hundreds. `?timing` turns it
+back on. The 2-second `sections avg ms:` line is unconditional; that one is
+the profiling readout, not chatter.
+
 #### Dropped tracks
 
 Drop a `.gpx` on the window and the track is drawn twice: as a line on the
