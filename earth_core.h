@@ -428,6 +428,136 @@ struct earth_core_t {
 		return hit.norm();
 	}
 
+	// --- path overlay ---------------------------------------------------
+	// a track dropped on the page (gpx), drawn over the terrain as a ribbon.
+	// points are kept as an up vector plus a radius so a point can be moved
+	// up and down its own vertical without re-deriving the geodetic frame.
+	//
+	// draping. the file's elevations are the obvious source, and they are
+	// what we start from, but gps altitude is worth tens of meters on a good
+	// day and the geoid separation it is measured against is worth a hundred
+	// more, so a track laid at its own elevations wanders through hillsides.
+	// so each point is re-measured against the mesh (groundRadiusUnder) and
+	// pinned to the ground there. that measurement only answers where fine
+	// mesh is currently resident and drawn, which is a moving target, so it
+	// runs a few points a frame and keeps what it learns: a track fills in
+	// onto the terrain over the first seconds and stays put after.
+	std::vector<Vector3d> path_up;   // unit up per point
+	std::vector<double> path_r;      // ecef radius at the file's elevation
+	std::vector<double> path_ground; // measured ground radius, -1 = unmeasured
+	std::vector<uint8_t> path_brk;   // 1: this point starts a new polyline
+	Vector3d path_origin = Vector3d::Zero(); // vertices are relative to this
+	bool path_drape = true;
+	float path_rgba[4] = { 1.0f, 0.45f, 0.05f, 0.9f };
+	float path_width = 3.0f;
+	std::vector<float> path_verts;   // the built ribbon, 8 floats a vertex
+	bool path_dirty = false;         // geometry needs rebuilding + reuploading
+	size_t path_probe_at = 0;        // round-robin cursor for the drape probes
+	size_t path_unmeasured = 0;      // points still waiting for a ground probe
+	int path_rebuild_wait = 0;
+
+	// how far above the measured ground the ribbon floats. the depth bias
+	// below does most of the work of keeping it out of the terrain's
+	// z-fighting range; this is what makes it read as lying *on* the ground
+	// rather than sunk into a slope
+	static constexpr double path_lift = 1.5;
+	// drape probes per frame. each is a raycast against the drawn set, so
+	// the cost is bounded by this rather than by the length of the track
+	static constexpr size_t path_probes_per_frame = 24;
+	// ndc depth nudge toward the camera (see the path vertex shader)
+	static constexpr float path_depth_bias = 0.0008f;
+
+	// lat/lon/elevation triples, degrees and meters; a nan lat starts a new
+	// polyline (a gpx track break). elevation is measured from the planetoid
+	// sphere, which is the datum the mesh itself sits on
+	void setPath(const std::vector<double> &lla) {
+		path_up.clear(); path_r.clear(); path_ground.clear(); path_brk.clear();
+		path_probe_at = 0;
+		auto R = planetoid && planetoid->downloaded ? planetoid->radius : 6371010.0;
+		bool brk = true;
+		for (size_t i = 0; i + 2 < lla.size(); i += 3) {
+			auto lat = lla[i], lon = lla[i + 1], ele = lla[i + 2];
+			if (isnan(lat) || isnan(lon)) { brk = true; continue; }
+			path_up.push_back(geoUp(lat * M_PI / 180.0, lon * M_PI / 180.0));
+			path_r.push_back(R + (isnan(ele) ? 0.0 : ele));
+			path_ground.push_back(-1);
+			path_brk.push_back(brk ? 1 : 0);
+			brk = false;
+		}
+		// vertices go to the gpu in float, and ecef coordinates are 6.4e6
+		// meters — half a meter of precision, which a line rendered against
+		// the terrain shows as a wobble. the same trick the meshes use:
+		// subtract a nearby origin and fold it into the transform in double
+		path_origin = path_up.empty() ? Vector3d(Vector3d::Zero()) : Vector3d(path_up[0] * path_r[0]);
+		path_unmeasured = path_up.size();
+		path_verts.clear();
+		// force the rebuild on the very next frame rather than the batched
+		// one: until it happens the ribbon on the gpu is the previous track
+		path_dirty = true;
+		path_rebuild_wait = 1000;
+	}
+
+	void setPathStyle(float r, float g, float b, float alpha, float width, bool drape) {
+		path_rgba[0] = r; path_rgba[1] = g; path_rgba[2] = b; path_rgba[3] = alpha;
+		path_width = width;
+		if (drape != path_drape) { path_drape = drape; path_dirty = true; }
+	}
+
+	double pathPointRadius(size_t i) const {
+		return path_drape && path_ground[i] > 0 ? path_ground[i] + path_lift : path_r[i];
+	}
+
+	// measure a few more points against the mesh. round-robin over the ones
+	// still unmeasured: a probe only succeeds where fine mesh is drawn, so
+	// the ones that fail are simply the ones not being looked at yet
+	void pathProbeGround() {
+		if (!path_drape || !path_unmeasured) return;
+		auto n = path_up.size();
+		size_t looked = 0, tried = 0;
+		while (looked < n && tried < path_probes_per_frame) {
+			auto i = path_probe_at % n;
+			path_probe_at++;
+			looked++;
+			if (path_ground[i] > 0) continue;
+			tried++;
+			auto r = groundRadiusUnder(path_up[i] * path_r[i]);
+			if (r > 0) {
+				path_ground[i] = r;
+				path_unmeasured--;
+				path_dirty = true;
+			}
+		}
+	}
+
+	// build the ribbon: a quad per segment, plus a square patch at each
+	// interior point to fill the wedge a bend leaves open between two quads
+	// (the shader tells them apart by the quad being degenerate). the
+	// sideways offset happens in the vertex shader, in screen pixels, so
+	// what is stored here is just the segment's two ends
+	void pathRebuild() {
+		path_verts.clear();
+		auto n = path_up.size();
+		if (n < 2) return;
+		path_verts.reserve(n * 2 * 48);
+		auto pt = [&](size_t i) {
+			Vector3d p = path_up[i] * pathPointRadius(i) - path_origin;
+			return Vector3f((float)p.x(), (float)p.y(), (float)p.z());
+		};
+		// (end, side) corner bits; two triangles making the quad
+		static const float corners[6][2] = {
+			{ 0, -1 }, { 0, 1 }, { 1, 1 }, { 0, -1 }, { 1, 1 }, { 1, -1 } };
+		auto quad = [&](const Vector3f &a, const Vector3f &b) {
+			for (auto &c : corners) {
+				const float v[8] = { a.x(), a.y(), a.z(), b.x(), b.y(), b.z(), c[0], c[1] };
+				path_verts.insert(path_verts.end(), v, v + 8);
+			}
+		};
+		for (size_t i = 0; i + 1 < n; i++)
+			if (!path_brk[i + 1]) quad(pt(i), pt(i + 1));
+		for (size_t i = 1; i + 1 < n; i++)
+			if (!path_brk[i] && !path_brk[i + 1]) { auto p = pt(i); quad(p, p); }
+	}
+
 	// EARTH_AUDIT=1: once the scene completes, compare each drawn node's
 	// mesh placement (its transform applied to the center of the 0..255
 	// mesh coordinate cube) against the metadata obb it was selected by —
@@ -1147,6 +1277,28 @@ struct earth_core_t {
 				if (!mesh.buffered) bufferMesh(mesh);
 				bindAndDrawMesh(mesh, self_mask, stale_mask, ctx);
 			}
+		}
+
+		// the dropped track, over the terrain it was walked on. after the
+		// meshes, so the depth test it loses against is a complete one; not
+		// in tube mode, where the ground has been rolled out from under it
+		// and a track drawn in globe space would hang in the air where the
+		// terrain used to be
+		if (!path_up.empty() && !tube_on && path_rgba[3] > 0) {
+			pathProbeGround(); // against this frame's drawn set
+			// draping keeps arriving for seconds after a drop, and rebuilding
+			// a long track's ribbon every frame to show one more measured
+			// point is not worth it — batch a few frames' worth
+			if (path_dirty && ++path_rebuild_wait >= 8) {
+				path_dirty = false;
+				path_rebuild_wait = 0;
+				pathRebuild();
+				renderPathUpload(ctx, path_verts.data(), (int)(path_verts.size() / 8));
+			}
+			Matrix4d to_clip = viewprojection;
+			to_clip.col(3) = viewprojection * Vector4d(path_origin.x(), path_origin.y(), path_origin.z(), 1.0);
+			Matrix4f to_clip_f = to_clip.cast<float>();
+			renderPathDraw(ctx, to_clip_f.data(), path_rgba, path_width, path_depth_bias, width, height);
 		}
 
 		static const bool audit_env = getenv("EARTH_AUDIT") != nullptr;

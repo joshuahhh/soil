@@ -81,22 +81,33 @@
      rather than floating in the same corner, so the two lay themselves out
      instead of being kept apart by a hardcoded offset. min-height: 0 lets it
      give way in a short window — #aplist takes up the slack by scrolling */
-  #alignpanel { display: none; flex-direction: column; gap: 6px; min-height: 0;
-                width: 236px; max-width: 100%; color: #fff;
-                background: rgba(0,0,0,.72); font: 12px sans-serif;
-                padding: 8px; border-radius: 5px; }
+  /* the two hud panels (point pairs, path) share their chrome */
+  .panel { display: none; flex-direction: column; gap: 6px; min-height: 0;
+           width: 236px; max-width: 100%; color: #fff;
+           background: rgba(0,0,0,.72); font: 12px sans-serif;
+           padding: 8px; border-radius: 5px; }
   body.align #alignpanel { display: flex; }
-  #alignpanel .head { display: flex; align-items: center; justify-content: space-between;
-                      font-weight: bold; }
-  #alignpanel .row { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
-  #alignpanel button { border: 0; border-radius: 3px; padding: 4px 8px; cursor: pointer;
-                       font: 12px sans-serif; background: rgba(255,255,255,.15); color: #fff; }
-  #alignpanel button:hover { background: rgba(255,255,255,.28); }
-  #alignpanel button:disabled { opacity: .4; cursor: default; }
-  #alignpanel button.primary { background: #ff7f0e; color: #000; font-weight: bold; }
-  #alignpanel .x { background: none; padding: 0 4px; font-size: 14px; }
-  #alignpanel label { display: flex; align-items: center; gap: 2px; }
-  #alignpanel input[type=range] { flex: 1; min-width: 0; }
+  body.path #pathpanel { display: flex; }
+  .panel .head { display: flex; align-items: center; justify-content: space-between;
+                 gap: 6px; font-weight: bold; }
+  .panel .row { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+  .panel button { border: 0; border-radius: 3px; padding: 4px 8px; cursor: pointer;
+                  font: 12px sans-serif; background: rgba(255,255,255,.15); color: #fff; }
+  .panel button:hover { background: rgba(255,255,255,.28); }
+  .panel button:disabled { opacity: .4; cursor: default; }
+  .panel button.primary { background: #ff7f0e; color: #000; font-weight: bold; }
+  .panel .x { background: none; padding: 0 4px; font-size: 14px; }
+  .panel label { display: flex; align-items: center; gap: 2px; }
+  .panel input[type=range] { flex: 1; min-width: 0; }
+  /* the swatch: a plain color input is a chunky bevelled box in every
+     browser, so strip it back to the swatch itself */
+  #pathcolor { width: 26px; height: 20px; padding: 0; border: 0; border-radius: 3px;
+               background: none; cursor: pointer; flex: 0 0 auto; }
+  #pathcolor::-webkit-color-swatch-wrapper { padding: 0; }
+  #pathcolor::-webkit-color-swatch { border: 1px solid rgba(255,255,255,.4); border-radius: 3px; }
+  #pathname { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #pathstats { font: 11px monospace; opacity: .85; }
+  #alignpanel .tip, #pathpanel .tip { font: 10px sans-serif; opacity: .55; line-height: 1.35; }
   #aplist { overflow-y: auto; min-height: 0; display: flex; flex-direction: column; gap: 2px; }
   #aplist .pair { display: flex; align-items: center; gap: 6px; padding: 2px 4px;
                   border-radius: 3px; cursor: pointer; font: 11px monospace; }
@@ -106,7 +117,6 @@
   #aplist .pair .err { margin-left: auto; opacity: .8; }
   #aplist .pair.off .err { color: #ff6b6b; }
   #apstatus { font: 11px sans-serif; opacity: .85; line-height: 1.35; }
-  #alignpanel .tip { font: 10px sans-serif; opacity: .55; line-height: 1.35; }
   /* the step-by-step prompt while a pair is being captured */
   #apbanner { position: absolute; left: 50%; top: 12px; transform: translateX(-50%);
               z-index: 14; display: none; color: #000; background: #ff7f0e;
@@ -160,7 +170,7 @@
   <div id="hud">
     <div id="hint"></div>
     <div id="speed"></div>
-    <div id="alignpanel">
+    <div id="alignpanel" class="panel">
       <div class="head"><span>point pairs</span><button class="x" id="apclose" title="close panel">✕</button></div>
       <div class="row">
         <button id="apadd">+ add pair</button>
@@ -184,6 +194,22 @@
       <div class="tip">drag either end of a pair to adjust it ·
         shift-drag / shift-wheel on the view moves the photo</div>
     </div>
+    <div id="pathpanel" class="panel">
+      <div class="head"><span id="pathname">path</span><button class="x" id="pathclose" title="remove path">✕</button></div>
+      <div id="pathstats"></div>
+      <div class="row">
+        <input type="color" id="pathcolor" title="path color">
+        <label style="flex:1">opacity<input id="pathopacity" type="range" min="5" max="100"></label>
+      </div>
+      <div class="row">width<input id="pathwidth" type="range" min="1" max="14" step="0.5"></div>
+      <div class="row"><label><input type="checkbox" id="pathdrape">drape on terrain</label></div>
+      <div class="row">
+        <button id="pathfit">fit map</button>
+        <button id="pathgo">fly to start</button>
+        <button id="pathfollow" title="ride the path (V)">follow</button>
+      </div>
+      <div class="tip">drop a .gpx file on the window to load a track</div>
+    </div>
   </div>
 </div>
 <div id="axisbtn"></div>
@@ -196,6 +222,9 @@
     ortho: 'WASD/drag pan · arrows orbit around center · wheel/Z/X/R/F zoom · ' +
       'shift slow · O perspective · C pick debug · L lod debug · M mipmaps · 0 reset view · ' +
       'click map to teleport · ⇧drag map: tube rect',
+    follow: 'following the path — W/S run along it · arrows swing the view around it ' +
+      '(left/right relative to the path, so a bend carries you with it) · R/F standoff · ' +
+      'Z/X zoom · shift slow · V or esc to leave',
     tube: 'airplane controls — W/S thrust · A/D strafe · R/F up/down · arrows/drag pitch+yaw · Q/E roll · ' +
       'Z/X zoom · shift slow · G hug the wall · 0 reset view · T unroll · esc clear tube · ⇧drag map: new rect',
   };
@@ -512,22 +541,33 @@
   // a depth counter keeps the highlight steady as the drag crosses children
   // (dragenter on a child fires before dragleave on its parent)
   let dragDepth = 0;
-  const isImageDrag = (e) => [...(e.dataTransfer ? e.dataTransfer.items : [])]
-    .some((it) => it.kind === 'file' && (!it.type || it.type.startsWith('image/')));
+  // a drag only exposes item types, not names, and a .gpx usually arrives
+  // with no type at all — so anything typeless is let through and sorted out
+  // on the drop, where the filename is finally visible
+  const isFileDrag = (e) => [...(e.dataTransfer ? e.dataTransfer.items : [])]
+    .some((it) => it.kind === 'file'
+      && (!it.type || it.type.startsWith('image/') || it.type.includes('xml')));
   addEventListener('dragenter', (e) => {
-    if (!isImageDrag(e)) return;
+    if (!isFileDrag(e)) return;
     e.preventDefault();
     if (++dragDepth === 1) document.body.classList.add('dropping');
   });
-  addEventListener('dragover', (e) => { if (isImageDrag(e)) e.preventDefault(); });
+  addEventListener('dragover', (e) => { if (isFileDrag(e)) e.preventDefault(); });
   addEventListener('dragleave', () => {
     if (dragDepth && --dragDepth === 0) document.body.classList.remove('dropping');
   });
   addEventListener('drop', (e) => {
     dragDepth = 0;
     document.body.classList.remove('dropping');
-    const file = [...(e.dataTransfer ? e.dataTransfer.files : [])]
-      .find((f) => f.type.startsWith('image/'));
+    const dropped = [...(e.dataTransfer ? e.dataTransfer.files : [])];
+    // a track goes to the path overlay, everything else is a reference photo
+    const gpx = dropped.find((f) => /\.gpx$/i.test(f.name));
+    if (gpx) {
+      e.preventDefault();
+      loadGpxFile(gpx);
+      return;
+    }
+    const file = dropped.find((f) => f.type.startsWith('image/'));
     if (!file) return;
     e.preventDefault();
     // pairs are anchored to points of a particular photo, so a different
@@ -547,16 +587,19 @@
   // frame: W/S dolly along the view, Q/E boom along view-up. arrows pan/tilt
   // so no mouse is needed. Z/X zoom (fov). -/= sticky speed gain. shift slow
   const keys = {};
-  const handled = new Set(['KeyW','KeyA','KeyS','KeyD','KeyQ','KeyE','KeyR','KeyF','KeyZ','KeyX','KeyG','KeyO','KeyC','KeyL','KeyM','KeyT','KeyP',
+  const handled = new Set(['KeyW','KeyA','KeyS','KeyD','KeyQ','KeyE','KeyR','KeyF','KeyZ','KeyX','KeyG','KeyO','KeyC','KeyL','KeyM','KeyT','KeyP','KeyV',
     'Space','ArrowLeft','ArrowRight','ArrowUp','ArrowDown','Minus','Equal','Digit0','Numpad0','Home']);
   let gain = 1; // re-initialized from the saved view once it loads
   let ortho = false;
   let hug = false; // terrain hug: hold height above the mesh, not the sphere
+  // riding the dropped track (V). declared up here with the other mode flags
+  // because updateHint reads it long before the path section is evaluated
+  let followOn = false;
   let debugLod = false;
   let mipmaps = true;
   const updateHint = () => {
     document.getElementById('hint').textContent =
-      HINTS[tubeOn ? 'tube' : ortho ? 'ortho' : 'persp']
+      HINTS[followOn ? 'follow' : tubeOn ? 'tube' : ortho ? 'ortho' : 'persp']
         + (mipmaps ? '' : ' · MIPMAPS OFF')
       // T only does anything once a rect exists
       + (!tubeOn && tubeRect ? ' · T roll tube · esc clear' : '');
@@ -573,6 +616,7 @@
   // reset and following again. the tube is left alone: esc clears it
   const resetView = () => {
     if (!view.ready()) return;
+    if (followOn) setFollow(false); // else the rails put the camera straight back
     view.setPose(DEFAULT_VIEW.lat, DEFAULT_VIEW.lon, DEFAULT_VIEW.alt,
       DEFAULT_VIEW.heading, DEFAULT_VIEW.tilt);
     view.setFov(DEFAULT_VIEW.fov);
@@ -597,13 +641,15 @@
     if (e.code === 'KeyO' && !e.repeat && !tubeOn) { ortho = !ortho; view.setOrtho(ortho); updateHint(); }
     // terrain hug: cruise at a fixed height above the mesh — over the
     // sphere normally, radially above the wall inside the tube
-    if (e.code === 'KeyG' && !e.repeat) {
+    if (e.code === 'KeyG' && !e.repeat && !followOn) {
       hug = !hug;
       view.setTerrainFollow(hug);
       if (hug) stopSolve(); // the two fight over altitude — see startSolve
       updateHint();
     }
     if (e.code === 'KeyC' && !e.repeat) setPickDebug(!pickDebug);
+    // ride the dropped track; does nothing without one
+    if (e.code === 'KeyV' && !e.repeat) toggleFollow();
     // the point-pair panel; only does anything with a photo up, in perspective
     if (e.code === 'KeyP' && !e.repeat) togglePanel();
     if ((e.code === 'Digit0' || e.code === 'Numpad0' || e.code === 'Home') && !e.repeat) resetView();
@@ -622,6 +668,7 @@
     // map). rolling up also flies into the tube mouth — watching the roll
     // from outside mostly shows the back of the sheet
     // clear the tube entirely: unroll, drop the rect, back to normal flight
+    if (e.code === 'Escape' && followOn) setFollow(false);
     if (e.code === 'Escape' && tubeRect) {
       tubeRect = null;
       tubeOn = false;
@@ -856,6 +903,21 @@
       filter: ['==', ['get', 'kind'], 'arrow'],
       paint: { 'fill-color': '#ff7f0e', 'fill-opacity': 0.9 } });
     setRectData(tubeRect);
+    map.addSource('gpx', { type: 'geojson', data: pathFC() });
+    map.addLayer({ id: 'gpx-line', type: 'line', source: 'gpx',
+      filter: ['==', ['geometry-type'], 'LineString'],
+      layout: { 'line-cap': 'round', 'line-join': 'round' },
+      paint: { 'line-color': pathStyle.color, 'line-width': pathStyle.width,
+        'line-opacity': pathStyle.opacity } });
+    // start and end, so a track you are looking at end-on still says which
+    // way it runs
+    map.addLayer({ id: 'gpx-ends', type: 'circle', source: 'gpx',
+      filter: ['==', ['geometry-type'], 'Point'],
+      paint: { 'circle-radius': 5,
+        'circle-color': ['case', ['==', ['get', 'end'], 'start'], '#fff', pathStyle.color],
+        'circle-stroke-width': 2, 'circle-stroke-color': pathStyle.color,
+        'circle-opacity': pathStyle.opacity, 'circle-stroke-opacity': pathStyle.opacity } });
+    setPathData();
   });
   const axisBtn = document.getElementById('axisbtn');
   const updateAxisBtn = () => {
@@ -919,6 +981,461 @@
     setRectData(r);
     if (view.ready()) applyTube(r, true);
   });
+
+  // --- dropped track (gpx) --------------------------------------------------
+  // drop a .gpx on the window and the track is drawn twice: as a line on the
+  // map, and over the terrain in the 3d view (the engine's path overlay —
+  // see earth_core.h, which pins it to the mesh rather than to the file's own
+  // elevations). the panel is the handle on it: color, opacity, width, and
+  // the ✕ that gets rid of it. like the reference photo, the file never
+  // leaves the browser but is kept in indexeddb so a reload comes back to it
+  let path = null;   // { name, segs: [[{lat, lon, ele}, ...], ...], pts, km }
+  const pathStyle = { color: '#ff7f0e', opacity: 0.9, width: 3, drape: true };
+  const pathEls = {};
+  for (const k of ['name', 'stats', 'color', 'opacity', 'width', 'drape', 'close', 'fit', 'go', 'follow'])
+    pathEls[k] = document.getElementById('path' + k);
+
+  // gpx is xml with a default namespace; a plain type selector matches an
+  // element in any namespace, so no namespace juggling is needed here.
+  // track segments and routes each become their own polyline — a gap in the
+  // recording is a gap in the track, not a straight line across the county
+  const parseGpx = (text) => {
+    const doc = new DOMParser().parseFromString(text, 'application/xml');
+    if (doc.querySelector('parsererror')) return null;
+    const readPts = (nodes) => [...nodes].map((pt) => {
+      const ele = pt.querySelector('ele');
+      // an attribute that isn't there reads as null, and +null is 0 — which
+      // would put a malformed point in the gulf of guinea rather than drop it
+      const num = (a) => (pt.hasAttribute(a) ? parseFloat(pt.getAttribute(a)) : NaN);
+      return {
+        lat: num('lat'), lon: num('lon'),
+        ele: ele ? parseFloat(ele.textContent) : NaN,
+      };
+    }).filter((p) => Number.isFinite(p.lat) && Number.isFinite(p.lon));
+    const segs = [];
+    for (const seg of doc.querySelectorAll('trkseg')) {
+      const pts = readPts(seg.querySelectorAll('trkpt'));
+      if (pts.length) segs.push(pts);
+    }
+    for (const rte of doc.querySelectorAll('rte')) {
+      const pts = readPts(rte.querySelectorAll('rtept'));
+      if (pts.length) segs.push(pts);
+    }
+    if (!segs.length) return null;
+    const nameEl = doc.querySelector('trk > name') || doc.querySelector('metadata > name')
+      || doc.querySelector('rte > name');
+    return { name: (nameEl && nameEl.textContent.trim()) || '', segs };
+  };
+
+  // great-circle length, for the readout. the elevation profile is not part
+  // of it: the file's elevations are the thing we trust least here
+  const pathLengthKm = (segs) => {
+    let m = 0;
+    for (const seg of segs) {
+      for (let i = 1; i < seg.length; i++) {
+        const a = seg[i - 1], b = seg[i];
+        const dlat = (b.lat - a.lat) * Math.PI / 180;
+        const dlon = (b.lon - a.lon) * Math.PI / 180 * Math.cos((a.lat + b.lat) / 2 * Math.PI / 180);
+        m += Math.hypot(dlat, dlon) * 6371010;
+      }
+    }
+    return m / 1000;
+  };
+
+  const pathFC = () => {
+    if (!path) return { type: 'FeatureCollection', features: [] };
+    const feats = path.segs.map((seg) => ({ type: 'Feature', properties: {},
+      geometry: { type: 'LineString', coordinates: seg.map((p) => [p.lon, p.lat]) } }));
+    const first = path.segs[0][0];
+    const lastSeg = path.segs[path.segs.length - 1];
+    const last = lastSeg[lastSeg.length - 1];
+    for (const [end, p] of [['start', first], ['end', last]])
+      feats.push({ type: 'Feature', properties: { end },
+        geometry: { type: 'Point', coordinates: [p.lon, p.lat] } });
+    return { type: 'FeatureCollection', features: feats };
+  };
+  const setPathData = () => {
+    const src = map.getSource('gpx');
+    if (src) src.setData(pathFC());
+  };
+  // one place for the style, applied to both views. the map layers may not
+  // exist yet (style still loading), which setPathData's guard also covers
+  const applyPathStyle = () => {
+    const rgb = parseInt(pathStyle.color.slice(1), 16);
+    if (view.ready())
+      view.setPathStyle(rgb, pathStyle.opacity, pathStyle.width, pathStyle.drape);
+    if (map.getLayer('gpx-line')) {
+      map.setPaintProperty('gpx-line', 'line-color', pathStyle.color);
+      map.setPaintProperty('gpx-line', 'line-width', pathStyle.width);
+      map.setPaintProperty('gpx-line', 'line-opacity', pathStyle.opacity);
+      map.setPaintProperty('gpx-ends', 'circle-color',
+        ['case', ['==', ['get', 'end'], 'start'], '#fff', pathStyle.color]);
+      map.setPaintProperty('gpx-ends', 'circle-stroke-color', pathStyle.color);
+      map.setPaintProperty('gpx-ends', 'circle-opacity', pathStyle.opacity);
+      map.setPaintProperty('gpx-ends', 'circle-stroke-opacity', pathStyle.opacity);
+    }
+  };
+  // the engine wants flat [lat, lon, ele] triples with a nan triple marking
+  // the break between polylines. re-sent only when the points change; the
+  // style has its own call so a slider drag doesn't re-upload the track
+  const pushPath = () => {
+    if (!view.ready()) return;
+    if (!path) { view.clearPath(); return; }
+    const flat = new Float64Array(path.pts * 3 + (path.segs.length - 1) * 3);
+    let i = 0;
+    path.segs.forEach((seg, si) => {
+      if (si) { flat[i++] = NaN; flat[i++] = NaN; flat[i++] = NaN; }
+      for (const p of seg) { flat[i++] = p.lat; flat[i++] = p.lon; flat[i++] = p.ele; }
+    });
+    view.setPath(flat);
+    applyPathStyle();
+  };
+
+  const savePath = () => {
+    try {
+      localStorage.setItem('earth-path', JSON.stringify({
+        style: pathStyle, name: path ? path.name : null,
+        // where you were standing relative to the track, but never the mode
+        // itself: coming back to a reload already on rails would be a shock
+        follow: { s: fol.s, az: fol.az, el: fol.el, dist: fol.dist },
+      }));
+    } catch (e) {}
+  };
+  const pathBounds = () => {
+    if (!path) return null;
+    const b = new maplibregl.LngLatBounds();
+    for (const seg of path.segs) for (const p of seg) b.extend([p.lon, p.lat]);
+    return b;
+  };
+  const fitPath = () => {
+    const b = pathBounds();
+    if (!b) return;
+    following = false; // the map is showing the track now, not the camera
+    map.fitBounds(b, { padding: 40, animate: false, maxZoom: 16 });
+  };
+  // put the 3d camera at the start of the track, looking the way it heads.
+  // altitude comes from the file, which is enough to be above the ground and
+  // let the mesh stream in — the drape then puts the line on the terrain
+  const flyToPathStart = () => {
+    if (!path || !view.ready()) return;
+    const seg = path.segs[0];
+    const a = seg[0];
+    const b = seg[Math.min(seg.length - 1, 20)];
+    const heading = Math.atan2((b.lon - a.lon) * Math.cos(a.lat * Math.PI / 180),
+      b.lat - a.lat) * 180 / Math.PI;
+    view.setPose(a.lat, a.lon, (Number.isFinite(a.ele) ? a.ele : 0) + 400, heading, -20);
+    following = true;
+    canvas.focus();
+  };
+
+  const refreshPathPanel = () => {
+    document.body.classList.toggle('path', !!path);
+    pathEls.color.value = pathStyle.color;
+    pathEls.opacity.value = Math.round(pathStyle.opacity * 100);
+    pathEls.width.value = pathStyle.width;
+    pathEls.drape.checked = pathStyle.drape;
+    pathEls.follow.classList.toggle('primary', followOn);
+    if (!path) return;
+    pathEls.name.textContent = path.name || 'path';
+    pathEls.name.title = path.name || '';
+    pathEls.stats.textContent = `${path.pts} pts · ${path.km.toFixed(1)} km`
+      + (path.segs.length > 1 ? ` · ${path.segs.length} segments` : '');
+  };
+
+  const setPath = (parsed) => {
+    path = parsed;
+    if (path) {
+      path.pts = path.segs.reduce((n, seg) => n + seg.length, 0);
+      path.km = pathLengthKm(path.segs);
+    }
+    buildSpine();
+    if (!spine) setFollow(false); // nothing left to ride
+    setPathData();
+    pushPath();
+    refreshPathPanel();
+    savePath();
+  };
+  const clearPath = () => {
+    setFollow(false);
+    setPath(null);
+    idbDel('gpx-file', 'app');
+    canvas.focus();
+  };
+
+  const loadGpxFile = async (file) => {
+    const parsed = parseGpx(await file.text());
+    if (!parsed) { alert('could not read a track out of ' + file.name); return; }
+    if (!parsed.name) parsed.name = file.name.replace(/\.gpx$/i, '');
+    setPath(parsed);
+    idbPut('gpx-file', file, 'app');
+    fitPath();
+    canvas.focus(); // the drop shouldn't cost you the flight keys
+  };
+
+  pathEls.close.addEventListener('click', clearPath);
+  pathEls.color.addEventListener('input', () => {
+    pathStyle.color = pathEls.color.value;
+    applyPathStyle();
+    savePath();
+  });
+  pathEls.opacity.addEventListener('input', () => {
+    pathStyle.opacity = +pathEls.opacity.value / 100;
+    applyPathStyle();
+    savePath();
+  });
+  pathEls.width.addEventListener('input', () => {
+    pathStyle.width = +pathEls.width.value;
+    applyPathStyle();
+    savePath();
+  });
+  pathEls.drape.addEventListener('change', () => {
+    pathStyle.drape = pathEls.drape.checked;
+    applyPathStyle();
+    savePath();
+  });
+  pathEls.fit.addEventListener('click', fitPath);
+  pathEls.go.addEventListener('click', flyToPathStart);
+  // the follow button is wired at the end of the follow section below, not
+  // here: toggleFollow is a const declared there, and naming it as a handler
+  // reads it now rather than at click time
+
+  // --- following the path ---------------------------------------------------
+  // V puts the camera on rails. it aims at a point that runs along the track
+  // (W/S drive it) from a standoff expressed in the *path's* frame rather
+  // than the world's: azimuth is measured from the direction the track heads,
+  // so rounding a bend carries the camera around with it and you keep looking
+  // at the same shoulder of the trail. the arrows move that standoff (left/
+  // right around the track, up/down in elevation), R/F change its distance.
+  // A/D do nothing — on rails there is nowhere sideways to go.
+  //
+  // it steers off a smoothed copy of the track, never the track itself. a gps
+  // fix wanders a few meters between samples, and taking the heading from one
+  // raw segment hands every one of those wobbles to the camera, which reads
+  // as the world shivering. so the track is resampled at a fixed step and
+  // boxcar-smoothed twice (two passes ≈ gaussian), and the heading comes from
+  // a chord across a couple hundred meters of *that* rather than from any one
+  // segment. a temporal ease on top absorbs what survives.
+  const SPINE_STEP = 10;       // m between resampled points
+  const SPINE_SMOOTH = 60;     // m: position smoothing window
+  const SPINE_CHORD = 150;     // m: half-chord the heading is measured over
+  const FOLLOW_TURN_TAU = 500; // ms: ease on the heading
+  const FOLLOW_ALT_TAU = 700;  // ms: and on the target's altitude, which steps
+                               // as the drape measurements land
+  let spine = null;
+  // s: meters along the spine. az: bearing from the target to the camera,
+  // relative to the path's heading (0 = behind it, looking the way it goes).
+  // el: how far above the target the camera stands. heading/alt: the eased
+  // values actually used, null until the first frame seeds them
+  const fol = { s: 0, az: 0, el: 22, dist: 250, heading: null, alt: null };
+
+  const boxcar = (a, half) => a.map((_, i) => {
+    let sum = 0;
+    for (let k = -half; k <= half; k++)
+      sum += a[Math.min(a.length - 1, Math.max(0, i + k))];
+    return sum / (2 * half + 1);
+  });
+
+  const buildSpine = () => {
+    spine = null;
+    if (!path) return;
+    // one line to follow: the gaps between track segments are crossed rather
+    // than jumped, since the camera has to travel through them somehow
+    const raw = [];
+    for (const seg of path.segs) for (const p of seg) raw.push(p);
+    if (raw.length < 2) return;
+    // one local tangent plane for the whole track: meters east/north of its
+    // mean latitude. the east scale drifts with cos(lat) away from that — a
+    // percent over a degree — which is nothing against a camera standoff, and
+    // it keeps resampling and smoothing to plain 2d arithmetic
+    const lat0 = raw.reduce((t, p) => t + p.lat, 0) / raw.length;
+    const lon0 = raw[0].lon;
+    const mLat = D2R * planetR, mLon = mLat * Math.cos(lat0 * D2R);
+    const xy = raw.map((p) => [(p.lon - lon0) * mLon, (p.lat - lat0) * mLat]);
+    // resample at a fixed step, remembering which original point each sample
+    // came from — the engine's altitudes are indexed by that
+    const samples = [{ x: xy[0][0], y: xy[0][1], i: 0 }];
+    let dAcc = 0, dNext = SPINE_STEP;
+    for (let i = 1; i < xy.length; i++) {
+      const dx = xy[i][0] - xy[i - 1][0], dy = xy[i][1] - xy[i - 1][1];
+      const len = Math.hypot(dx, dy);
+      if (!(len > 0)) continue;
+      while (dNext <= dAcc + len) {
+        const t = (dNext - dAcc) / len;
+        samples.push({ x: xy[i - 1][0] + dx * t, y: xy[i - 1][1] + dy * t, i });
+        dNext += SPINE_STEP;
+      }
+      dAcc += len;
+    }
+    if (samples.length < 2) return;
+    const half = Math.max(1, Math.round(SPINE_SMOOTH / SPINE_STEP / 2));
+    let xs = samples.map((p) => p.x), ys = samples.map((p) => p.y);
+    for (let pass = 0; pass < 2; pass++) { xs = boxcar(xs, half); ys = boxcar(ys, half); }
+    spine = { xs, ys, idx: samples.map((p) => p.i), raw, step: SPINE_STEP,
+      len: (samples.length - 1) * SPINE_STEP, lat0, lon0, mLat, mLon };
+    fol.s = Math.min(fol.s, spine.len);
+  };
+
+  // the smoothing leaves the samples very slightly unevenly spaced, so s/step
+  // is an approximation of arc length — by well under a percent, and nothing
+  // here needs it to be exact
+  const spineAt = (s) => {
+    const n = spine.xs.length;
+    const u = Math.min(n - 1, Math.max(0, s / spine.step));
+    const i = Math.min(n - 2, Math.floor(u)), f = u - i;
+    return [spine.xs[i] + (spine.xs[i + 1] - spine.xs[i]) * f,
+      spine.ys[i] + (spine.ys[i + 1] - spine.ys[i]) * f];
+  };
+  const spineIdx = (s) => spine.idx[Math.min(spine.idx.length - 1,
+    Math.max(0, Math.round(s / spine.step)))];
+  const spineLatLon = (xy) => ({ lat: spine.lat0 + xy[1] / spine.mLat,
+    lon: spine.lon0 + xy[0] / spine.mLon });
+  // which way the track heads at s, degrees clockwise from north, over a
+  // chord rather than a segment (this is the anti-jitter measurement)
+  const spineHeading = (s) => {
+    const a = spineAt(Math.max(0, s - SPINE_CHORD));
+    const b = spineAt(Math.min(spine.len, s + SPINE_CHORD));
+    const dx = b[0] - a[0], dy = b[1] - a[1];
+    return Math.hypot(dx, dy) < 1e-6 ? null : Math.atan2(dx, dy) / D2R;
+  };
+  // the ground the camera should be looking at, averaged over a stretch of
+  // track so one bad fix doesn't dip the view. the engine answers with the
+  // draped altitude where the mesh under that point has been measured and
+  // with nothing where it hasn't, so measured points win outright and the
+  // file's own elevations only stand in until the drape reaches there —
+  // averaging the two together would split the difference and park the
+  // target inside the hillside
+  const spineAlt = (s) => {
+    let sum = 0, n = 0;
+    for (let j = -3; j <= 3; j++) {
+      const a = view.getPathGroundAlt(spineIdx(s + j * 25));
+      if (Number.isFinite(a)) { sum += a; n++; }
+    }
+    if (n) return sum / n;
+    for (let j = -3; j <= 3; j++) {
+      const e = spine.raw[spineIdx(s + j * 25)].ele;
+      if (Number.isFinite(e)) { sum += e; n++; }
+    }
+    return n ? sum / n : null;
+  };
+  // where on the spine the camera is standing now, so V picks you up where
+  // you are rather than teleporting to the trailhead
+  const nearestS = () => {
+    const p = view.getPose();
+    const x = (p.lon - spine.lon0) * spine.mLon, y = (p.lat - spine.lat0) * spine.mLat;
+    let best = 0, bd = Infinity;
+    for (let i = 0; i < spine.xs.length; i++) {
+      const d = (spine.xs[i] - x) ** 2 + (spine.ys[i] - y) ** 2;
+      if (d < bd) { bd = d; best = i; }
+    }
+    return best * spine.step;
+  };
+
+  const setFollow = (on) => {
+    if (on && (!spine || !view.ready() || tubeOn)) on = false;
+    if (on === followOn) { refreshPathPanel(); return; }
+    followOn = on;
+    fol.heading = fol.alt = null; // don't ease out of a stale value
+    if (on) {
+      // the rails own the pose: a parallel projection and terrain hug are
+      // both fighting for the same thing
+      if (ortho) { ortho = false; view.setOrtho(false); }
+      if (hug) { hug = false; view.setTerrainFollow(false); }
+      fol.s = nearestS();
+      following = true; // let the map track the camera along
+      canvas.focus();
+    }
+    refreshPathPanel();
+    updateHint();
+    savePath();
+  };
+  const toggleFollow = () => setFollow(!followOn);
+  pathEls.follow.addEventListener('click', toggleFollow);
+
+  // one frame of the follow camera; replaces the flight controls entirely
+  // while it is on (see the tick)
+  const followStep = (dt, slow) => {
+    const k = (slow ? 0.15 : 1) * dt / 1000;
+    // a drag on the view swings the standoff, the same grab-the-world way it
+    // turns the head in free flight: pull right and the track goes right,
+    // which means the camera walks left around it. yaw/pitch carry only the
+    // pointer here — the tick keeps the arrow keys out of them on the rails
+    if (yaw || pitch) {
+      fol.az += yaw / D2R;
+      fol.el = Math.min(85, Math.max(-10, fol.el + pitch / D2R));
+    }
+    // travel scaled to the standoff: from 20 m out a hiking pace is right,
+    // from 5 km up it would take all day
+    const speed = Math.max(15, fol.dist * 0.5) * gain;
+    if (keys.KeyW) fol.s += speed * k;
+    if (keys.KeyS) fol.s -= speed * k;
+    fol.s = Math.min(spine.len, Math.max(0, fol.s));
+    if (keys.ArrowRight) fol.az += 60 * k;
+    if (keys.ArrowLeft) fol.az -= 60 * k;
+    if (keys.ArrowUp) fol.el = Math.min(85, fol.el + 40 * k);
+    if (keys.ArrowDown) fol.el = Math.max(-10, fol.el - 40 * k);
+    if (!!keys.KeyR !== !!keys.KeyF)
+      fol.dist = Math.min(50000, Math.max(15,
+        fol.dist * Math.pow(1.8, (keys.KeyR ? 1 : -1) * (slow ? 0.15 : 1) * dt / 1000)));
+
+    const h = spineHeading(fol.s);
+    if (h !== null) {
+      if (fol.heading === null) fol.heading = h;
+      else {
+        // shortest way round, so crossing north doesn't spin the long way
+        const d = ((h - fol.heading + 540) % 360) - 180;
+        fol.heading += d * (1 - Math.exp(-dt / FOLLOW_TURN_TAU));
+      }
+    }
+    const a = spineAlt(fol.s);
+    if (a !== null)
+      fol.alt = fol.alt === null ? a
+        : fol.alt + (a - fol.alt) * (1 - Math.exp(-dt / FOLLOW_ALT_TAU));
+
+    const ll = spineLatLon(spineAt(fol.s));
+    const lat = ll.lat * D2R, lon = ll.lon * D2R;
+    const up = geoUpV(lat, lon), north = geoNorthV(lat, lon), east = vcross(north, up);
+    const bearing = ((fol.heading || 0) + fol.az) * D2R;
+    const horiz = vadd(vmul(north, Math.cos(bearing)), vmul(east, Math.sin(bearing)));
+    const target = vmul(up, planetR + (fol.alt || 0));
+    // the camera stands off *behind* the target along that bearing, lifted by
+    // the elevation angle — so az 0 is a chase view down the track
+    const el = fol.el * D2R;
+    const eye = vadd(target, vadd(vmul(horiz, -fol.dist * Math.cos(el)),
+      vmul(up, fol.dist * Math.sin(el))));
+    // back into the pose vocabulary: where that put the camera, and the aim
+    // from there to the target — which is not quite the bearing above once
+    // the planet has curved between the two
+    const r = Math.hypot(eye[0], eye[1], eye[2]);
+    const eu = vmul(eye, 1 / r);
+    const clamp1 = (v) => Math.min(1, Math.max(-1, v));
+    const clat = Math.asin(clamp1(eu[2])), clon = Math.atan2(eu[1], eu[0]);
+    const v = vnorm(vsub(target, eye));
+    if (!v) return;
+    const cnorth = geoNorthV(clat, clon), ceast = vcross(cnorth, eu);
+    view.setPose(clat / D2R, clon / D2R, r - planetR,
+      Math.atan2(vdot(v, ceast), vdot(v, cnorth)) / D2R,
+      Math.asin(clamp1(vdot(v, eu))) / D2R);
+  };
+
+  // restore. skipped in test mode for the same reason the saved pose is: a
+  // capture must not depend on what the last interactive session dropped
+  (async () => {
+    if (TEST) return;
+    let saved = null;
+    try { saved = JSON.parse(localStorage.getItem('earth-path')); } catch (e) {}
+    if (saved && saved.style) Object.assign(pathStyle, saved.style);
+    if (saved && saved.follow) Object.assign(fol, saved.follow, { heading: null, alt: null });
+    refreshPathPanel();
+    const file = await idbGet('gpx-file', 'app');
+    if (!file) return;
+    const parsed = parseGpx(await file.text());
+    if (parsed) {
+      if (!parsed.name) parsed.name = (saved && saved.name) || '';
+      setPath(parsed); // pushPath is a no-op until the planet is ready; tick retries
+    } else {
+      idbDel('gpx-file', 'app');
+    }
+  })();
 
   // locked-mode wheel zoom: handle it ourselves with an unanimated setZoom,
   // which zooms around the center — where the follow keeps the marker — so
@@ -1548,6 +2065,7 @@
   // for devtools poking and automated testing
   window.__demo = { view, map, marker, isFollowing: () => following,
     tube: () => ({ rect: tubeRect, on: tubeOn, curl }),
+    path: () => path, loadGpx: (text) => setPath(parseGpx(text)),
     align: () => ({ pairs, solving, dof: dofCount(), errs: lastErrs }),
     solve: startSolve };
 
@@ -1587,6 +2105,11 @@
           view.setTubeRect(tubeRect[0], tubeRect[1], tubeRect[2], tubeRect[3], tubeAxisEw);
         }
       }
+      // a track dropped (or restored) before the planet metadata arrived is
+      // still sitting in js: its ecef points need the planetoid radius, and
+      // so does the spine's tangent plane
+      pushPath();
+      buildSpine();
       updateHint();
     }
 
@@ -1596,13 +2119,16 @@
     // center of the screen (raycast into the scene on the wasm side):
     // left/right around its up axis, up/down in tilt
     const rot = (slow ? 0.1 : 1) * dt / 1000;
+    // on the rails the arrows swing the camera around the track instead of
+    // aiming it, and W/S run along the track instead of flying
+    const railed = followOn && spine && view.ready();
     const orbitH = ortho ? ((keys.ArrowRight ? 1 : 0) - (keys.ArrowLeft ? 1 : 0)) : 0;
     const orbitV = ortho ? ((keys.ArrowUp ? 1 : 0) - (keys.ArrowDown ? 1 : 0)) : 0;
     if ((orbitH || orbitV) && view.ready()) view.orbit(orbitH * 45 * rot, orbitV * 34 * rot); // deg
-    if (!ortho && keys.ArrowRight) yaw += 1.2 * rot;
-    if (!ortho && keys.ArrowLeft) yaw -= 1.2 * rot;
-    if (!ortho && keys.ArrowUp) pitch += 0.9 * rot;
-    if (!ortho && keys.ArrowDown) pitch -= 0.9 * rot;
+    if (!ortho && !railed && keys.ArrowRight) yaw += 1.2 * rot;
+    if (!ortho && !railed && keys.ArrowLeft) yaw -= 1.2 * rot;
+    if (!ortho && !railed && keys.ArrowUp) pitch += 0.9 * rot;
+    if (!ortho && !railed && keys.ArrowDown) pitch -= 0.9 * rot;
     // z/x zoom like the wheel; in ortho E/Q join them as zoom too, since a
     // parallel projection has no meaningful elevation to pedestal along
     if (!!keys.KeyZ !== !!keys.KeyX) {
@@ -1613,7 +2139,7 @@
         view.setFov(p.fov * Math.pow(0.9, (dt / 150) * (keys.KeyZ ? -1 : 1)));
       }
     }
-    if (ortho && !!keys.KeyR !== !!keys.KeyF) {
+    if (ortho && !railed && !!keys.KeyR !== !!keys.KeyF) {
       view.zoomOrtho(Math.pow(0.9, (dt / 150) * (keys.KeyR ? 1 : -1))); // R out, F in
     }
 
@@ -1628,7 +2154,8 @@
     // thrusting steadies the hand: turning (keys and drag alike) drops to
     // a fifth while W is held, so forward flight curves instead of veers
     const turn = keys.KeyW ? 0.2 : 1;
-    view.fly(yaw * turn, pitch * turn, roll * turn,
+    if (railed) followStep(dt, slow);
+    else view.fly(yaw * turn, pitch * turn, roll * turn,
       !!keys.KeyW, !!keys.KeyS, !!keys.KeyA, !!keys.KeyD,
       (tubeOn || !ortho) && !!keys.KeyR,
       (tubeOn || !ortho) && !!keys.KeyF,

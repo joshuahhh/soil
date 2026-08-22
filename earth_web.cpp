@@ -166,6 +166,33 @@ struct EarthView {
 		o.set("nodesLoaded", earth.stat_nodes_loaded);
 		return o;
 	}
+	// --- path overlay ---------------------------------------------------
+	// a dropped track: flat [lat, lon, ele, ...] triples in degrees/meters
+	// (a nan lat starts a new polyline, which is how a gpx's track segments
+	// come across). style is separate so the panel's sliders don't re-upload
+	// the points; drape pins the line to the mesh instead of to the file's
+	// own elevations (see earth_core's path overlay)
+	void setPath(val lla) {
+		earth.setPath(emscripten::convertJSArrayToNumberVector<double>(lla));
+	}
+	void clearPath() { earth.setPath({}); }
+	void setPathStyle(int rgb, double opacity, double width_px, bool drape) {
+		earth.setPathStyle((rgb >> 16 & 0xff) / 255.0f, (rgb >> 8 & 0xff) / 255.0f,
+			(rgb & 0xff) / 255.0f, (float)opacity, (float)width_px, drape);
+	}
+
+	// ground altitude measured under path point i (meters above the
+	// planetoid sphere, the same datum as setPose's alt), or nan where the
+	// drape hasn't reached that point yet. the follow camera reads it so it
+	// rides the terrain rather than the track's gps altitudes; nan rather
+	// than a fallback because the caller has the file's own elevations and
+	// is the one that should decide when to stop using them
+	double getPathGroundAlt(int i) {
+		if (i < 0 || (size_t)i >= earth.path_ground.size()) return NAN;
+		if (!earth.path_drape || earth.path_ground[i] <= 0) return NAN;
+		return earth.path_ground[i] - planetRadius();
+	}
+
 	void setSkyColor(int rgb) { sky_color = rgb; }
 	void setDebugLod(bool on) { earth.debug_lod = on; }
 	// M key: mipmaps + anisotropy on the uncompressed texture path. the dxt
@@ -601,6 +628,10 @@ EMSCRIPTEN_BINDINGS(earth) {
 		.function("lockTubeGround", &EarthView::lockTubeGround)
 		.function("setTubeCurl", &EarthView::setTubeCurl)
 		.function("getTubeInfo", &EarthView::getTubeInfo)
+		.function("setPath", &EarthView::setPath)
+		.function("clearPath", &EarthView::clearPath)
+		.function("setPathStyle", &EarthView::setPathStyle)
+		.function("getPathGroundAlt", &EarthView::getPathGroundAlt)
 		.function("setSkyColor", &EarthView::setSkyColor)
 		.function("setDebugLod", &EarthView::setDebugLod)
 		.function("setMipmaps", &EarthView::setMipmaps)

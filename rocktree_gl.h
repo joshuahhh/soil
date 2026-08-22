@@ -3,6 +3,20 @@
 // shared extension header — it applies to gles3 contexts too)
 #include <GLES2/gl2ext.h>
 
+// the dropped-track overlay. gl line width is clamped to 1 in webgl (and the
+// crack-fill lines are the only thing that ever wanted more), so a polyline
+// you can actually see and style has to be triangles: each segment is a quad
+// whose corners the vertex shader pushes sideways in *screen* pixels, which
+// is what makes the width constant with distance. its own vao keeps the
+// terrain program's attribute arrays — enabled once in renderInit, in the
+// default vao — untouched
+struct path_gl_t {
+	GLuint program = 0, vbo = 0, vao = 0;
+	GLint transform_loc, viewport_loc, width_loc, color_loc, bias_loc;
+	GLint pos_a_loc, pos_b_loc, end_loc, side_loc;
+	int vert_count = 0;
+};
+
 struct gl_ctx_t {
 	int width, height; // weblib: canvas drawable size, set by the shell
 	GLuint program;
@@ -20,6 +34,9 @@ struct gl_ctx_t {
 	GLint position_loc;
 	GLint octant_loc;
 	GLint texcoords_loc;
+	// the path overlay's own program and geometry (see renderPathInit): a
+	// second pass with nothing in common with the terrain one but the frame
+	path_gl_t path;
 };
 
 // largest anisotropy the gpu offers, 1 if the extension is missing
@@ -244,6 +261,124 @@ GLuint makeShader(const char* vert_src, const char* frag_src) {
 	glDeleteShader(frag_shader);
 	return program;
 }
+
+// --- path overlay ---------------------------------------------------------
+// vertex layout, 8 floats: both ends of the segment (pos_a, pos_b), which end
+// this corner belongs to (0/1), and which side of the line it is on (-1/+1).
+// both ends are on every vertex because the sideways push is perpendicular to
+// the *projected* segment, which neither endpoint knows on its own.
+// a degenerate quad (pos_a == pos_b) is a join: the square patch that fills
+// the wedge two segments leave open at a bend.
+void renderPathInit(render_ctx_t &ctx) {
+	auto &p = ctx.path;
+	p.program = makeShader(
+		"#version 300 es\n"
+		"uniform mat4 transform;"   // path-local -> clip
+		"uniform vec2 viewport;"    // drawable size in pixels
+		"uniform float width;"      // line width in pixels
+		// depth bias in ndc units, toward the camera: a track draped onto the
+		// terrain is coplanar with it, and a constant ndc nudge is roughly
+		// the shape of the depth buffer's own precision (fine near, coarse far)
+		"uniform float bias;"
+		"in vec3 pos_a;"
+		"in vec3 pos_b;"
+		"in float end;"
+		"in float side;"
+		"void main() {"
+		"	vec4 a = transform * vec4(pos_a, 1.0);"
+		"	vec4 b = transform * vec4(pos_b, 1.0);"
+		// near-plane clip in clip space: projecting a vertex with w <= 0 flings
+		// it to the wrong side of the screen and the segment draws as a streak
+		// across the view. shorten the segment to the plane instead
+		"	const float wmin = 1e-4;"
+		"	if (a.w < wmin && b.w < wmin) { gl_Position = vec4(0.0, 0.0, 2.0, 1.0); return; }"
+		"	if (a.w < wmin) a = mix(a, b, (wmin - a.w) / (b.w - a.w));"
+		"	if (b.w < wmin) b = mix(b, a, (wmin - b.w) / (a.w - b.w));"
+		"	vec2 half_vp = 0.5 * viewport;"
+		"	vec2 sa = a.xy / a.w * half_vp;"
+		"	vec2 sb = b.xy / b.w * half_vp;"
+		"	vec2 d = sb - sa;"
+		"	vec4 p = end < 0.5 ? a : b;"
+		"	vec2 off;"
+		// a degenerate segment is a join patch: an axis-aligned square, using
+		// the two corner bits as its two signs
+		"	if (dot(d, d) < 1e-8) off = vec2(end * 2.0 - 1.0, side) * (0.5 * width);"
+		"	else off = normalize(vec2(-d.y, d.x)) * (side * 0.5 * width);"
+		"	p.xy += off / half_vp * p.w;"
+		"	p.z -= bias * p.w;"
+		"	gl_Position = p;"
+		"}",
+
+		"#version 300 es\n"
+		"precision highp float;\n"
+		"uniform vec4 color;"
+		"out vec4 frag_color;"
+		"void main() { frag_color = color; }"
+	);
+	p.transform_loc = glGetUniformLocation(p.program, "transform");
+	p.viewport_loc = glGetUniformLocation(p.program, "viewport");
+	p.width_loc = glGetUniformLocation(p.program, "width");
+	p.bias_loc = glGetUniformLocation(p.program, "bias");
+	p.color_loc = glGetUniformLocation(p.program, "color");
+	p.pos_a_loc = glGetAttribLocation(p.program, "pos_a");
+	p.pos_b_loc = glGetAttribLocation(p.program, "pos_b");
+	p.end_loc = glGetAttribLocation(p.program, "end");
+	p.side_loc = glGetAttribLocation(p.program, "side");
+	glGenVertexArrays(1, &p.vao);
+	glGenBuffers(1, &p.vbo);
+	glBindVertexArray(p.vao);
+	glBindBuffer(GL_ARRAY_BUFFER, p.vbo);
+	const GLsizei stride = 8 * sizeof(float);
+	glEnableVertexAttribArray(p.pos_a_loc);
+	glVertexAttribPointer(p.pos_a_loc, 3, GL_FLOAT, GL_FALSE, stride, (void *)0);
+	glEnableVertexAttribArray(p.pos_b_loc);
+	glVertexAttribPointer(p.pos_b_loc, 3, GL_FLOAT, GL_FALSE, stride, (void *)(3 * sizeof(float)));
+	glEnableVertexAttribArray(p.end_loc);
+	glVertexAttribPointer(p.end_loc, 1, GL_FLOAT, GL_FALSE, stride, (void *)(6 * sizeof(float)));
+	glEnableVertexAttribArray(p.side_loc);
+	glVertexAttribPointer(p.side_loc, 1, GL_FLOAT, GL_FALSE, stride, (void *)(7 * sizeof(float)));
+	glBindVertexArray(0);
+}
+
+// replace the ribbon's geometry (floats, 8 per vertex)
+void renderPathUpload(render_ctx_t &ctx, const float *data, int vert_count) {
+	auto &p = ctx.path;
+	p.vert_count = vert_count;
+	glBindBuffer(GL_ARRAY_BUFFER, p.vbo);
+	glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)vert_count * 8 * sizeof(float),
+		vert_count ? data : nullptr, GL_DYNAMIC_DRAW);
+	glBindBuffer(GL_ARRAY_BUFFER, 0);
+}
+
+// draw the uploaded ribbon. depth *test* on so terrain hides the parts of the
+// track that are over the hill, but depth *writes* off: the ribbon overlaps
+// itself at every join, and a translucent line that occludes itself comes out
+// blotchy. culling is off because a quad's winding follows which way the
+// segment happens to run on screen — renderSetTube re-establishes it at the
+// top of the next frame, and nothing else draws after this one
+void renderPathDraw(render_ctx_t &ctx, const float *transform16, const float *rgba,
+		float width_px, float bias, int w, int h) {
+	auto &p = ctx.path;
+	if (!p.vert_count) return;
+	glUseProgram(p.program);
+	glBindVertexArray(p.vao);
+	glUniformMatrix4fv(p.transform_loc, 1, GL_FALSE, transform16);
+	glUniform2f(p.viewport_loc, (float)w, (float)h);
+	glUniform1f(p.width_loc, width_px);
+	glUniform1f(p.bias_loc, bias);
+	glUniform4fv(p.color_loc, 1, rgba);
+	glDisable(GL_CULL_FACE);
+	glDepthMask(GL_FALSE);
+	glEnable(GL_BLEND);
+	glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+	glDrawArrays(GL_TRIANGLES, 0, p.vert_count);
+	glDisable(GL_BLEND);
+	glDepthMask(GL_TRUE);
+	glBindVertexArray(0);
+	// the terrain path sets its uniforms without a glUseProgram of its own
+	glUseProgram(ctx.program);
+}
+
 // backend init
 void renderInit(render_ctx_t &ctx, void *) {
 	// gles 3.0 dropped the single-string GL_EXTENSIONS query — it returns null
@@ -380,4 +515,7 @@ void renderInit(render_ctx_t &ctx, void *) {
 	glEnableVertexAttribArray(ctx.position_loc);
 	glEnableVertexAttribArray(ctx.octant_loc);
 	glEnableVertexAttribArray(ctx.texcoords_loc);
+
+	renderPathInit(ctx);
+	glUseProgram(ctx.program); // path init left its own program current
 }

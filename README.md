@@ -31,6 +31,81 @@ never run a stale wasm after a rebuild)
 `coi-serviceworker.js` injects the cross-origin-isolation headers the pthread
 build needs (expect one automatic reload on first visit).
 
+#### Dropped tracks
+
+Drop a `.gpx` on the window and the track is drawn twice: as a line on the
+map, and over the terrain in the 3d view. A panel in the hud carries color,
+opacity, width, the drape switch, and the ✕ that removes it; the file itself
+is kept in indexeddb next to the tile cache, so a reload comes back to it.
+(An image dropped instead is still the reference photo — the drop is sorted
+by extension.)
+
+The 3d line is a ribbon of triangles, not `GL_LINES`: WebGL clamps line width
+to 1, so a polyline you can style has to be geometry. Each segment is a quad
+whose corners the vertex shader pushes sideways in *screen pixels* — constant
+width with distance — plus a small square patch at each interior point to fill
+the wedge a bend leaves open. The shader also clips the segment against the
+near plane in clip space, since projecting a vertex with `w <= 0` flings it to
+the wrong side of the screen and draws the segment as a streak across the view.
+It draws after the terrain with depth test on but depth writes off (the ribbon
+overlaps itself at every join, and a translucent line that occludes itself
+comes out blotchy), and with a small ndc depth nudge toward the camera.
+
+**Draping is the interesting part.** A track laid at its own elevations
+wanders through hillsides: GPS altitude is worth tens of meters on a good day,
+and the geoid separation it's measured against is worth a hundred more. So
+each point is re-measured against the mesh with the same downward raycast
+terrain-hug uses (`groundRadiusUnder`) and pinned to the ground there. That
+measurement only answers where fine mesh is currently resident *and drawn*, so
+it runs a couple dozen points a frame and keeps what it learns: a track fills
+in onto the terrain over the first seconds and stays put after. Turn the
+switch off to see the file's own elevations instead — the gap between the two
+is a fair picture of what a GPS watch actually knows about altitude.
+
+Vertices go to the gpu in float, and ECEF coordinates are 6.4e6 meters — half
+a meter of precision, which shows as a wobble against the terrain. The path
+uses the same trick the meshes do: subtract a nearby origin and fold it back
+into the transform in double.
+
+Nothing is drawn in tube mode: the ground has been rolled out from under the
+track, and a line drawn in globe space would hang in the air where the terrain
+used to be.
+
+**Follow mode** (`V`, or the panel's button) puts the camera on rails: it aims
+at a point that runs along the track, from a standoff expressed in the path's
+own frame rather than the world's. W/S drive that point along the track, the
+arrows swing the camera around it (left/right *relative to the track's
+heading*, so rounding a bend carries the camera with it and you keep looking at
+the same shoulder of the trail), and R/F change the standoff distance. A/D do
+nothing — on rails there is nowhere sideways to go.
+
+It steers off a smoothed copy of the track, never the track itself. A GPS fix
+wanders a few meters between samples, and taking the heading from one raw
+segment hands every one of those wobbles to the camera, which reads as the
+world shivering. So the track is resampled at a fixed 10 m step, boxcar-
+smoothed twice (two passes ≈ gaussian) over a 60 m window, and the heading is
+taken from a 300 m chord across *that* rather than from any one segment — with
+a half-second temporal ease on top for what survives. The aim height comes from
+`getPathGroundAlt`, which reports the drape's measurement where it has one and
+NaN where it hasn't, so the camera rides the terrain rather than the track's
+GPS altitudes, easing between the two as the measurements land.
+
+**V rides the track.** The camera goes on rails: it looks at a point that runs
+along the path, W/S drive that point forward and back, the arrows swing the
+camera around it (R/F change how far off it stands), and A/D do nothing —
+there is nowhere sideways to go. The azimuth is measured from the *path's* own
+heading rather than from north, so rounding a bend carries the camera around
+with it and you keep looking at the same shoulder of the trail.
+
+The camera never steers off the track itself. A GPS fix wanders a few meters
+between samples, so the heading between two consecutive points swings wildly
+even standing still, and handing that to a camera reads as the world
+shivering. So the track is resampled at a fixed 10 m step, boxcar-smoothed
+twice (two passes ≈ gaussian), and the heading is taken from a ±150 m chord
+across *that* — never from one segment. A temporal ease on the heading and on
+the target's altitude absorbs the rest, the altitude one mattering because it
+steps whenever a drape measurement lands.
+
 #### Render tests
 
 [tools/](./tools/) captures the 3d view headlessly and builds a side-by-side
