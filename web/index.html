@@ -230,7 +230,7 @@
       'shift slow · O perspective · C pick debug · L lod debug · M mipmaps · 0 reset view · ' +
       'click map to teleport · ⇧drag map: tube rect',
     follow: 'following the path — W/S run along it · arrows swing the view around it ' +
-      '(left/right relative to the path, so a bend carries you with it) · R/F standoff · ' +
+      '(left/right relative to the path, so a bend carries you with it) · R/F standoff (zoom in ortho) · ' +
       'Z/X zoom · shift slow · V or esc to leave',
     tube: 'airplane controls — W/S thrust · A/D strafe · R/F up/down · arrows/drag pitch+yaw · Q/E roll · ' +
       'Z/X zoom · shift slow · G hug the wall · 0 reset view · T unroll · esc clear tube · ⇧drag map: new rect',
@@ -1060,7 +1060,9 @@
     // grab-the-world: in perspective, dragging pulls the scene with the
     // pointer by looking around; in ortho it pans instead (WASD-equivalent
     // camera translation, so the ground follows the pointer)
-    if (ortho) {
+    // ...except on the rails, where the drag swings the standoff in either
+    // projection: a pan would be overwritten by followStep on the same frame
+    if (ortho && !followOn) {
       view.panOrtho(e.movementX, e.movementY, canvas.clientHeight);
       return;
     }
@@ -1756,9 +1758,11 @@
     followOn = on;
     fol.heading = fol.alt = null; // don't ease out of a stale value
     if (on) {
-      // the rails own the pose: a parallel projection and terrain hug are
-      // both fighting for the same thing
-      if (ortho) { ortho = false; view.setOrtho(false); }
+      // terrain hug goes: it re-eases the eye toward a held height above the
+      // mesh inside every fly() call, and the rails write the pose outright,
+      // so the two fight over the same thing. ortho stays — a parallel
+      // projection has no quarrel with the rails, it just changes what R/F
+      // and a drag have to do (see followStep)
       if (hug) { hug = false; view.setTerrainFollow(false); }
       fol.s = nearestS();
       following = true; // let the map track the camera along
@@ -1796,9 +1800,17 @@
     if (keys.ArrowLeft) fol.az -= 60 * k;
     if (keys.ArrowUp) fol.el = Math.min(85, fol.el + 40 * k);
     if (keys.ArrowDown) fol.el = Math.max(-10, fol.el - 40 * k);
-    if (!!keys.KeyR !== !!keys.KeyF)
-      fol.dist = Math.min(50000, Math.max(15,
-        fol.dist * Math.pow(1.8, (keys.KeyR ? 1 : -1) * (slow ? 0.15 : 1) * dt / 1000)));
+    if (!!keys.KeyR !== !!keys.KeyF) {
+      // >1 zooms in, matching zoomOrtho's sense; R backs off, F closes in
+      const f = Math.pow(1.8, (keys.KeyR ? -1 : 1) * (slow ? 0.15 : 1) * dt / 1000);
+      // a parallel projection doesn't care how far back the camera stands, so
+      // in ortho the standoff is invisible and R/F have to move the extent
+      // instead — the way they do outside follow. the standoff still rides
+      // along, so the framing survives a switch back to perspective and the
+      // travel speed (which scales with it) tracks what you can actually see
+      if (ortho) view.zoomOrtho(f);
+      fol.dist = Math.min(50000, Math.max(15, fol.dist / f));
+    }
 
     // the heading is the one thing still taken from the smoothed spine — the
     // jitter that matters is in the *direction* between raw points, not in
@@ -2572,8 +2584,9 @@
     if (!ortho && !railed && keys.ArrowLeft) yaw -= 1.2 * rot;
     if (!ortho && !railed && keys.ArrowUp) pitch += 0.9 * rot;
     if (!ortho && !railed && keys.ArrowDown) pitch -= 0.9 * rot;
-    // z/x zoom like the wheel; in ortho E/Q join them as zoom too, since a
-    // parallel projection has no meaningful elevation to pedestal along
+    // z/x zoom like the wheel; in ortho R/F join them as zoom too (below),
+    // since a parallel projection has no meaningful elevation to pedestal
+    // along — so the up/down keys would otherwise sit dead there
     if (!!keys.KeyZ !== !!keys.KeyX) {
       if (ortho) {
         view.zoomOrtho(Math.pow(0.9, (dt / 150) * (keys.KeyZ ? 1 : -1)));
