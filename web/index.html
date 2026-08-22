@@ -99,6 +99,9 @@
   .panel .x { background: none; padding: 0 4px; font-size: 14px; }
   .panel label { display: flex; align-items: center; gap: 2px; }
   .panel input[type=range] { flex: 1; min-width: 0; }
+  /* a locked switch (the drape one, on a file with no elevations) should read
+     as settled rather than broken */
+  .panel label:has(input:disabled) { opacity: .55; }
   /* the swatch: a plain color input is a chunky bevelled box in every
      browser, so strip it back to the swatch itself */
   #pathcolor { width: 26px; height: 20px; padding: 0; border: 0; border-radius: 3px;
@@ -1137,7 +1140,13 @@
     pathEls.color.value = pathStyle.color;
     pathEls.opacity.value = Math.round(pathStyle.opacity * 100);
     pathEls.width.value = pathStyle.width;
+    // no elevations in the file means no alternative to draping: show it on
+    // and locked rather than offering a switch that would bury the track
     pathEls.drape.checked = pathStyle.drape;
+    pathEls.drape.disabled = !!path && !path.hasEle;
+    pathEls.drape.parentElement.title = pathEls.drape.disabled
+      ? 'this file records no elevations, so the track has to be laid on the mesh'
+      : 'lay the track on the mesh instead of at the elevations the file records';
     pathEls.follow.classList.toggle('primary', followOn);
     if (!path) return;
     pathEls.name.textContent = path.name || 'path';
@@ -1146,11 +1155,23 @@
       + (path.segs.length > 1 ? ` · ${path.segs.length} segments` : '');
   };
 
-  const setPath = (parsed) => {
+  // `fresh` marks a file the user just dropped, as opposed to one being
+  // restored: a drop re-picks the drape default, a restore keeps whatever
+  // was chosen last time
+  const setPath = (parsed, fresh) => {
     path = parsed;
     if (path) {
       path.pts = path.segs.reduce((n, seg) => n + seg.length, 0);
       path.km = pathLengthKm(path.segs);
+      // elevations are data the file actually recorded, so they win by
+      // default and draping is the fallback for when there are none. a few
+      // points missing an <ele> is common enough to tolerate — each of those
+      // reads as sea level, and the drape measurement fills them in — but a
+      // track that is mostly missing them has nothing to plot against
+      const withEle = path.segs.reduce((n, seg) =>
+        n + seg.filter((p) => Number.isFinite(p.ele)).length, 0);
+      path.hasEle = withEle >= path.pts * 0.9;
+      if (fresh || !path.hasEle) pathStyle.drape = !path.hasEle;
     }
     buildSpine();
     if (!spine) setFollow(false); // nothing left to ride
@@ -1170,7 +1191,7 @@
     const parsed = parseGpx(await file.text());
     if (!parsed) { alert('could not read a track out of ' + file.name); return; }
     if (!parsed.name) parsed.name = file.name.replace(/\.gpx$/i, '');
-    setPath(parsed);
+    setPath(parsed, true);
     idbPut('gpx-file', file, 'app');
     fitPath();
     canvas.focus(); // the drop shouldn't cost you the flight keys
@@ -2069,7 +2090,7 @@
   // for devtools poking and automated testing
   window.__demo = { view, map, marker, isFollowing: () => following,
     tube: () => ({ rect: tubeRect, on: tubeOn, curl }),
-    path: () => path, loadGpx: (text) => setPath(parseGpx(text)),
+    path: () => path, loadGpx: (text) => setPath(parseGpx(text), true),
     align: () => ({ pairs, solving, dof: dofCount(), errs: lastErrs }),
     solve: startSolve };
 

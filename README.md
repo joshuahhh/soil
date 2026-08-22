@@ -58,16 +58,23 @@ It draws after the terrain with depth test on but depth writes off (the ribbon
 overlaps itself at every join, and a translucent line that occludes itself
 comes out blotchy), and with a small ndc depth nudge toward the camera.
 
-**Draping is the interesting part.** A track laid at its own elevations
-wanders through hillsides: GPS altitude is worth tens of meters on a good day,
-and the geoid separation it's measured against is worth a hundred more. So
-each point is re-measured against the mesh with the same downward raycast
-terrain-hug uses (`groundRadiusUnder`) and pinned to the ground there. That
-measurement only answers where fine mesh is currently resident *and drawn*, so
-it runs a couple dozen points a frame and keeps what it learns: a track fills
-in onto the terrain over the first seconds and stays put after. Turn the
-switch off to see the file's own elevations instead — the gap between the two
-is a fair picture of what a GPS watch actually knows about altitude.
+**Draping is the interesting part.** The file's elevations are what a track is
+drawn at by default — they are what it actually recorded, and the sphere the
+mesh sits on is the datum they are already measured against. But GPS altitude
+is worth tens of meters on a good day and the geoid separation under it a
+hundred more, so a track laid at its own elevations wanders through hillsides.
+The drape switch answers that: each point is re-measured against the mesh with
+the same downward raycast terrain-hug uses (`groundRadiusUnder`) and pinned to
+the ground there. That measurement only answers where fine mesh is currently
+resident *and drawn*, so it runs a couple dozen points a frame and keeps what
+it learns — a track settles onto the terrain over the first seconds and stays
+put after.
+
+Flipping between the two is a fair picture of what a GPS watch actually knows
+about altitude. A file that records no elevations has nothing to flip to: the
+switch comes up on and locked, since the alternative is the whole track lying
+at sea level, buried under the terrain and correctly hidden by the depth
+test.
 
 Vertices go to the gpu in float, and ECEF coordinates are 6.4e6 meters — half
 a meter of precision, which shows as a wobble against the terrain. The path
