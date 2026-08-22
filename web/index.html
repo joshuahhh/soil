@@ -238,17 +238,64 @@
 <script>
 (async () => {
   // --- indexeddb byte cache -------------------------------------------------
-  // 'tiles' holds downloaded rocktree bytes; 'app' holds page state too big for
-  // localstorage (right now just the reference photo's blob)
-  const db = await new Promise((res, rej) => {
-    const r = indexedDB.open('earth-cache', 2);
-    r.onupgradeneeded = () => {
-      const d = r.result;
-      if (!d.objectStoreNames.contains('tiles')) d.createObjectStore('tiles');
-      if (!d.objectStoreNames.contains('app')) d.createObjectStore('app');
-    };
-    r.onsuccess = () => res(r.result);
-    r.onerror = () => rej(r.error);
+  // 'tiles' holds downloaded rocktree bytes, 'tilemeta' their size and last
+  // use (see the lru below), and 'app' holds page state too big for
+  // localstorage (the reference photo's blob, the dropped gpx)
+  // nothing here is allowed to hold up the page. opening this can take
+  // arbitrarily long — a version upgrade waits for every other tab still
+  // holding the old connection, and the one below has several gigabytes to
+  // clear — and the whole app used to sit behind that await, which shows up
+  // as two blank panes and an empty console. so the connection arrives when
+  // it arrives: until then every helper below sees a null db, fails its
+  // try/catch, and the page runs straight off the network
+  let db = null;
+  const dbOpen = new Promise((res) => {
+    // an open that neither succeeds nor fails is a real state (a blocked
+    // upgrade, an origin whose storage is wedged) and it used to be a silent
+    // one. the page runs regardless now, so this is a diagnosis, not a bail
+    let settled = false;
+    setTimeout(() => {
+      if (settled) return;
+      console.warn('idb: open has been pending for 8s — no cache, and nothing'
+        + ' the page stores will persist. if this sticks, clear this site\'s'
+        + ' storage (the origin may be out of quota) and reload');
+      if (navigator.storage && navigator.storage.estimate)
+        navigator.storage.estimate().then((e) => console.warn(
+          `idb: origin is using ${Math.round((e.usage || 0) / 1e6)} MB`
+          + ` of ${Math.round((e.quota || 0) / 1e6)} MB`));
+    }, 8000);
+    try {
+      const r = indexedDB.open('earth-cache', 3);
+      r.onupgradeneeded = (e) => {
+        const d = r.result;
+        if (!d.objectStoreNames.contains('tiles')) d.createObjectStore('tiles');
+        if (!d.objectStoreNames.contains('app')) d.createObjectStore('app');
+        if (!d.objectStoreNames.contains('tilemeta')) d.createObjectStore('tilemeta');
+        // tiles from before this version have no bookkeeping and no knowable
+        // size, so the budget can't see them and they have to go. that does
+        // NOT happen here: clearing several gigabytes inside a versionchange
+        // transaction holds the whole open() until it finishes, which on a
+        // full cache is minutes of a page that cannot start and says nothing.
+        // purgeUnbookkept below does it in the background instead
+      };
+      // another tab still has the old version open: it has to let go before
+      // this upgrade can run, and until it does nothing happens at all
+      r.onblocked = () => console.warn('idb: the upgrade is blocked by another'
+        + ' tab with this page open — close it. running without the cache meanwhile');
+      r.onsuccess = () => {
+        settled = true;
+        const d = r.result;
+        // and be the tab that lets go, next time it is someone else's upgrade
+        d.onversionchange = () => { db = null; d.close(); };
+        db = d;
+        res(d);
+      };
+      r.onerror = () => {
+        settled = true;
+        console.warn('idb: open failed', r.error);
+        res(null);
+      };
+    } catch (e) { settled = true; console.warn('idb: open threw', e); res(null); }
   });
   const idbGet = (key, store = 'tiles') => new Promise((res) => {
     try {
@@ -260,9 +307,276 @@
   const idbPut = (key, bytes, store = 'tiles') => {
     try { db.transaction(store, 'readwrite').objectStore(store).put(bytes, key); } catch (e) {}
   };
+  // the same write, but reporting whether it actually landed. the fire-and-
+  // forget version above is right for tiles (a lost tile is re-fetched next
+  // frame and nobody is worse off) and wrong for the files the page restores
+  // itself from: a put that fails silently leaves the *previous* file in the
+  // store, so the next reload comes back to it and the page looks like it
+  // ignored you rather than like it hit an error. note the try/catch alone
+  // can't see this — a rejected request and an aborted transaction are
+  // events, not throws. quota is the usual reason, and the tile cache in
+  // this same origin is what eats it, so failures say where storage stands
+  const idbPutChecked = (key, value, store = 'app') => new Promise((res) => {
+    const fail = (why, err) => {
+      console.warn(`idb: ${why} storing '${key}'`, err || '');
+      if (navigator.storage && navigator.storage.estimate)
+        navigator.storage.estimate().then((e) => console.warn(
+          `idb: origin is using ${Math.round((e.usage || 0) / 1e6)} MB`
+          + ` of ${Math.round((e.quota || 0) / 1e6)} MB`));
+      res(false);
+    };
+    if (!db) {
+      console.warn(`idb: no database open, '${key}' not saved`);
+      res(false);
+      return;
+    }
+    try {
+      const tx = db.transaction(store, 'readwrite');
+      const rq = tx.objectStore(store).put(value, key);
+      rq.onerror = () => fail('put failed', rq.error);
+      tx.onabort = () => fail('transaction aborted', tx.error);
+      tx.oncomplete = () => res(true);
+    } catch (e) { fail('put threw', e); }
+  });
   const idbDel = (key, store = 'tiles') => {
     try { db.transaction(store, 'readwrite').objectStore(store).delete(key); } catch (e) {}
   };
+
+  // --- tile cache lru -------------------------------------------------------
+  // an unbounded tile cache eventually eats the origin's whole quota (firefox
+  // caps a group at 10 GiB), and then *every* write fails — including the
+  // dropped gpx and the reference photo, which share this database. that
+  // shows up as the page quietly restoring the file before last, which is a
+  // miserable thing to debug. so the tiles get a byte budget and the oldest
+  // go first.
+  //
+  // the bookkeeping is one small record per tile rather than a scan: sizes
+  // can't be read back from indexeddb without reading the values themselves,
+  // which is the thing being avoided. it is held in memory for the session
+  // and mirrored to 'tilemeta' so the next session starts knowing the size of
+  // the cache rather than having to measure it.
+  // a quarter of what the browser offers, held between 512 MiB and 4 GiB.
+  // measured rather than guessed: a tile averages about 4 KB, so even the
+  // floor is a hundred thousand of them, and past the ceiling the extra hits
+  // are places you flew over months ago. what it does NOT do is reason about
+  // how full the storage already is — see sizeTileBudget
+  const TILE_BUDGET_SHARE = 0.25;
+  const TILE_BUDGET_MIN = 512 * 1024 * 1024;
+  const TILE_BUDGET_MAX = 4 * 1024 * 1024 * 1024;
+  let tileBudget = TILE_BUDGET_MIN; // until the estimate comes back
+  const TILE_LOW_WATER = 0.85;   // an eviction pass clears down to this much
+  const TILE_TOUCH_MS = 300000;  // rewrite a tile's last-use at most this often
+  const tileMeta = new Map();    // path -> { n: bytes, t: last use, w: last written }
+  let tileBytes = 0, evicting = false, quotaWarned = false, purging = false;
+
+  // pick up where the last session left off, so the budget spans sessions
+  // instead of resetting to zero on every reload. deliberately not awaited:
+  // until it lands the cache simply looks empty, which costs an eviction pass
+  // that runs a little late, not correctness
+  dbOpen.then((d) => {
+    if (!d) return;
+    try {
+      const tx = d.transaction('tilemeta');
+      const st = tx.objectStore('tilemeta');
+      const keys = st.getAllKeys(), vals = st.getAll();
+      tx.oncomplete = () => {
+        const k = keys.result || [], v = vals.result || [];
+        for (let i = 0; i < k.length; i++) {
+          if (!v[i] || !(v[i].n > 0)) continue;
+          tileMeta.set(k[i], { n: v[i].n, t: v[i].t || 0, w: v[i].t || 0 });
+          tileBytes += v[i].n;
+        }
+        // what the store holds against what the bookkeeping knows about: the
+        // gap is the leftovers, and seeing it stated is the difference
+        // between "there was nothing to purge" and "the purge did nothing"
+        try {
+          const cq = d.transaction('tiles').objectStore('tiles').count();
+          cq.onsuccess = () => console.log(`tile cache: ${cq.result} tiles in the store,`
+            + ` ${tileMeta.size} of them accounted for (${Math.round(tileBytes / 1e6)} MB)`);
+        } catch (e) {}
+        // deliberately no sizeTileBudget() here: until the purge below has
+        // run, the origin's usage is mostly tiles this bookkeeping cannot see,
+        // and subtracting them as "someone else's" collapses the budget to
+        // its floor. the provisional value stands until the truth is known
+        purgeUnbookkept();
+      };
+    } catch (e) {}
+  });
+
+  // oldest-first until the cache is back under the low-water mark. one sort
+  // per pass, and a pass only comes round again once the cache has grown all
+  // the way back to the budget, so the cost is amortised into nothing.
+  // `hard` is the quota-error path: the accounting says there is room but the
+  // browser disagrees, and the browser is the one that counts
+  const evictTiles = async (hard) => {
+    if (evicting || !db) return;
+    evicting = true;
+    try {
+      let target = tileBudget * TILE_LOW_WATER;
+      if (hard) target = Math.min(target, tileBytes * 0.7);
+      if (tileBytes <= target) return;
+      const oldest = [...tileMeta.entries()].sort((a, b) => a[1].t - b[1].t);
+      const doomed = [];
+      let freed = 0;
+      for (const [path, m] of oldest) {
+        if (tileBytes - freed <= target) break;
+        doomed.push(path);
+        freed += m.n;
+      }
+      if (!doomed.length) return;
+      await new Promise((res) => {
+        try {
+          const tx = db.transaction(['tiles', 'tilemeta'], 'readwrite');
+          const tiles = tx.objectStore('tiles'), meta = tx.objectStore('tilemeta');
+          for (const p of doomed) { tiles.delete(p); meta.delete(p); }
+          tx.oncomplete = tx.onabort = () => res();
+        } catch (e) { res(); }
+      });
+      for (const p of doomed) tileMeta.delete(p);
+      tileBytes -= freed;
+      console.log(`tile cache: evicted ${doomed.length} tiles (${Math.round(freed / 1e6)} MB),`
+        + ` now ${Math.round(tileBytes / 1e6)} MB`);
+    } finally { evicting = false; }
+  };
+
+  // a tile was just read or written: it is the most recently used one now.
+  // the mirror write is rate-limited — an exact last-use is worth nothing
+  // here, and one small write per cache hit would cost more than the eviction
+  // order it buys
+  const noteTileUse = (path, n) => {
+    const now = Date.now();
+    const m = tileMeta.get(path);
+    if (m) {
+      if (m.n !== n) { tileBytes += n - m.n; m.n = n; }
+      m.t = now;
+      if (now - m.w < TILE_TOUCH_MS) return;
+      m.w = now;
+    } else {
+      tileMeta.set(path, { n, t: now, w: now });
+      tileBytes += n;
+    }
+    idbPut(path, { n, t: now }, 'tilemeta');
+  };
+
+  // delete the tiles the bookkeeping doesn't know about — everything written
+  // before the budget existed. a key cursor in chunks, with a gap between
+  // transactions, so several gigabytes go away without the page noticing;
+  // interrupting it just means the next session picks up where this stopped.
+  // a tile cached *during* the purge is spared as soon as its meta record
+  // lands, and in the sliver before that it can be deleted again — which
+  // costs one re-download and nothing else
+  const purgeUnbookkept = async () => {
+    if (!db) return;
+    const CHUNK = 2000;
+    let after = null, gone = 0, said = false;
+    purging = true;
+    for (;;) {
+      const keys = await new Promise((res) => {
+        try {
+          // undefined, never null: null is an invalid key range and throws
+          // DataError, which a swallowed catch turns into "nothing to purge"
+          const range = after === null ? undefined : IDBKeyRange.lowerBound(after, true);
+          const rq = db.transaction('tiles').objectStore('tiles').getAllKeys(range, CHUNK);
+          rq.onsuccess = () => res(rq.result || []);
+          rq.onerror = () => { console.warn('tile purge: read failed', rq.error); res([]); };
+        } catch (e) { console.warn('tile purge: read threw', e); res([]); }
+      });
+      if (!keys.length) break;
+      after = keys[keys.length - 1];
+      const doomed = keys.filter((k) => !tileMeta.has(k));
+      if (doomed.length) {
+        await new Promise((res) => {
+          try {
+            const tx = db.transaction('tiles', 'readwrite');
+            const st = tx.objectStore('tiles');
+            for (const k of doomed) st.delete(k);
+            tx.oncomplete = () => res();
+            tx.onabort = () => { console.warn('tile purge: delete aborted', tx.error); res(); };
+          } catch (e) { console.warn('tile purge: delete threw', e); res(); }
+        });
+        gone += doomed.length;
+        // this can run for minutes on a cache that filled the origin, and a
+        // silent minutes-long background job is indistinguishable from a
+        // broken one, so it says what it is doing
+        if (!said) {
+          said = true;
+          console.log('tile cache: clearing tiles left over from before the budget…');
+        } else if (gone % 20000 < CHUNK) {
+          console.log(`tile cache: ${gone} leftover tiles cleared so far…`);
+        }
+      }
+      await new Promise((r) => setTimeout(r, 30)); // let the frame loop breathe
+    }
+    purging = false;
+    if (gone) console.log(`tile cache: cleared ${gone} leftover tiles`);
+    // only now is the origin's usage a fair description of what is actually
+    // there, so this is where the budget can be sized honestly
+    sizeTileBudget();
+  };
+
+  // the tile write, with the accounting and the quota escape hatch attached
+  const putTile = (path, bytes) => {
+    if (!db) return;
+    try {
+      const tx = db.transaction('tiles', 'readwrite');
+      tx.objectStore('tiles').put(bytes, path);
+      tx.oncomplete = () => {
+        noteTileUse(path, bytes.length);
+        if (tileBytes > tileBudget) evictTiles(false);
+      };
+      tx.onabort = () => {
+        if (!quotaWarned) {
+          quotaWarned = true;
+          console.warn('tile write failed (quota?)', tx.error || '');
+        }
+        // while the purge is running, the room is already on its way: evicting
+        // here would throw away the newly cached tiles — the only ones the
+        // bookkeeping can see — to make space the purge is about to free
+        if (!purging) evictTiles(true);
+      };
+    } catch (e) {}
+  };
+
+  const clearTiles = () => new Promise((res) => {
+    if (!db) { res(false); return; }
+    try {
+      const tx = db.transaction(['tiles', 'tilemeta'], 'readwrite');
+      tx.objectStore('tiles').clear();
+      tx.objectStore('tilemeta').clear();
+      tx.oncomplete = () => {
+        tileMeta.clear();
+        tileBytes = 0;
+        console.log('tile cache cleared; tiles will re-download as you fly');
+        res(true);
+      };
+      tx.onabort = () => { console.warn('tile cache clear aborted', tx.error); res(false); };
+    } catch (e) { console.warn('tile cache clear threw', e); res(false); }
+  });
+
+  // the budget is a share of the quota, and deliberately ignores `usage`.
+  // firefox pools storage by group rather than by origin — every localhost
+  // port reports the same usage — so on a dev machine `usage` describes
+  // whatever else that browser profile has stored under this host, which is
+  // nothing this page can see, evict, or reason about. subtracting it once
+  // pinned this cache to its floor because an unrelated project was sitting
+  // on ten gigabytes. the quota is still worth reading: it is what the
+  // browser is willing to offer at all
+  function sizeTileBudget() {
+    if (!navigator.storage || !navigator.storage.estimate) return;
+    navigator.storage.estimate().then((e) => {
+      if (!e.quota) return;
+      tileBudget = Math.min(TILE_BUDGET_MAX,
+        Math.max(TILE_BUDGET_MIN, e.quota * TILE_BUDGET_SHARE));
+      const mb = (b) => Math.round(b / 1e6) + ' MB';
+      console.log(`tile cache: ${mb(tileBytes)} in ${tileMeta.size} tiles,`
+        + ` budget ${mb(tileBudget)} of a ${mb(e.quota)} quota`
+        + ` (${mb(e.usage || 0)} used across everything stored under this host)`);
+      if ((e.usage || 0) > e.quota * 0.9)
+        console.warn('idb: this host is near its storage limit, so writes may fail —'
+          + ' and by the numbers above, most of that is not this page');
+      if (tileBytes > tileBudget) evictTiles(false);
+    });
+  }
 
   // --- module + view --------------------------------------------------------
   const Module = await createEarthModule();
@@ -279,13 +593,16 @@
     stats.inflight++;
     try {
       let bytes = path[0] !== 'P' ? await idbGet(path) : undefined;
-      if (bytes) stats.idbHits++;
+      // a hit is a use: it moves the tile to the young end of the lru, and
+      // re-registers one whose bookkeeping went missing (a meta write that
+      // failed, or a store carried over from before the budget existed)
+      if (bytes) { stats.idbHits++; noteTileUse(path, bytes.length); }
       if (!bytes) {
         const resp = await fetch('https://kh.google.com/rt/earth/' + path);
         if (!resp.ok) throw new Error('http ' + resp.status);
         bytes = new Uint8Array(await resp.arrayBuffer());
         stats.netHits++;
-        if (path[0] !== 'P') idbPut(path, bytes);
+        if (path[0] !== 'P') putTile(path, bytes);
       }
       stats.delivered++;
       Module.deliverFetch(id, true, bytes);
@@ -1152,7 +1469,12 @@
     pathEls.name.textContent = path.name || 'path';
     pathEls.name.title = path.name || '';
     pathEls.stats.textContent = `${path.pts} pts · ${path.km.toFixed(1)} km`
-      + (path.segs.length > 1 ? ` · ${path.segs.length} segments` : '');
+      + (path.segs.length > 1 ? ` · ${path.segs.length} segments` : '')
+      + (path.saved === false ? ' · NOT SAVED' : '');
+    pathEls.stats.title = path.saved === false
+      ? "this track couldn't be written to the browser's storage (it's probably"
+        + ' full) — a reload will come back to whatever was stored before it'
+      : '';
   };
 
   // `fresh` marks a file the user just dropped, as opposed to one being
@@ -1192,8 +1514,13 @@
     if (!parsed) { alert('could not read a track out of ' + file.name); return; }
     if (!parsed.name) parsed.name = file.name.replace(/\.gpx$/i, '');
     setPath(parsed, true);
-    idbPut('gpx-file', file, 'app');
     fitPath();
+    // and say so in the panel if it didn't stick, rather than letting the
+    // next reload quietly serve whatever track was stored before this one
+    const stored = await idbPutChecked('gpx-file', file);
+    // another file may have been dropped while that was in flight; it owns
+    // the store now, and this result says nothing about it
+    if (path === parsed) { path.saved = stored; refreshPathPanel(); }
     canvas.focus(); // the drop shouldn't cost you the flight keys
   };
 
@@ -2091,6 +2418,7 @@
   window.__demo = { view, map, marker, isFollowing: () => following,
     tube: () => ({ rect: tubeRect, on: tubeOn, curl }),
     path: () => path, loadGpx: (text) => setPath(parseGpx(text), true),
+    clearTiles,
     align: () => ({ pairs, solving, dof: dofCount(), errs: lastErrs }),
     solve: startSolve };
 

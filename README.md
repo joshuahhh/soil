@@ -33,6 +33,46 @@ build needs (expect one automatic reload on first visit).
 
 #### Tile cache and console
 
+Downloaded tiles are cached in indexeddb, keyed by rocktree path, under a
+**byte budget with least-recently-used eviction**: a quarter of the quota the
+browser offers, held between 512 MiB and 4 GiB. A tile averages about 4 KB, so
+even the floor is a hundred thousand of them.
+
+The budget pointedly ignores `estimate().usage`. Firefox pools storage by
+*group* rather than by origin — every localhost port reports the same usage —
+so on a dev machine that number describes whatever else the browser has stored
+under `localhost`, which this page can neither see nor evict. An earlier
+version subtracted it as "not ours" and pinned the cache to its floor because
+an unrelated project was sitting on ten gigabytes. Having a budget at all is
+the whole point: an unbounded cache eventually takes the
+origin's entire quota, and once that happens *every* write fails, not just
+tile writes — the dropped gpx and the reference photo live in the same
+database, so a full cache surfaces as the page quietly restoring the file
+before last rather than as an error. That is a miserable thing to diagnose,
+which is why those two writes are now checked and report failure (console,
+plus `NOT SAVED` in the path panel).
+
+Sizes can't be read back from indexeddb without reading the values, which is
+the thing being avoided, so each tile gets a small `tilemeta` record holding
+its size and last use. That's held in memory for the session and mirrored to
+the store — rate-limited to one write per tile per five minutes, since an
+exact last-use is worth nothing here and a write per cache hit would cost more
+than the ordering it buys. An eviction pass sorts once and clears down to 85%
+of the budget, so the next pass is a long way off. A write that fails anyway
+(the accounting says there's room, the browser disagrees, and the browser is
+the one that counts) triggers a harder pass.
+
+Tiles written before the bookkeeping existed have no size the budget can see,
+so db version 3 gets rid of them — but *not* in the upgrade transaction. A
+`clear()` on several gigabytes holds `open()` until it finishes, and since the
+whole page used to sit behind that await, the result was two blank panes, an
+empty console, and no sign anything was happening. Nothing may hold up the
+page: the connection is awaited by nobody, every helper tolerates a null `db`
+and falls through to the network, and the leftover tiles are deleted by a
+background key-cursor pass in chunks of 2000 with a gap between transactions.
+Interrupting that just means the next session picks up where it stopped.
+`__demo.clearTiles()` empties everything by hand.
+
 Per-tile decode timing (`timing: decode node ... dur=...`) is off by default —
 it's a line per node and a settling view decodes hundreds. `?timing` turns it
 back on. The 2-second `sections avg ms:` line is unconditional; that one is
