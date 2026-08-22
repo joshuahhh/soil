@@ -913,7 +913,7 @@
   // frame: W/S dolly along the view, Q/E boom along view-up. arrows pan/tilt
   // so no mouse is needed. Z/X zoom (fov). -/= sticky speed gain. shift slow
   const keys = {};
-  const handled = new Set(['KeyW','KeyA','KeyS','KeyD','KeyQ','KeyE','KeyR','KeyF','KeyZ','KeyX','KeyG','KeyO','KeyC','KeyL','KeyM','KeyT','KeyP','KeyV',
+  const handled = new Set(['KeyW','KeyA','KeyS','KeyD','KeyQ','KeyE','KeyR','KeyF','KeyZ','KeyX','KeyG','KeyO','KeyC','KeyK','KeyL','KeyM','KeyT','KeyP','KeyV',
     'Space','ArrowLeft','ArrowRight','ArrowUp','ArrowDown','Minus','Equal','Digit0','Numpad0','Home']);
   let gain = 1; // re-initialized from the saved view once it loads
   let ortho = false;
@@ -982,6 +982,9 @@
     // like the native app's L key: tint octants red where a finer tile is
     // wanted but not yet downloaded
     if (e.code === 'KeyL' && !e.repeat) { debugLod = !debugLod; view.setDebugLod(debugLod); }
+    // K, its neighbour: draw the smoothed copy of the track the follow camera
+    // actually aims down, dashed on the map beside the track it was made from
+    if (e.code === 'KeyK' && !e.repeat) setDebugSmooth(!debugSmooth);
     // mipmap A/B. only bites on the uncompressed texture path, so it's the
     // ?jpg build where you can see it — and it's motion that shows it, not a
     // still frame: watch distant ground crawl as you fly
@@ -1245,6 +1248,11 @@
         'circle-color': ['case', ['==', ['get', 'end'], 'start'], '#fff', pathStyle.color],
         'circle-stroke-width': 2, 'circle-stroke-color': pathStyle.color,
         'circle-opacity': pathStyle.opacity, 'circle-stroke-opacity': pathStyle.opacity } });
+    map.addSource('gpx-smooth', { type: 'geojson',
+      data: { type: 'FeatureCollection', features: [] } });
+    map.addLayer({ id: 'gpx-smooth-line', type: 'line', source: 'gpx-smooth',
+      layout: { 'line-cap': 'round', 'line-join': 'round' },
+      paint: { 'line-color': '#22d3ee', 'line-width': 2, 'line-dasharray': [2, 2] } });
     setPathData();
   });
   const axisBtn = document.getElementById('axisbtn');
@@ -1320,7 +1328,8 @@
   let path = null;   // { name, segs: [[{lat, lon, ele}, ...], ...], pts, km }
   const pathStyle = { color: '#ff7f0e', opacity: 0.9, width: 3, drape: true };
   const pathEls = {};
-  for (const k of ['name', 'stats', 'progress', 'color', 'opacity', 'width', 'drape', 'close', 'fit', 'go', 'follow'])
+  for (const k of ['name', 'stats', 'progress', 'color', 'opacity', 'width', 'drape',
+    'close', 'fit', 'go', 'follow'])
     pathEls[k] = document.getElementById('path' + k);
 
   // gpx is xml with a default namespace; a plain type selector matches an
@@ -1385,6 +1394,8 @@
   const setPathData = () => {
     const src = map.getSource('gpx');
     if (src) src.setData(pathFC());
+    const dbg = map.getSource('gpx-smooth');
+    if (dbg) dbg.setData({ type: 'FeatureCollection', features: [] });
   };
   // one place for the style, applied to both views. the map layers may not
   // exist yet (style still loading), which setPathData's guard also covers
@@ -1527,6 +1538,9 @@
     // eased heading and altitude so they don't drift in from the old place
     fol.s = 0;
     fol.heading = fol.alt = null;
+    // the debug line belongs to a particular track: redraw it for this one
+    // (setPathData has just cleared the old one)
+    if (debugSmooth && spine) setDebugSmooth(true);
     if (!spine) setFollow(false); // nothing left to ride
     setPathData();
     pushPath();
@@ -1599,15 +1613,22 @@
   // a chord across a couple hundred meters of *that* rather than from any one
   // segment. a temporal ease on top absorbs what survives.
   const SPINE_STEP = 10;       // m between resampled points
-  const SPINE_SMOOTH = 60;     // m: smoothing window the heading is taken from
-  // the camera aims off its own, much lighter smoothing. a gps fix wanders a
-  // few metres, which the camera must not inherit — but the heading's 60 m
-  // window cuts a switchback's corner by tens of metres, and aiming there
-  // would leave the marker (which is on the drawn line, where it belongs)
-  // visibly off-centre through every bend. 20 m kills the wander and hugs
-  // the shape to within a couple of metres
-  const SPINE_AIM_SMOOTH = 20; // m: smoothing window the camera aims down
-  const SPINE_CHORD = 150;     // m: half-chord the heading is measured over
+  // the smoothing windows are fractions of what the view spans, not fixed
+  // distances. a fixed window is only ever right at one zoom: 20 m of
+  // smoothing is the difference between a steady camera and a shaky one from
+  // 60 m out, and nothing at all from 2 km up, where the same track reads as
+  // rigidly locked to its marker. the fractions are set so the default
+  // standoff reproduces the fixed windows they replace — about 20 m for the
+  // aim, 60 m for the heading, a 150 m chord.
+  //
+  // the camera aims down the lighter one: a gps fix wanders a few metres and
+  // the camera must not inherit that, but heavy smoothing cuts a switchback's
+  // corner by tens of metres, and aiming there leaves the marker (which is on
+  // the drawn line, where it belongs) off-centre through every bend
+  const AIM_SMOOTH_FRAC = 0.1;
+  const HEAD_SMOOTH_FRAC = 0.3;
+  const CHORD_FRAC = 0.6;
+  const SMOOTH_MIN = 8, SMOOTH_MAX = 4000; // m, either end of the scaling
   const FOLLOW_TURN_TAU = 500; // ms: ease on the heading
   const FOLLOW_ALT_TAU = 700;  // ms: and on the target's altitude, which steps
                                // as the drape measurements land
@@ -1618,12 +1639,40 @@
   // values actually used, null until the first frame seeds them
   const fol = { s: 0, az: 0, el: 22, dist: 250, heading: null, alt: null };
 
-  const boxcar = (a, half) => a.map((_, i) => {
-    let sum = 0;
-    for (let k = -half; k <= half; k++)
-      sum += a[Math.min(a.length - 1, Math.max(0, i + k))];
-    return sum / (2 * half + 1);
-  });
+  // box filter by prefix sum, O(n) whatever the window; the window shrinks at
+  // the ends rather than the values being clamped into it
+  const boxcar = (a, half) => {
+    const n = a.length, pre = new Float64Array(n + 1), out = new Float64Array(n);
+    for (let i = 0; i < n; i++) pre[i + 1] = pre[i] + a[i];
+    for (let i = 0; i < n; i++) {
+      const lo = Math.max(0, i - half), hi = Math.min(n - 1, i + half);
+      out[i] = (pre[hi + 1] - pre[lo]) / (hi - lo + 1);
+    }
+    return out;
+  };
+  const halfFor = (win) => Math.max(1, Math.round(win / SPINE_STEP / 2));
+  // the smoothed copies, filtered once and kept until the window they were
+  // filtered at has moved appreciably. the window follows the zoom, so it
+  // technically changes every frame — but quantizing it costs a sub-metre
+  // step in the aim and saves refiltering the track for a change nobody can
+  // see. two boxcars over the whole spine is O(n) and only runs while you are
+  // actually zooming; a per-frame kernel would run always
+  const SMOOTH_STALE = 0.08; // refilter once the window has moved this much
+  const smoothCache = new Map(); // 'aim' | 'head' -> { win, xs, ys }
+  const smoothed = (key, win) => {
+    const c = smoothCache.get(key);
+    if (c && Math.abs(win - c.win) < SMOOTH_STALE * c.win) return c;
+    const half = halfFor(win);
+    let xs = spine.rx, ys = spine.ry;
+    for (let pass = 0; pass < 2; pass++) { xs = boxcar(xs, half); ys = boxcar(ys, half); }
+    const built = { win, xs, ys };
+    smoothCache.set(key, built);
+    // the debug line is the aim copy itself, not a second filtering of it:
+    // a debug view that can disagree with the thing it depicts is worse than
+    // none at all
+    if (key === 'aim' && debugSmooth) drawSmoothLayer(built);
+    return built;
+  };
 
   const buildSpine = () => {
     spine = null;
@@ -1657,21 +1706,18 @@
       dAcc += len;
     }
     if (samples.length < 2) return;
-    const smooth = (win) => {
-      const half = Math.max(1, Math.round(win / SPINE_STEP / 2));
-      let x = samples.map((p) => p.x), y = samples.map((p) => p.y);
-      for (let pass = 0; pass < 2; pass++) { x = boxcar(x, half); y = boxcar(y, half); }
-      return [x, y];
-    };
-    const [xs, ys] = smooth(SPINE_SMOOTH);      // heading
-    const [axs, ays] = smooth(SPINE_AIM_SMOOTH); // aim
+    // resampled but *unsmoothed*: the smoothing happens per frame now, at
+    // whatever window the current view scale asks for
+    const rx = Float64Array.from(samples, (p) => p.x);
+    const ry = Float64Array.from(samples, (p) => p.y);
     // arc length along the *raw* points, which is what the ribbon is drawn
     // through and therefore what the cursor and the progress readout have to
     // speak. the spine is only ever consulted for which way the track heads
+    smoothCache.clear();
     const cum = new Float64Array(xy.length);
     for (let i = 1; i < xy.length; i++)
       cum[i] = cum[i - 1] + Math.hypot(xy[i][0] - xy[i - 1][0], xy[i][1] - xy[i - 1][1]);
-    spine = { xs, ys, axs, ays, idx: samples.map((p) => p.i), raw, cum, step: SPINE_STEP,
+    spine = { rx, ry, idx: samples.map((p) => p.i), raw, cum, step: SPINE_STEP,
       len: (samples.length - 1) * SPINE_STEP, rawLen: cum[cum.length - 1],
       lat0, lon0, mLat, mLon };
   };
@@ -1679,12 +1725,14 @@
   // the smoothing leaves the samples very slightly unevenly spaced, so s/step
   // is an approximation of arc length — by well under a percent, and nothing
   // here needs it to be exact
-  const spineAt = (s, xs, ys) => {
-    xs = xs || spine.xs; ys = ys || spine.ys;
-    const n = xs.length;
+  // a point on one of the smoothed copies, interpolated between the samples
+  // either side so it doesn't step as s crosses one
+  const spineAt = (s, sm) => {
+    const n = sm.xs.length;
     const u = Math.min(n - 1, Math.max(0, s / spine.step));
     const i = Math.min(n - 2, Math.floor(u)), f = u - i;
-    return [xs[i] + (xs[i + 1] - xs[i]) * f, ys[i] + (ys[i + 1] - ys[i]) * f];
+    return [sm.xs[i] + (sm.xs[i + 1] - sm.xs[i]) * f,
+      sm.ys[i] + (sm.ys[i + 1] - sm.ys[i]) * f];
   };
   // metres along the raw track -> fractional point index, and the point
   // itself. this is the number the ribbon is built from, so a cursor placed
@@ -1706,13 +1754,27 @@
   };
   const spineIdx = (s) => spine.idx[Math.min(spine.idx.length - 1,
     Math.max(0, Math.round(s / spine.step)))];
+  // how much ground the view spans at the target, in metres — the scale the
+  // smoothing windows are cut from. a parallel projection says so outright;
+  // in perspective it comes from the standoff and the fov, so both the R/F
+  // standoff and the Z/X zoom feed it
+  const followSpan = () => {
+    if (ortho) {
+      const e = view.getOrthoExtent();
+      if (e > 0) return 2 * e;
+    }
+    const fov = view.ready() ? view.getPose().fov : 45;
+    return Math.max(20, 2 * fol.dist * Math.tan(fov * D2R / 2));
+  };
+  const winFor = (frac, span) =>
+    Math.min(SMOOTH_MAX, Math.max(SMOOTH_MIN, frac * span));
   const spineLatLon = (xy) => ({ lat: spine.lat0 + xy[1] / spine.mLat,
     lon: spine.lon0 + xy[0] / spine.mLon });
   // which way the track heads at s, degrees clockwise from north, over a
   // chord rather than a segment (this is the anti-jitter measurement)
-  const spineHeading = (s) => {
-    const a = spineAt(Math.max(0, s - SPINE_CHORD));
-    const b = spineAt(Math.min(spine.len, s + SPINE_CHORD));
+  const spineHeading = (s, sm, chord) => {
+    const a = spineAt(Math.max(0, s - chord), sm);
+    const b = spineAt(Math.min(spine.len, s + chord), sm);
     const dx = b[0] - a[0], dy = b[1] - a[1];
     return Math.hypot(dx, dy) < 1e-6 ? null : Math.atan2(dx, dy) / D2R;
   };
@@ -1750,6 +1812,34 @@
       if (d < bd) { bd = d; best = i; }
     }
     return spine.cum[best];
+  };
+
+  // --- debug: draw what the camera is actually following ---------------------
+  // the smoothed copy is invisible by construction — it exists only as the
+  // thing the camera aims down — so when the marker floats off-centre there
+  // is nothing to look at to see why. this draws it on the map beside the
+  // track: dashed, in a contrasting color, at whatever window the current
+  // zoom is asking for. the gap between the two lines *is* the float
+  let debugSmooth = false;
+  const drawSmoothLayer = (sm) => {
+    const src = map.getSource('gpx-smooth');
+    if (!src || !spine) return;
+    const coords = [];
+    for (let i = 0; i < sm.xs.length; i++) {
+      const ll = spineLatLon([sm.xs[i], sm.ys[i]]);
+      coords.push([ll.lon, ll.lat]);
+    }
+    src.setData({ type: 'Feature', properties: { win: sm.win },
+      geometry: { type: 'LineString', coordinates: coords } });
+  };
+  const setDebugSmooth = (on) => {
+    debugSmooth = on;
+    const src = map.getSource('gpx-smooth');
+    if (src && !on) src.setData({ type: 'FeatureCollection', features: [] });
+    // draw whatever the camera is following right now; if it has not been
+    // following anything yet, filter at the window it would use
+    if (on && spine) drawSmoothLayer(smoothed('aim', winFor(AIM_SMOOTH_FRAC, followSpan())));
+    canvas.focus();
   };
 
   const setFollow = (on) => {
@@ -1790,9 +1880,15 @@
       fol.az += yaw / D2R;
       fol.el = Math.min(85, Math.max(-10, fol.el + pitch / D2R));
     }
-    // travel scaled to the standoff: from 20 m out a hiking pace is right,
-    // from 5 km up it would take all day
-    const speed = Math.max(15, fol.dist * 0.5) * gain;
+    // one notion of scale for everything that has to follow the zoom: how
+    // much ground the view spans (see followSpan). travel is scaled to it so
+    // motion looks the same on screen at any zoom — from 20 m out a hiking
+    // pace is right, from 5 km up it would take all day. this used to scale
+    // to the standoff alone, which is proportional to the span at a fixed fov
+    // and so felt right until you touched a zoom: Z/X moves the fov, and in
+    // ortho the wheel and Z/X move the extent, none of which is the standoff
+    const span = followSpan();
+    const speed = Math.max(15, span * 0.6) * gain;
     if (keys.KeyW) fol.s += speed * k;
     if (keys.KeyS) fol.s -= speed * k;
     fol.s = Math.min(spine.rawLen, Math.max(0, fol.s));
@@ -1812,12 +1908,19 @@
       fol.dist = Math.min(50000, Math.max(15, fol.dist / f));
     }
 
+    // the smoothing windows for this frame, cut from that same span: zoom out
+    // and the camera rides a longer average of the track, which is what keeps
+    // the same track from reading as rigid at altitude and shaky up close
+    const aimWin = winFor(AIM_SMOOTH_FRAC, span);
+    const headWin = winFor(HEAD_SMOOTH_FRAC, span);
+    const chord = winFor(CHORD_FRAC, span);
+    const aimSm = smoothed('aim', aimWin), headSm = smoothed('head', headWin);
     // the heading is the one thing still taken from the smoothed spine — the
     // jitter that matters is in the *direction* between raw points, not in
     // their positions. its arc length runs a hair short of the raw track's
     // (smoothing cuts corners), so the position is scaled across
     const sSpine = fol.s * (spine.len / Math.max(1, spine.rawLen));
-    const h = spineHeading(sSpine);
+    const h = spineHeading(sSpine, headSm, chord);
     if (h !== null) {
       if (fol.heading === null) fol.heading = h;
       else {
@@ -1841,11 +1944,12 @@
     view.setPathCursorIndex(ll.idx);
     pathEls.progress.textContent = `${(fol.s / 1000).toFixed(2)} of `
       + `${(spine.rawLen / 1000).toFixed(2)} km · `
-      + `${Math.round(100 * fol.s / Math.max(1, spine.rawLen))}%`;
+      + `${Math.round(100 * fol.s / Math.max(1, spine.rawLen))}%`
+      + (debugSmooth ? ` · smooth ${Math.round(aimWin)}/${Math.round(headWin)} m` : '');
     // the camera aims down its own lightly smoothed copy, never the raw
     // track: the marker has to be on the drawn line, the camera has to not
     // shake, and those are different requirements
-    const aim = spineLatLon(spineAt(sSpine, spine.axs, spine.ays));
+    const aim = spineLatLon(spineAt(sSpine, aimSm));
     const lat = aim.lat * D2R, lon = aim.lon * D2R;
     const up = geoUpV(lat, lon), north = geoNorthV(lat, lon), east = vcross(north, up);
     const bearing = ((fol.heading || 0) + fol.az) * D2R;

@@ -160,13 +160,41 @@ smoothed twice (two passes ≈ gaussian), and the heading is taken from a 300 m
 chord across *that* rather than from any one segment — with a half-second
 temporal ease on top for what survives.
 
-There are two smoothed copies, because the camera and the heading want
-different amounts. The heading comes off a 60 m window, which is heavy enough
-to ignore a wandering fix entirely; the camera aims down a 20 m one, which
-kills the wander but still hugs the shape. Aiming down the 60 m copy would
-leave the marker — which sits on the drawn line, where it belongs — visibly
-off-centre through every switchback, since that is exactly where heavy
-smoothing cuts the corner. The aim height comes from
+The camera and the heading want different amounts of it. The heading takes a
+window three times the camera's, heavy enough to ignore a wandering fix
+entirely; the camera aims down a lighter one that kills the wander but still
+hugs the shape. Aiming down the heading's copy would leave the marker — which
+sits on the drawn line, where it belongs — visibly off-centre through every
+switchback, since that is exactly where heavy smoothing cuts the corner.
+
+Follow mode has **one notion of scale**: how much ground the view spans at the
+target, from the ortho extent where there is one and from the standoff and fov
+otherwise. Travel speed is cut from it, so motion looks the same on screen at
+any zoom, and so are the smoothing windows below. Speed used to scale to the
+standoff alone — proportional to the span at a fixed fov, so it felt right
+until you touched a zoom, since Z/X moves the fov and in ortho the wheel and
+Z/X move the extent, none of which is the standoff.
+
+The windows are **fractions of that span** rather than fixed distances,
+because a fixed window is only ever right at one zoom: 20 m of
+smoothing is the difference between a steady camera and a shaky one from 60 m
+out, and nothing at all from 2 km up, where the same track reads as rigidly
+locked to its marker. Both the R/F standoff and the Z/X zoom feed it.
+
+The window therefore moves every frame, but it is quantized rather than
+followed exactly: each smoothed copy is filtered once and kept until the
+window has moved 8%, which costs a sub-metre step in the aim and saves
+refiltering the track for a change nobody can see. Two boxcars over the spine
+is O(n) and only runs while you are actually zooming, where evaluating a
+kernel per frame would run always.
+
+Since the smoothed copy exists only as the thing the camera aims down, there
+is nothing to look at when the marker floats off-centre. **K** (next to L, the
+lod debug; unlisted in the hud, unlike L) draws it on the map beside the
+track, dashed, and puts the two window sizes in the progress readout. It draws
+the aim copy *itself* rather than filtering its own — a debug view that can
+disagree with the thing it depicts is worse than none. The gap between the two
+lines is the float. The aim height comes from
 `getPathGroundAlt`, which reports the drape's measurement where it has one and
 NaN where it hasn't, so the camera rides the terrain rather than the track's
 GPS altitudes, easing between the two as the measurements land.

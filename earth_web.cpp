@@ -338,6 +338,12 @@ struct EarthView {
 	// orthographic projection; on entry the view extent is initialized to
 	// what the fov shows at the terrain distance, so the mode switch keeps
 	// the apparent scale — from then on only zooms change it
+	// the ortho half-extent in meters (0 in perspective). how much ground the
+	// view spans is the scale hosts reason about — the follow camera sizes its
+	// smoothing windows from it — and in a parallel projection nothing else
+	// tells you: distance from the subject means nothing there
+	double getOrthoExtent() { return camera.ortho ? camera.ortho_extent : 0.0; }
+
 	void setOrtho(bool on) {
 		camera.ortho = on;
 		if (on)
@@ -627,6 +633,7 @@ EMSCRIPTEN_BINDINGS(earth) {
 		.function("setFov", &EarthView::setFov)
 		.function("setOrtho", &EarthView::setOrtho)
 		.function("getOrtho", &EarthView::getOrtho)
+		.function("getOrthoExtent", &EarthView::getOrthoExtent)
 		.function("setAirplane", &EarthView::setAirplane)
 		.function("setTerrainFollow", &EarthView::setTerrainFollow)
 		.function("orbit", &EarthView::orbit)
