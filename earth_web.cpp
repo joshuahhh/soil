@@ -176,6 +176,15 @@ struct EarthView {
 		earth.setPath(emscripten::convertJSArrayToNumberVector<double>(lla));
 	}
 	void clearPath() { earth.setPath({}); }
+	// mark one point of the track — where the follow camera is aiming — with
+	// a disc in the path's color. degrees/meters, alt from the sphere
+	void setPathCursor(double lat, double lon, double alt) {
+		earth.setPathCursor(lat, lon, alt);
+	}
+	// the same marker, placed by fractional point index so it lands on the
+	// drawn line itself rather than wherever the caller thinks the line is
+	void setPathCursorIndex(double idx) { earth.setPathCursorIndex(idx); }
+	void clearPathCursor() { earth.clearPathCursor(); }
 	void setPathStyle(int rgb, double opacity, double width_px, bool drape) {
 		earth.setPathStyle((rgb >> 16 & 0xff) / 255.0f, (rgb >> 8 & 0xff) / 255.0f,
 			(rgb & 0xff) / 255.0f, (float)opacity, (float)width_px, drape);
@@ -633,6 +642,9 @@ EMSCRIPTEN_BINDINGS(earth) {
 		.function("getTubeInfo", &EarthView::getTubeInfo)
 		.function("setPath", &EarthView::setPath)
 		.function("clearPath", &EarthView::clearPath)
+		.function("setPathCursor", &EarthView::setPathCursor)
+		.function("setPathCursorIndex", &EarthView::setPathCursorIndex)
+		.function("clearPathCursor", &EarthView::clearPathCursor)
 		.function("setPathStyle", &EarthView::setPathStyle)
 		.function("getPathGroundAlt", &EarthView::getPathGroundAlt)
 		.function("setSkyColor", &EarthView::setSkyColor)

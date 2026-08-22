@@ -12,7 +12,10 @@
 // default vao — untouched
 struct path_gl_t {
 	GLuint program = 0, vbo = 0, vao = 0;
-	GLint transform_loc, viewport_loc, width_loc, color_loc, bias_loc;
+	// the follow cursor is one quad, rewritten every frame, so it gets its
+	// own buffer rather than disturbing the ribbon's
+	GLuint cur_vbo = 0, cur_vao = 0;
+	GLint transform_loc, viewport_loc, width_loc, color_loc, bias_loc, round_loc;
 	GLint pos_a_loc, pos_b_loc, end_loc, side_loc;
 	int vert_count = 0;
 };
@@ -284,6 +287,9 @@ void renderPathInit(render_ctx_t &ctx) {
 		"in vec3 pos_b;"
 		"in float end;"
 		"in float side;"
+		// which corner of the quad this is, for the round cursor; zero along
+		// a ribbon, where there is nothing to round off
+		"out vec2 v_corner;"
 		"void main() {"
 		"	vec4 a = transform * vec4(pos_a, 1.0);"
 		"	vec4 b = transform * vec4(pos_b, 1.0);"
@@ -302,8 +308,8 @@ void renderPathInit(render_ctx_t &ctx) {
 		"	vec2 off;"
 		// a degenerate segment is a join patch: an axis-aligned square, using
 		// the two corner bits as its two signs
-		"	if (dot(d, d) < 1e-8) off = vec2(end * 2.0 - 1.0, side) * (0.5 * width);"
-		"	else off = normalize(vec2(-d.y, d.x)) * (side * 0.5 * width);"
+		"	if (dot(d, d) < 1e-8) { v_corner = vec2(end * 2.0 - 1.0, side); off = v_corner * (0.5 * width); }"
+		"	else { v_corner = vec2(0.0); off = normalize(vec2(-d.y, d.x)) * (side * 0.5 * width); }"
 		"	p.xy += off / half_vp * p.w;"
 		"	p.z -= bias * p.w;"
 		"	gl_Position = p;"
@@ -312,31 +318,53 @@ void renderPathInit(render_ctx_t &ctx) {
 		"#version 300 es\n"
 		"precision highp float;\n"
 		"uniform vec4 color;"
+		// the cursor quad is drawn as a disc: a white core inside a ring of
+		// the path's color, the same marker the map draws. msaa can't help
+		// with either edge — a hole punched by the fragment shader isn't a
+		// geometry edge — so the rim is faded over the last fifth of the
+		// radius and the core's edge over a sliver of it
+		"uniform bool round_dot;"
+		"in vec2 v_corner;"
 		"out vec4 frag_color;"
-		"void main() { frag_color = color; }"
+		"void main() {"
+		"	float a = color.a;"
+		"	vec3 rgb = color.rgb;"
+		"	if (round_dot) {"
+		"		float d = length(v_corner);"
+		"		a *= 1.0 - smoothstep(0.8, 1.0, d);"
+		"		rgb = mix(vec3(1.0), rgb, smoothstep(0.46, 0.56, d));"
+		"	}"
+		"	if (a <= 0.0) discard;"
+		"	frag_color = vec4(rgb, a);"
+		"}"
 	);
 	p.transform_loc = glGetUniformLocation(p.program, "transform");
 	p.viewport_loc = glGetUniformLocation(p.program, "viewport");
 	p.width_loc = glGetUniformLocation(p.program, "width");
 	p.bias_loc = glGetUniformLocation(p.program, "bias");
 	p.color_loc = glGetUniformLocation(p.program, "color");
+	p.round_loc = glGetUniformLocation(p.program, "round_dot");
 	p.pos_a_loc = glGetAttribLocation(p.program, "pos_a");
 	p.pos_b_loc = glGetAttribLocation(p.program, "pos_b");
 	p.end_loc = glGetAttribLocation(p.program, "end");
 	p.side_loc = glGetAttribLocation(p.program, "side");
 	glGenVertexArrays(1, &p.vao);
 	glGenBuffers(1, &p.vbo);
-	glBindVertexArray(p.vao);
-	glBindBuffer(GL_ARRAY_BUFFER, p.vbo);
+	glGenVertexArrays(1, &p.cur_vao);
+	glGenBuffers(1, &p.cur_vbo);
 	const GLsizei stride = 8 * sizeof(float);
-	glEnableVertexAttribArray(p.pos_a_loc);
-	glVertexAttribPointer(p.pos_a_loc, 3, GL_FLOAT, GL_FALSE, stride, (void *)0);
-	glEnableVertexAttribArray(p.pos_b_loc);
-	glVertexAttribPointer(p.pos_b_loc, 3, GL_FLOAT, GL_FALSE, stride, (void *)(3 * sizeof(float)));
-	glEnableVertexAttribArray(p.end_loc);
-	glVertexAttribPointer(p.end_loc, 1, GL_FLOAT, GL_FALSE, stride, (void *)(6 * sizeof(float)));
-	glEnableVertexAttribArray(p.side_loc);
-	glVertexAttribPointer(p.side_loc, 1, GL_FLOAT, GL_FALSE, stride, (void *)(7 * sizeof(float)));
+	for (int pass = 0; pass < 2; pass++) {
+		glBindVertexArray(pass ? p.cur_vao : p.vao);
+		glBindBuffer(GL_ARRAY_BUFFER, pass ? p.cur_vbo : p.vbo);
+		glEnableVertexAttribArray(p.pos_a_loc);
+		glVertexAttribPointer(p.pos_a_loc, 3, GL_FLOAT, GL_FALSE, stride, (void *)0);
+		glEnableVertexAttribArray(p.pos_b_loc);
+		glVertexAttribPointer(p.pos_b_loc, 3, GL_FLOAT, GL_FALSE, stride, (void *)(3 * sizeof(float)));
+		glEnableVertexAttribArray(p.end_loc);
+		glVertexAttribPointer(p.end_loc, 1, GL_FLOAT, GL_FALSE, stride, (void *)(6 * sizeof(float)));
+		glEnableVertexAttribArray(p.side_loc);
+		glVertexAttribPointer(p.side_loc, 1, GL_FLOAT, GL_FALSE, stride, (void *)(7 * sizeof(float)));
+	}
 	glBindVertexArray(0);
 }
 
@@ -348,6 +376,45 @@ void renderPathUpload(render_ctx_t &ctx, const float *data, int vert_count) {
 	glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)vert_count * 8 * sizeof(float),
 		vert_count ? data : nullptr, GL_DYNAMIC_DRAW);
 	glBindBuffer(GL_ARRAY_BUFFER, 0);
+}
+
+// the follow cursor: one degenerate quad at a point, which the shader turns
+// into a screen-space disc — the marker for where you are along the track.
+// same depth treatment as the ribbon it sits on, so a shoulder of terrain
+// hides it exactly when it hides the line
+void renderPathCursorDraw(render_ctx_t &ctx, const float *transform16, const float *rgba,
+		float size_px, float bias, int w, int h, const float *pos3) {
+	auto &p = ctx.path;
+	float v[6 * 8];
+	static const float corners[6][2] = {
+		{ 0, -1 }, { 0, 1 }, { 1, 1 }, { 0, -1 }, { 1, 1 }, { 1, -1 } };
+	for (int i = 0; i < 6; i++) {
+		float *d = v + i * 8;
+		d[0] = d[3] = pos3[0];
+		d[1] = d[4] = pos3[1];
+		d[2] = d[5] = pos3[2];
+		d[6] = corners[i][0];
+		d[7] = corners[i][1];
+	}
+	glUseProgram(p.program);
+	glBindVertexArray(p.cur_vao);
+	glBindBuffer(GL_ARRAY_BUFFER, p.cur_vbo);
+	glBufferData(GL_ARRAY_BUFFER, sizeof(v), v, GL_DYNAMIC_DRAW);
+	glUniformMatrix4fv(p.transform_loc, 1, GL_FALSE, transform16);
+	glUniform2f(p.viewport_loc, (float)w, (float)h);
+	glUniform1f(p.width_loc, size_px);
+	glUniform1f(p.bias_loc, bias);
+	glUniform4fv(p.color_loc, 1, rgba);
+	glUniform1i(p.round_loc, 1);
+	glDisable(GL_CULL_FACE);
+	glDepthMask(GL_FALSE);
+	glEnable(GL_BLEND);
+	glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+	glDrawArrays(GL_TRIANGLES, 0, 6);
+	glDisable(GL_BLEND);
+	glDepthMask(GL_TRUE);
+	glBindVertexArray(0);
+	glUseProgram(ctx.program);
 }
 
 // draw the uploaded ribbon. depth *test* on so terrain hides the parts of the
@@ -367,6 +434,7 @@ void renderPathDraw(render_ctx_t &ctx, const float *transform16, const float *rg
 	glUniform1f(p.width_loc, width_px);
 	glUniform1f(p.bias_loc, bias);
 	glUniform4fv(p.color_loc, 1, rgba);
+	glUniform1i(p.round_loc, 0);
 	glDisable(GL_CULL_FACE);
 	glDepthMask(GL_FALSE);
 	glEnable(GL_BLEND);

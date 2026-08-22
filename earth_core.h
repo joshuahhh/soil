@@ -450,6 +450,10 @@ struct earth_core_t {
 	bool path_drape = true;
 	float path_rgba[4] = { 1.0f, 0.45f, 0.05f, 0.9f };
 	float path_width = 3.0f;
+	// the follow cursor: one point of the track the host wants marked (its
+	// follow camera's aim point), drawn as a disc in the path's own color
+	bool path_cursor_on = false;
+	Vector3d path_cursor = Vector3d::Zero();
 	std::vector<float> path_verts;   // the built ribbon, 8 floats a vertex
 	bool path_dirty = false;         // geometry needs rebuilding + reuploading
 	size_t path_probe_at = 0;        // round-robin cursor for the drape probes
@@ -496,6 +500,37 @@ struct earth_core_t {
 		path_dirty = true;
 		path_rebuild_wait = 1000;
 	}
+
+	// degrees/meters like setPath's points; alt is measured from the sphere,
+	// so the host passes whatever altitude it is aiming at (see getPathGroundAlt)
+	// put the cursor exactly on the drawn ribbon, at a fractional index into
+	// the path's points: the ribbon is straight between consecutive points,
+	// so interpolating between the same two positions it was built from puts
+	// the disc on the line by construction — drape, lift and all. the host
+	// follows a smoothed copy of the track, and a dot placed from that copy
+	// visibly leaves the line wherever the smoothing cut a corner
+	void setPathCursorIndex(double idx) {
+		auto n = path_up.size();
+		if (n == 0) { path_cursor_on = false; return; }
+		auto c = fmax(0.0, fmin(idx, (double)(n - 1)));
+		size_t i = (size_t)c;
+		size_t j = i + 1 < n ? i + 1 : i;
+		auto f = c - (double)i;
+		// across a break there is no segment to sit on: hold the last point
+		// of the polyline that ended rather than float over the gap
+		if (j != i && path_brk[j]) { j = i; f = 0; }
+		Vector3d a = path_up[i] * pathPointRadius(i);
+		Vector3d b = path_up[j] * pathPointRadius(j);
+		path_cursor = a + (b - a) * f;
+		path_cursor_on = true;
+	}
+
+	void setPathCursor(double lat, double lon, double alt) {
+		auto R = planetoid && planetoid->downloaded ? planetoid->radius : 6371010.0;
+		path_cursor = geoUp(lat * M_PI / 180.0, lon * M_PI / 180.0) * (R + alt);
+		path_cursor_on = true;
+	}
+	void clearPathCursor() { path_cursor_on = false; }
 
 	void setPathStyle(float r, float g, float b, float alpha, float width, bool drape) {
 		path_rgba[0] = r; path_rgba[1] = g; path_rgba[2] = b; path_rgba[3] = alpha;
@@ -1299,6 +1334,13 @@ struct earth_core_t {
 			to_clip.col(3) = viewprojection * Vector4d(path_origin.x(), path_origin.y(), path_origin.z(), 1.0);
 			Matrix4f to_clip_f = to_clip.cast<float>();
 			renderPathDraw(ctx, to_clip_f.data(), path_rgba, path_width, path_depth_bias, width, height);
+			if (path_cursor_on) {
+				// the path's own color, exactly: the disc is the track's
+				// position marker, not a second thing sitting on it
+				Vector3f c = (path_cursor - path_origin).cast<float>();
+				renderPathCursorDraw(ctx, to_clip_f.data(), path_rgba,
+					fmaxf(11.0f, path_width * 3.0f), path_depth_bias, width, height, c.data());
+			}
 		}
 
 		static const bool audit_env = getenv("EARTH_AUDIT") != nullptr;

@@ -110,6 +110,9 @@
   #pathcolor::-webkit-color-swatch { border: 1px solid rgba(255,255,255,.4); border-radius: 3px; }
   #pathname { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   #pathstats { font: 11px monospace; opacity: .85; }
+  /* how far along the track the follow camera has got; only up while riding */
+  #pathprogress { display: none; font: 11px monospace; }
+  body.riding #pathprogress { display: block; }
   #alignpanel .tip, #pathpanel .tip { font: 10px sans-serif; opacity: .55; line-height: 1.35; }
   #aplist { overflow-y: auto; min-height: 0; display: flex; flex-direction: column; gap: 2px; }
   #aplist .pair { display: flex; align-items: center; gap: 6px; padding: 2px 4px;
@@ -200,6 +203,7 @@
     <div id="pathpanel" class="panel">
       <div class="head"><span id="pathname">path</span><button class="x" id="pathclose" title="remove path">✕</button></div>
       <div id="pathstats"></div>
+      <div id="pathprogress"></div>
       <div class="row">
         <input type="color" id="pathcolor" title="path color">
         <label style="flex:1">opacity<input id="pathopacity" type="range" min="5" max="100"></label>
@@ -1314,7 +1318,7 @@
   let path = null;   // { name, segs: [[{lat, lon, ele}, ...], ...], pts, km }
   const pathStyle = { color: '#ff7f0e', opacity: 0.9, width: 3, drape: true };
   const pathEls = {};
-  for (const k of ['name', 'stats', 'color', 'opacity', 'width', 'drape', 'close', 'fit', 'go', 'follow'])
+  for (const k of ['name', 'stats', 'progress', 'color', 'opacity', 'width', 'drape', 'close', 'fit', 'go', 'follow'])
     pathEls[k] = document.getElementById('path' + k);
 
   // gpx is xml with a default namespace; a plain type selector matches an
@@ -1384,6 +1388,7 @@
   // exist yet (style still loading), which setPathData's guard also covers
   const applyPathStyle = () => {
     const rgb = parseInt(pathStyle.color.slice(1), 16);
+    cursorEl.style.borderColor = pathStyle.color;
     if (view.ready())
       view.setPathStyle(rgb, pathStyle.opacity, pathStyle.width, pathStyle.drape);
     if (map.getLayer('gpx-line')) {
@@ -1411,6 +1416,25 @@
     });
     view.setPath(flat);
     applyPathStyle();
+  };
+
+  // where you are along the track, on the map: the 3d view marks the same
+  // point with a disc on the line itself (the engine's path cursor), but the
+  // map is where "how far along am i" is actually a readable question
+  const cursorEl = document.createElement('div');
+  cursorEl.style.cssText = 'width:13px;height:13px;border-radius:50%;background:#fff;'
+    + 'border:3px solid #ff7f0e;box-sizing:border-box;pointer-events:none;'
+    + 'box-shadow:0 0 0 1px rgba(0,0,0,.45);';
+  const cursorMarker = new maplibregl.Marker({ element: cursorEl });
+  let cursorOn = false;
+  const setCursor = (ll) => {
+    if (!ll) {
+      if (cursorOn) { cursorMarker.remove(); cursorOn = false; }
+      if (view.ready()) view.clearPathCursor();
+      return;
+    }
+    cursorMarker.setLngLat([ll.lon, ll.lat]);
+    if (!cursorOn) { cursorMarker.addTo(map); cursorOn = true; }
   };
 
   const savePath = () => {
@@ -1496,6 +1520,11 @@
       if (fresh || !path.hasEle) pathStyle.drape = !path.hasEle;
     }
     buildSpine();
+    // a different track means a different journey: start at its beginning
+    // rather than however far along the last one you had got, and drop the
+    // eased heading and altitude so they don't drift in from the old place
+    fol.s = 0;
+    fol.heading = fol.alt = null;
     if (!spine) setFollow(false); // nothing left to ride
     setPathData();
     pushPath();
@@ -1568,7 +1597,14 @@
   // a chord across a couple hundred meters of *that* rather than from any one
   // segment. a temporal ease on top absorbs what survives.
   const SPINE_STEP = 10;       // m between resampled points
-  const SPINE_SMOOTH = 60;     // m: position smoothing window
+  const SPINE_SMOOTH = 60;     // m: smoothing window the heading is taken from
+  // the camera aims off its own, much lighter smoothing. a gps fix wanders a
+  // few metres, which the camera must not inherit — but the heading's 60 m
+  // window cuts a switchback's corner by tens of metres, and aiming there
+  // would leave the marker (which is on the drawn line, where it belongs)
+  // visibly off-centre through every bend. 20 m kills the wander and hugs
+  // the shape to within a couple of metres
+  const SPINE_AIM_SMOOTH = 20; // m: smoothing window the camera aims down
   const SPINE_CHORD = 150;     // m: half-chord the heading is measured over
   const FOLLOW_TURN_TAU = 500; // ms: ease on the heading
   const FOLLOW_ALT_TAU = 700;  // ms: and on the target's altitude, which steps
@@ -1619,23 +1655,52 @@
       dAcc += len;
     }
     if (samples.length < 2) return;
-    const half = Math.max(1, Math.round(SPINE_SMOOTH / SPINE_STEP / 2));
-    let xs = samples.map((p) => p.x), ys = samples.map((p) => p.y);
-    for (let pass = 0; pass < 2; pass++) { xs = boxcar(xs, half); ys = boxcar(ys, half); }
-    spine = { xs, ys, idx: samples.map((p) => p.i), raw, step: SPINE_STEP,
-      len: (samples.length - 1) * SPINE_STEP, lat0, lon0, mLat, mLon };
-    fol.s = Math.min(fol.s, spine.len);
+    const smooth = (win) => {
+      const half = Math.max(1, Math.round(win / SPINE_STEP / 2));
+      let x = samples.map((p) => p.x), y = samples.map((p) => p.y);
+      for (let pass = 0; pass < 2; pass++) { x = boxcar(x, half); y = boxcar(y, half); }
+      return [x, y];
+    };
+    const [xs, ys] = smooth(SPINE_SMOOTH);      // heading
+    const [axs, ays] = smooth(SPINE_AIM_SMOOTH); // aim
+    // arc length along the *raw* points, which is what the ribbon is drawn
+    // through and therefore what the cursor and the progress readout have to
+    // speak. the spine is only ever consulted for which way the track heads
+    const cum = new Float64Array(xy.length);
+    for (let i = 1; i < xy.length; i++)
+      cum[i] = cum[i - 1] + Math.hypot(xy[i][0] - xy[i - 1][0], xy[i][1] - xy[i - 1][1]);
+    spine = { xs, ys, axs, ays, idx: samples.map((p) => p.i), raw, cum, step: SPINE_STEP,
+      len: (samples.length - 1) * SPINE_STEP, rawLen: cum[cum.length - 1],
+      lat0, lon0, mLat, mLon };
   };
 
   // the smoothing leaves the samples very slightly unevenly spaced, so s/step
   // is an approximation of arc length — by well under a percent, and nothing
   // here needs it to be exact
-  const spineAt = (s) => {
-    const n = spine.xs.length;
+  const spineAt = (s, xs, ys) => {
+    xs = xs || spine.xs; ys = ys || spine.ys;
+    const n = xs.length;
     const u = Math.min(n - 1, Math.max(0, s / spine.step));
     const i = Math.min(n - 2, Math.floor(u)), f = u - i;
-    return [spine.xs[i] + (spine.xs[i + 1] - spine.xs[i]) * f,
-      spine.ys[i] + (spine.ys[i + 1] - spine.ys[i]) * f];
+    return [xs[i] + (xs[i + 1] - xs[i]) * f, ys[i] + (ys[i + 1] - ys[i]) * f];
+  };
+  // metres along the raw track -> fractional point index, and the point
+  // itself. this is the number the ribbon is built from, so a cursor placed
+  // with it sits on the drawn line by construction
+  const rawAt = (s) => {
+    const cum = spine.cum;
+    let lo = 0, hi = cum.length - 1;
+    const d = Math.max(0, Math.min(s, spine.rawLen));
+    while (lo < hi) { // first index whose cumulative length is >= d
+      const mid = (lo + hi) >> 1;
+      if (cum[mid] < d) lo = mid + 1; else hi = mid;
+    }
+    const i = Math.max(0, lo - 1);
+    const leg = cum[i + 1] - cum[i];
+    const f = leg > 0 ? (d - cum[i]) / leg : 0;
+    const a = spine.raw[i], b = spine.raw[Math.min(i + 1, spine.raw.length - 1)];
+    return { idx: i + f,
+      lat: a.lat + (b.lat - a.lat) * f, lon: a.lon + (b.lon - a.lon) * f };
   };
   const spineIdx = (s) => spine.idx[Math.min(spine.idx.length - 1,
     Math.max(0, Math.round(s / spine.step)))];
@@ -1657,14 +1722,15 @@
   // averaging the two together would split the difference and park the
   // target inside the hillside
   const spineAlt = (s) => {
+    const at = (j) => Math.round(rawAt(s + j * 25).idx);
     let sum = 0, n = 0;
     for (let j = -3; j <= 3; j++) {
-      const a = view.getPathGroundAlt(spineIdx(s + j * 25));
+      const a = view.getPathGroundAlt(at(j));
       if (Number.isFinite(a)) { sum += a; n++; }
     }
     if (n) return sum / n;
     for (let j = -3; j <= 3; j++) {
-      const e = spine.raw[spineIdx(s + j * 25)].ele;
+      const e = spine.raw[at(j)].ele;
       if (Number.isFinite(e)) { sum += e; n++; }
     }
     return n ? sum / n : null;
@@ -1675,11 +1741,13 @@
     const p = view.getPose();
     const x = (p.lon - spine.lon0) * spine.mLon, y = (p.lat - spine.lat0) * spine.mLat;
     let best = 0, bd = Infinity;
-    for (let i = 0; i < spine.xs.length; i++) {
-      const d = (spine.xs[i] - x) ** 2 + (spine.ys[i] - y) ** 2;
+    for (let i = 0; i < spine.raw.length; i++) {
+      const rx = (spine.raw[i].lon - spine.lon0) * spine.mLon;
+      const ry = (spine.raw[i].lat - spine.lat0) * spine.mLat;
+      const d = (rx - x) ** 2 + (ry - y) ** 2;
       if (d < bd) { bd = d; best = i; }
     }
-    return best * spine.step;
+    return spine.cum[best];
   };
 
   const setFollow = (on) => {
@@ -1695,7 +1763,10 @@
       fol.s = nearestS();
       following = true; // let the map track the camera along
       canvas.focus();
+    } else {
+      setCursor(null);
     }
+    document.body.classList.toggle('riding', on);
     refreshPathPanel();
     updateHint();
     savePath();
@@ -1720,7 +1791,7 @@
     const speed = Math.max(15, fol.dist * 0.5) * gain;
     if (keys.KeyW) fol.s += speed * k;
     if (keys.KeyS) fol.s -= speed * k;
-    fol.s = Math.min(spine.len, Math.max(0, fol.s));
+    fol.s = Math.min(spine.rawLen, Math.max(0, fol.s));
     if (keys.ArrowRight) fol.az += 60 * k;
     if (keys.ArrowLeft) fol.az -= 60 * k;
     if (keys.ArrowUp) fol.el = Math.min(85, fol.el + 40 * k);
@@ -1729,7 +1800,12 @@
       fol.dist = Math.min(50000, Math.max(15,
         fol.dist * Math.pow(1.8, (keys.KeyR ? 1 : -1) * (slow ? 0.15 : 1) * dt / 1000)));
 
-    const h = spineHeading(fol.s);
+    // the heading is the one thing still taken from the smoothed spine — the
+    // jitter that matters is in the *direction* between raw points, not in
+    // their positions. its arc length runs a hair short of the raw track's
+    // (smoothing cuts corners), so the position is scaled across
+    const sSpine = fol.s * (spine.len / Math.max(1, spine.rawLen));
+    const h = spineHeading(sSpine);
     if (h !== null) {
       if (fol.heading === null) fol.heading = h;
       else {
@@ -1743,8 +1819,22 @@
       fol.alt = fol.alt === null ? a
         : fol.alt + (a - fol.alt) * (1 - Math.exp(-dt / FOLLOW_ALT_TAU));
 
-    const ll = spineLatLon(spineAt(fol.s));
-    const lat = ll.lat * D2R, lon = ll.lon * D2R;
+    // the aim point is on the raw track, not the smoothed copy: the ribbon is
+    // drawn through the raw points, and a marker placed off the smoothed one
+    // visibly leaves the line at every bend. the 3d disc is placed by point
+    // index so the engine can put it on the drawn geometry exactly, drape and
+    // all; the map dot and the camera get the interpolated position
+    const ll = rawAt(fol.s);
+    setCursor(ll);
+    view.setPathCursorIndex(ll.idx);
+    pathEls.progress.textContent = `${(fol.s / 1000).toFixed(2)} of `
+      + `${(spine.rawLen / 1000).toFixed(2)} km · `
+      + `${Math.round(100 * fol.s / Math.max(1, spine.rawLen))}%`;
+    // the camera aims down its own lightly smoothed copy, never the raw
+    // track: the marker has to be on the drawn line, the camera has to not
+    // shake, and those are different requirements
+    const aim = spineLatLon(spineAt(sSpine, spine.axs, spine.ays));
+    const lat = aim.lat * D2R, lon = aim.lon * D2R;
     const up = geoUpV(lat, lon), north = geoNorthV(lat, lon), east = vcross(north, up);
     const bearing = ((fol.heading || 0) + fol.az) * D2R;
     const horiz = vadd(vmul(north, Math.cos(bearing)), vmul(east, Math.sin(bearing)));

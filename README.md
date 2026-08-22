@@ -133,32 +133,43 @@ heading*, so rounding a bend carries the camera with it and you keep looking at
 the same shoulder of the trail), and R/F change the standoff distance. A/D do
 nothing — on rails there is nowhere sideways to go.
 
+Where you are is marked in three places while riding: a disc on the line
+itself in the 3d view, a dot on the map, and a distance in the panel. The 3d
+disc is the same quad the ribbon is made of, carved into a circle by the
+fragment shader — a white core inside a ring of the path's color, matching the
+map's marker — and depth-tested like the line, so a shoulder of terrain hides
+the dot exactly when it hides the track.
+
+It is placed by *fractional point index*, not by position, and that detail is
+the difference between a marker and an almost-marker. The camera follows the
+smoothed spine; the ribbon is drawn through the raw points. Placing the disc
+from the camera's own position put it wherever the smoothing had cut the
+corner — visibly off the line at every bend. Handing the engine an index
+instead lets it interpolate between the two positions the ribbon was built
+from, which is on the drawn segment by construction, drape and lift included.
+Following is therefore measured in metres along the raw track, so the panel's
+progress agrees with the length it reports for the file; only the heading
+still comes from the spine, since jitter lives in the direction between
+consecutive fixes rather than in where they are.
+
 It steers off a smoothed copy of the track, never the track itself. A GPS fix
 wanders a few meters between samples, and taking the heading from one raw
 segment hands every one of those wobbles to the camera, which reads as the
 world shivering. So the track is resampled at a fixed 10 m step, boxcar-
-smoothed twice (two passes ≈ gaussian) over a 60 m window, and the heading is
-taken from a 300 m chord across *that* rather than from any one segment — with
-a half-second temporal ease on top for what survives. The aim height comes from
+smoothed twice (two passes ≈ gaussian), and the heading is taken from a 300 m
+chord across *that* rather than from any one segment — with a half-second
+temporal ease on top for what survives.
+
+There are two smoothed copies, because the camera and the heading want
+different amounts. The heading comes off a 60 m window, which is heavy enough
+to ignore a wandering fix entirely; the camera aims down a 20 m one, which
+kills the wander but still hugs the shape. Aiming down the 60 m copy would
+leave the marker — which sits on the drawn line, where it belongs — visibly
+off-centre through every switchback, since that is exactly where heavy
+smoothing cuts the corner. The aim height comes from
 `getPathGroundAlt`, which reports the drape's measurement where it has one and
 NaN where it hasn't, so the camera rides the terrain rather than the track's
 GPS altitudes, easing between the two as the measurements land.
-
-**V rides the track.** The camera goes on rails: it looks at a point that runs
-along the path, W/S drive that point forward and back, the arrows swing the
-camera around it (R/F change how far off it stands), and A/D do nothing —
-there is nowhere sideways to go. The azimuth is measured from the *path's* own
-heading rather than from north, so rounding a bend carries the camera around
-with it and you keep looking at the same shoulder of the trail.
-
-The camera never steers off the track itself. A GPS fix wanders a few meters
-between samples, so the heading between two consecutive points swings wildly
-even standing still, and handing that to a camera reads as the world
-shivering. So the track is resampled at a fixed 10 m step, boxcar-smoothed
-twice (two passes ≈ gaussian), and the heading is taken from a ±150 m chord
-across *that* — never from one segment. A temporal ease on the heading and on
-the target's altitude absorbs the rest, the altitude one mattering because it
-steps whenever a drape measurement lands.
 
 #### Render tests
 
