@@ -1095,9 +1095,11 @@
     try {
       localStorage.setItem('earth-path', JSON.stringify({
         style: pathStyle, name: path ? path.name : null,
-        // where you were standing relative to the track, but never the mode
-        // itself: coming back to a reload already on rails would be a shock
-        follow: { s: fol.s, az: fol.az, el: fol.el, dist: fol.dist },
+        // how you like to stand relative to the track, but neither the mode
+        // itself (coming back to a reload already on rails would be a shock)
+        // nor where along it you were: entering follow always re-derives that
+        // from where the camera actually is, so saving it reads back as dead
+        follow: { az: fol.az, el: fol.el, dist: fol.dist },
       }));
     } catch (e) {}
   };
