@@ -1,0 +1,46 @@
+name: build the engine
+description: >
+  compile earth_web.cpp into web/earth.js + web/earth.wasm with emscripten.
+  several steps and two caches of its own, but from the outside it is one
+  step with one condition — which is the point: whether the engine needs
+  building is a single decision, made by the caller.
+
+inputs:
+  emsdk-version:
+    description: emscripten sdk version to install (pinned by the caller)
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: install emsdk
+      shell: bash
+      run: |
+        git clone --depth 1 https://github.com/emscripten-core/emsdk ~/emsdk
+        ~/emsdk/emsdk install ${{ inputs.emsdk-version }}
+        ~/emsdk/emsdk activate ${{ inputs.emsdk-version }}
+
+    # emscripten builds its ports (sdl2 and friends) into the sdk's own cache
+    # dir on first use — ~21s per run otherwise. must come after the emsdk
+    # clone above, which would clobber the restored dir.
+    - name: cache emscripten ports
+      uses: actions/cache@v6
+      with:
+        path: ~/emsdk/upstream/emscripten/cache
+        key: emcache-${{ inputs.emsdk-version }}-v1
+
+    # eigen and protobuf. worth caching well beyond the download: setup.sh
+    # compiles libprotobuf to wasm, which is minutes.
+    - name: cache deps
+      uses: actions/cache@v6
+      with:
+        path: deps
+        key: deps-eigen3.3.7-protobuf21.12-emsdk${{ inputs.emsdk-version }}-v1
+
+    - name: setup deps
+      shell: bash
+      run: source ~/emsdk/emsdk_env.sh && ./setup.sh
+
+    - name: build
+      shell: bash
+      run: source ~/emsdk/emsdk_env.sh && ./build.sh

@@ -2,6 +2,9 @@ name: deploy
 # build the site from source and publish web/ to github pages as an artifact —
 # no build products ever land in git. deps are pinned: emsdk version here,
 # eigen/protobuf versions in setup.sh (cache key must track all three).
+# the page itself isn't built — index.html is served as written — so the
+# toolchain exists only to produce earth.js/earth.wasm, and a run that changes
+# neither skips it outright. see 'cache built engine'.
 on:
   push:
     branches: [main]
@@ -25,33 +28,38 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - name: install emsdk
-        run: |
-          git clone --depth 1 https://github.com/emscripten-core/emsdk ~/emsdk
-          ~/emsdk/emsdk install $EMSDK_VERSION
-          ~/emsdk/emsdk activate $EMSDK_VERSION
-
-      # emscripten builds its ports (sdl2 and friends) into the sdk's own cache
-      # dir on first use — ~21s per run otherwise. must come after the emsdk
-      # clone above, which would clobber the restored dir.
-      - name: cache emscripten ports
+      # the compiled engine is a pure function of the c++ sources and the
+      # scripts that build them, so key a cache on exactly those. on a hit the
+      # job is checkout, restore, upload: no emsdk, no deps, no compile —
+      # which is every html-only change. a miss (c++ touched, or the entry
+      # aged out) takes the full path below and repopulates it.
+      - name: cache built engine
+        id: engine
         uses: actions/cache@v6
         with:
-          path: ~/emsdk/upstream/emscripten/cache
-          key: emcache-${{ env.EMSDK_VERSION }}-v1
+          path: |
+            web/earth.js
+            web/earth.wasm
+          key: engine-emsdk${{ env.EMSDK_VERSION }}-${{ hashFiles('*.cpp', '*.h', 'crn/**', 'proto/**', 'build.sh', 'config_emscripten.sh', 'setup.sh') }}
 
-      - name: cache deps
-        uses: actions/cache@v6
+      # ...and the one decision: is that cache entry usable, or does the
+      # engine need building? the build itself is several steps and two
+      # caches of its own, nested in .github/actions/build-engine so that it
+      # is one step here and takes one condition. on a hit this job is
+      # checkout, restore, upload.
+      - name: build the engine
+        if: steps.engine.outputs.cache-hit != 'true'
+        uses: ./.github/actions/build-engine
         with:
-          path: deps
-          key: deps-eigen3.3.7-protobuf21.12-emsdk${{ env.EMSDK_VERSION }}-v1
+          emsdk-version: ${{ env.EMSDK_VERSION }}
 
-      - name: setup deps
-        run: source ~/emsdk/emsdk_env.sh && ./setup.sh
+      # build.sh does this too, but the cached path never runs build.sh, and
+      # this file is a build product (gitignored in web/) like the other two
+      - name: stage the service worker
+        run: cp coi-serviceworker.js web/
 
-      - name: build
-        run: source ~/emsdk/emsdk_env.sh && ./build.sh
-
+      # runs on both paths on purpose: it's also the check that what came back
+      # out of the cache is the pair of real artifacts
       - name: gate on artifact sizes
         run: |
           test "$(stat -c%s web/earth.wasm)" -gt 500000

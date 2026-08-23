@@ -391,9 +391,23 @@ them as reference→current alongside the images.
 #### Deploy
 
 Push to main. [.github/workflows/deploy.yml](.github/workflows/deploy.yml)
-builds from source and publishes `web/` to GitHub Pages as an artifact, taking
-about 90 seconds. No build products are committed; the deploy job needs the
-build job, so a failed build publishes nothing.
+builds from source and publishes `web/` to GitHub Pages as an artifact. No
+build products are committed; the deploy job needs the build job, so a failed
+build publishes nothing.
+
+`index.html` isn't built — it ships as written — so the toolchain exists only
+to produce `earth.js`/`earth.wasm`. Those are cached under a key hashing the
+c++ sources and the scripts that build them, and a run that changes neither
+skips the build outright: checkout, restore, upload. That's most pushes, and
+it's the difference between about 90 seconds and about 15. Touching a header
+(or aging the entry out of the cache) builds and repopulates it.
+
+The build is five steps and two caches of its own (emsdk, its ports, the deps
+`setup.sh` compiles), and it lives in
+[.github/actions/build-engine](.github/actions/build-engine/action.yml) — a
+composite action, which is how a multi-step thing becomes one step with one
+condition. Whether to build is then a single decision in one place, rather
+than the same `if` copied down five steps.
 
 To watch a run:
 
