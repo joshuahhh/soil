@@ -142,7 +142,14 @@
      leftwards across the divider and sat over the map */
   #hud { position: absolute; right: 8px; top: 8px; z-index: 12; display: flex;
          flex-direction: column; align-items: flex-end; gap: 4px;
-         max-width: calc(100% - 16px); max-height: calc(100% - 56px); }
+         max-width: calc(100% - 16px); max-height: calc(100% - 56px);
+         /* the box is far bigger than what it draws — the hint line stretches
+            it to the width of the view, and the gaps between its children are
+            its own — so it swallowed clicks meant for the picture under it
+            (placing a point pair near the top of the photo did nothing). the
+            readouts want no clicks at all; the panels take theirs back */
+         pointer-events: none; }
+  #hud .panel { pointer-events: auto; }
   #hint, #speed { color: #fff; background: rgba(0,0,0,.55); font: 12px sans-serif;
                   padding: 6px 8px; border-radius: 4px; }
   /* geolocate button and search box side by side in the map's top-left */
