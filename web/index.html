@@ -78,9 +78,27 @@
   #pairs { position: absolute; inset: 0; width: 100%; height: 100%;
            z-index: 6; pointer-events: none; overflow: visible; display: none; }
   body.align #pairs { display: block; }
-  #pairs .grab { pointer-events: auto; cursor: grab; }
-  #pairs .lbl { font: bold 10px sans-serif; fill: #fff; pointer-events: none;
+  /* what the pointer can take hold of. the visible art is thin — a 2.5px ring
+     and a dashed line — so hit targets are separate invisible shapes over it:
+     a fat line along the residual, a disc at each end, and the number itself.
+     pointer-events: visible ignores the (transparent) paint but still honours
+     visibility, so the hit shape of an off-screen end goes away with it */
+  #pairs .hit { fill: transparent; stroke: transparent; pointer-events: visible; }
+  #pairs .grab { cursor: grab; }
+  #pairs .pick { cursor: pointer; }
+  #pairs .lbl { font: bold 10px sans-serif; fill: #fff; pointer-events: visible;
                 paint-order: stroke; stroke: rgba(0,0,0,.7); stroke-width: 3px; }
+  /* the markers carry the same two states as the rows of the list, in the same
+     two colours: a pale wash under the pointer, amber for the selected pair.
+     a ring behind each end and the residual line between them all take it, so
+     the pair reads as one object rather than two dots that happen to match */
+  #pairs .halo { fill: none; stroke: none; }
+  #pairs g.hov .halo { fill: rgba(255,255,255,.18); stroke: rgba(255,255,255,.6);
+                       stroke-width: 1.5; }
+  #pairs g.sel .halo { fill: rgba(255,127,14,.35); stroke: #ff7f0e; stroke-width: 2; }
+  #pairs g.hov .res { stroke-width: 2.5; opacity: 1; }
+  #pairs g.sel .res { stroke: #ff7f0e; stroke-width: 2.5; opacity: 1; }
+  #pairs g.sel .lbl { fill: #ff7f0e; }
   /* the panel: pair list and solver controls. it lives in the hud's column
      rather than floating in the same corner, so the two lay themselves out
      instead of being kept apart by a hardcoded offset. min-height: 0 lets it
@@ -121,7 +139,9 @@
   #aplist { overflow-y: auto; min-height: 0; display: flex; flex-direction: column; gap: 2px; }
   #aplist .pair { display: flex; align-items: center; gap: 6px; padding: 2px 4px;
                   border-radius: 3px; cursor: pointer; font: 11px monospace; }
-  #aplist .pair:hover { background: rgba(255,255,255,.12); }
+  /* .hov is the same wash as :hover, applied when the pointer is on that
+     pair's markers out in the view instead of on the row */
+  #aplist .pair:hover, #aplist .pair.hov { background: rgba(255,255,255,.12); }
   #aplist .pair.sel { background: rgba(255,127,14,.35); }
   #aplist .pair .n { color: #ff7f0e; font-weight: bold; }
   #aplist .pair .err { margin-left: auto; opacity: .8; }
@@ -2142,6 +2162,10 @@
   // --- state ---
   let pairs = [];       // { u, v, lat, lon, alt } — photo coords + mesh anchor
   let selPair = -1;
+  // which pair the pointer is on, wherever it is: a row of the list and the
+  // markers out in the view are two views of the same pair, so hovering
+  // either lights up both
+  let hovPair = -1;
   let panelOpen = false;
   let refImageKey = null; // name:size of the stored photo, to spot a re-drop
   const freeFlags = { pos: true, aim: true, fov: true };
@@ -2152,6 +2176,27 @@
   const scaleEl = document.getElementById('apscale');
   const solveBtn = document.getElementById('apsolve');
   const addBtn = document.getElementById('apadd');
+
+  // selection and hover live in these two numbers; this is the only thing
+  // that paints them, on the markers and on the rows alike. rebuilding the
+  // list would do it too, but it also resets the live error text and yanks
+  // the delete buttons, which is a lot to do for a change of colour
+  const applyPairStates = () => {
+    markerEls.forEach((m, i) => {
+      m.g.classList.toggle('sel', i === selPair);
+      m.g.classList.toggle('hov', i === hovPair);
+    });
+    rowEls.forEach((r, i) => {
+      r.row.classList.toggle('sel', i === selPair);
+      r.row.classList.toggle('hov', i === hovPair);
+    });
+  };
+  const setSel = (i) => { selPair = i; applyPairStates(); };
+  const setHover = (i) => {
+    if (hovPair === i) return;
+    hovPair = i;
+    applyPairStates();
+  };
 
   function saveAlign() {
     if (storageFrozen) return;
@@ -2194,26 +2239,52 @@
     for (const k in attrs) el.setAttribute(k, attrs[k]);
     return el;
   };
+  // one group per pair, in paint order: the fat invisible line that makes the
+  // residual clickable, the residual itself, then each end (state ring, ring,
+  // centre dot), the number, and last the two grab discs — last so that where
+  // an end sits on the line or the number, the end is what you get
   function buildMarkers() {
     svgEl.textContent = '';
+    hovPair = -1;
     markerEls = pairs.map((pr, i) => {
-      const line = svgNode('line', { stroke: '#fff', 'stroke-width': 1.5,
+      const g = svgNode('g', {});
+      // wide enough to hit, narrow enough that it isn't much of a dead band
+      // for a camera drag started on the picture (nothing under #pairs sees a
+      // pointerdown that lands on a hit shape)
+      const hitLine = svgNode('line', { class: 'hit pick', 'stroke-width': 12 });
+      const line = svgNode('line', { class: 'res', stroke: '#fff', 'stroke-width': 1.5,
         'stroke-dasharray': '4 3', opacity: .9 });
       // the photo end (magenta) and the mesh end (cyan); the solver's job is
       // to drive one onto the other
+      const photoHalo = svgNode('circle', { r: 12, class: 'halo' });
       const photo = svgNode('circle', { r: 6, fill: 'none', stroke: '#ff2fd0',
-        'stroke-width': 2.5, class: 'grab' });
+        'stroke-width': 2.5 });
       const photoDot = svgNode('circle', { r: 1.5, fill: '#ff2fd0' });
+      const meshHalo = svgNode('circle', { r: 12, class: 'halo' });
       const mesh = svgNode('circle', { r: 6, fill: 'none', stroke: '#22d3ee',
-        'stroke-width': 2.5, class: 'grab' });
+        'stroke-width': 2.5 });
       const meshDot = svgNode('circle', { r: 1.5, fill: '#22d3ee' });
-      const lbl = svgNode('text', { class: 'lbl' });
+      const lbl = svgNode('text', { class: 'lbl pick' });
       lbl.textContent = i + 1;
-      for (const el of [line, photo, photoDot, mesh, meshDot, lbl]) svgEl.appendChild(el);
-      hookDrag(photo, i, 'photo');
-      hookDrag(mesh, i, 'mesh');
-      return { line, photo, photoDot, mesh, meshDot, lbl };
+      const photoHit = svgNode('circle', { r: 13, class: 'hit grab' });
+      const meshHit = svgNode('circle', { r: 13, class: 'hit grab' });
+      for (const el of [hitLine, line, photoHalo, photo, photoDot,
+                        meshHalo, mesh, meshDot, lbl, photoHit, meshHit])
+        g.appendChild(el);
+      svgEl.appendChild(g);
+      hookDrag(photoHit, i, 'photo');
+      hookDrag(meshHit, i, 'mesh');
+      // the line and the number don't drag anything; they just say which pair
+      // you mean, the way clicking its row in the list does
+      for (const el of [hitLine, lbl]) el.addEventListener('click', () => setSel(selPair === i ? -1 : i));
+      for (const el of [hitLine, lbl, photoHit, meshHit]) {
+        el.addEventListener('pointerenter', () => setHover(i));
+        el.addEventListener('pointerleave', () => setHover(-1));
+      }
+      return { g, hitLine, line, photoHalo, photo, photoDot,
+               meshHalo, mesh, meshDot, lbl, photoHit, meshHit };
     });
+    applyPairStates();
   }
   // dragging an end adjusts that pair: the photo end moves within the picture,
   // the mesh end re-picks whatever terrain is now under the pointer
@@ -2223,8 +2294,7 @@
       e.preventDefault();
       e.stopPropagation();
       dragPair = { i, which };
-      selPair = i;
-      renderList();
+      setSel(i);
       el.setPointerCapture(e.pointerId);
     });
     el.addEventListener('pointermove', (e) => {
@@ -2259,18 +2329,18 @@
       const tgt = photoToView(pr.u, pr.v);
       const cur = basis ? projectWith(basis, p.fov, ecefOf(pr), W, H) : null;
       if (!m) return null;
-      const sel = i === selPair;
+      // an end that isn't on screen takes its hit shape down with it, or the
+      // pointer would find a target where there is nothing drawn
       const show = (el, on) => el.setAttribute('visibility', on ? 'visible' : 'hidden');
-      show(m.photo, !!tgt);
-      show(m.photoDot, !!tgt);
-      show(m.lbl, !!tgt);
-      show(m.mesh, !!cur);
-      show(m.meshDot, !!cur);
-      show(m.line, !!(tgt && cur));
-      m.photo.setAttribute('r', sel ? 8 : 6);
-      m.mesh.setAttribute('r', sel ? 8 : 6);
+      for (const el of [m.photo, m.photoDot, m.photoHalo, m.photoHit, m.lbl]) show(el, !!tgt);
+      for (const el of [m.mesh, m.meshDot, m.meshHalo, m.meshHit]) show(el, !!cur);
+      for (const el of [m.line, m.hitLine]) show(el, !!(tgt && cur));
+      // the marked-out pair also stands a little taller
+      const big = i === selPair || i === hovPair;
+      m.photo.setAttribute('r', big ? 8 : 6);
+      m.mesh.setAttribute('r', big ? 8 : 6);
       if (tgt) {
-        for (const el of [m.photo, m.photoDot]) {
+        for (const el of [m.photo, m.photoDot, m.photoHalo, m.photoHit]) {
           el.setAttribute('cx', tgt.x);
           el.setAttribute('cy', tgt.y);
         }
@@ -2278,16 +2348,18 @@
         m.lbl.setAttribute('y', tgt.y - 8);
       }
       if (cur) {
-        for (const el of [m.mesh, m.meshDot]) {
+        for (const el of [m.mesh, m.meshDot, m.meshHalo, m.meshHit]) {
           el.setAttribute('cx', cur.x);
           el.setAttribute('cy', cur.y);
         }
       }
       if (tgt && cur) {
-        m.line.setAttribute('x1', tgt.x);
-        m.line.setAttribute('y1', tgt.y);
-        m.line.setAttribute('x2', cur.x);
-        m.line.setAttribute('y2', cur.y);
+        for (const el of [m.line, m.hitLine]) {
+          el.setAttribute('x1', tgt.x);
+          el.setAttribute('y1', tgt.y);
+          el.setAttribute('x2', cur.x);
+          el.setAttribute('y2', cur.y);
+        }
         const d = Math.hypot(cur.x - tgt.x, cur.y - tgt.y);
         sum += d * d;
         n++;
@@ -2307,7 +2379,7 @@
     listEl.textContent = '';
     rowEls = pairs.map((pr, i) => {
       const row = document.createElement('div');
-      row.className = 'pair' + (i === selPair ? ' sel' : '');
+      row.className = 'pair';
       const n = document.createElement('span');
       n.className = 'n';
       n.textContent = i + 1;
@@ -2323,18 +2395,21 @@
         e.stopPropagation();
         pairs.splice(i, 1);
         if (selPair >= pairs.length) selPair = -1;
+        hovPair = -1; // the row under the pointer is a different pair now
         buildMarkers();
         renderList();
         saveAlign();
       });
       row.append(n, uv, err, del);
-      row.addEventListener('click', () => {
-        selPair = selPair === i ? -1 : i;
-        renderList();
-      });
+      row.addEventListener('click', () => setSel(selPair === i ? -1 : i));
+      // the other half of the mirror: pointing at a row marks its pair out in
+      // the view, the same wash the row itself takes
+      row.addEventListener('pointerenter', () => setHover(i));
+      row.addEventListener('pointerleave', () => setHover(-1));
       listEl.appendChild(row);
       return { row, err };
     });
+    applyPairStates();
     updateStatus(null);
   }
   // the live readout: per-pair pixel error and the overall rms
