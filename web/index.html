@@ -688,8 +688,17 @@
     } catch (e) {}
     return DEFAULT_VIEW;
   })();
+  // set once a pasted session has been written to storage, and never cleared.
+  // from that moment what's in storage describes a session this page is not
+  // showing, and every saver below would be writing the one it's replacing
+  // over it. the view saver is the one that actually bites: it runs both on
+  // beforeunload — which the reload after a paste fires itself — and once a
+  // second off the frame loop, so leaving it live loses the pasted pose
+  // always, or intermittently, depending on which one gets there first
+  let storageFrozen = false;
   const saveView = () => {
     if (TEST) return; // captures never write back over the user's saved view
+    if (storageFrozen) return;
     if (!view.ready()) return;
     const p = view.getPose();
     try {
@@ -1459,6 +1468,7 @@
   };
 
   const savePath = () => {
+    if (storageFrozen) return;
     try {
       localStorage.setItem('earth-path', JSON.stringify({
         style: pathStyle, name: path ? path.name : null,
@@ -2133,6 +2143,7 @@
   const addBtn = document.getElementById('apadd');
 
   function saveAlign() {
+    if (storageFrozen) return;
     try {
       localStorage.setItem('earth-align', JSON.stringify({
         pairs, ov, free: freeFlags, open: panelOpen, key: refImageKey,
@@ -2701,6 +2712,7 @@
   // have is a key it doesn't want, so it goes. half-pasting one session over
   // another leaves a mix that belongs to neither
   const applyState = async (s) => {
+    storageFrozen = true; // before the first write: nothing may save over it now
     for (const k of STATE_KEYS) {
       if (s.ls && s.ls[k] != null) localStorage.setItem(k, s.ls[k]);
       else localStorage.removeItem(k);
@@ -2725,7 +2737,10 @@
     const failed = await applyState(s);
     if (failed.length) {
       // the localstorage half landed and the files didn't, so reloading now
-      // would show a session missing its photo or track and say nothing
+      // would show a session missing its photo or track and say nothing. the
+      // savers stay off for the rest of this page's life either way: what is
+      // in storage is the pasted session, and flying around now shouldn't
+      // quietly edit it
       toast(`pasted, but ${failed.join(' and ')} did not fit in storage — see the console`);
       return true;
     }
