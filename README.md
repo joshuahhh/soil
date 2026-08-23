@@ -78,6 +78,22 @@ it's a line per node and a settling view decodes hundreds. `?timing` turns it
 back on. The 2-second `sections avg ms:` line is unconditional; that one is
 the profiling readout, not chatter.
 
+#### Moving a session between builds
+
+The deployed page and a local one are separate origins, so they share nothing:
+two localstorages, two indexeddbs. `⌘C` (`ctrl-C`) anywhere on the page — with
+nothing selected and no field focused — copies the whole session to the
+clipboard as one json blob: the saved view, the path and align settings, and
+the two dropped files (gpx and reference photo, as data urls). `⌘V` on the
+other build unpacks it and reloads into that session. `window.__demo.copyState()`
+and `pasteState(text)` are the same two from the console.
+
+Pasting is destructive on purpose: a key the incoming session doesn't carry is
+removed rather than left behind, so what you land in belongs to one session and
+not a mix of two. The tile cache is left out — megabytes of bytes that
+re-download themselves, and skipping them keeps the blob to roughly the size of
+the photo.
+
 #### Dropped tracks
 
 Drop a `.gpx` on the window and the track is drawn twice: as a line on the

@@ -148,10 +148,18 @@
   /* geolocate button and search box side by side in the map's top-left */
   .maplibregl-ctrl-top-left { display: flex; align-items: flex-start; }
   /* tube axis switch, over the map's bottom-left corner */
+  /* a passing word about something that just happened — the session copy/paste
+     below is the only thing that talks this way, and it needs an answer */
+  #toast { position: fixed; left: 50%; top: 12px; transform: translateX(-50%); z-index: 30;
+           color: #fff; background: rgba(0,0,0,.78); font: 12px sans-serif;
+           padding: 8px 12px; border-radius: 4px; pointer-events: none;
+           opacity: 0; transition: opacity .2s; }
+  #toast.on { opacity: 1; }
   #axisbtn { position: fixed; left: 8px; bottom: 24px; z-index: 10; color: #fff;
              background: rgba(0,0,0,.55); font: 12px sans-serif; padding: 6px 8px;
              border-radius: 4px; cursor: pointer; user-select: none; }
 </style>
+<div id="toast"></div>
 <div id="map"></div>
 <div id="divider"><button id="expandbtn" title="expand 3d view">◀</button></div>
 <div id="right"><canvas id="globe" tabindex="0"></canvas>
@@ -2620,13 +2628,140 @@
     alignRefresh();
   })();
 
+  // --- move a session between origins ---------------------------------------
+  // the deployed page and localhost are two origins, and nothing is shared
+  // across them: separate localstorages, separate indexeddbs. so the
+  // clipboard carries it. cmd-C anywhere on the page bundles the whole
+  // session — view, path settings and the two dropped files — into one json
+  // blob; cmd-V on the other build unpacks it and reloads into exactly that
+  // session. the tile cache is deliberately left out: it is megabytes of
+  // bytes that re-download themselves, and the only cost of leaving it
+  // behind is that the first minute over the same ground is slower
+  const STATE_TAG = 'soil-session-v1';
+  const STATE_KEYS = ['earth-view', 'earth-path', 'earth-align'];
+  const STATE_FILES = ['gpx-file', 'ref-image'];
+  let toastTimer = 0;
+  const toast = (msg, ms = 2600) => {
+    const el = document.getElementById('toast');
+    el.textContent = msg;
+    el.classList.add('on');
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => el.classList.remove('on'), ms);
+  };
+  // files go over as data urls: json is the only thing the clipboard carries
+  // between two pages, and this is the one encoding of a blob that comes back
+  // through fetch() without a byte of parsing here
+  const fileToJson = (f) => new Promise((res) => {
+    const r = new FileReader();
+    r.onload = () => res({ name: f.name || '', type: f.type || '', data: r.result });
+    r.onerror = () => res(null);
+    r.readAsDataURL(f);
+  });
+  const jsonToFile = async (j, fallbackName) => {
+    const blob = await (await fetch(j.data)).blob();
+    return new File([blob], j.name || fallbackName, { type: j.type || blob.type });
+  };
+  const collectState = async () => {
+    // the three savers write on their own schedule (beforeunload, on change),
+    // so run them first or the copy carries the state as of some earlier moment
+    saveView();
+    savePath();
+    saveAlign();
+    const ls = {};
+    for (const k of STATE_KEYS) {
+      const v = localStorage.getItem(k);
+      if (v != null) ls[k] = v;
+    }
+    const files = {};
+    for (const k of STATE_FILES) {
+      const f = await idbGet(k, 'app');
+      if (!f) continue;
+      const j = await fileToJson(f);
+      if (j) files[k] = j;
+      else console.warn(`session: could not read '${k}' out of idb — copying without it`);
+    }
+    return JSON.stringify({ tag: STATE_TAG, ls, files });
+  };
+  const copyState = async () => {
+    const text = await collectState();
+    const mb = (text.length / 1e6).toFixed(1);
+    try {
+      await navigator.clipboard.writeText(text);
+      toast(`session copied (${mb} MB) — ⌘V it into the other build`);
+    } catch (e) {
+      // writeText wants a focused document and the clipboard permission; when
+      // it says no there is still a perfectly good string to hand over
+      console.warn('session: clipboard write failed', e);
+      console.log(text);
+      toast('could not reach the clipboard — the session json is in the console');
+    }
+    return text;
+  };
+  // applying is destructive on purpose: a key the incoming session doesn't
+  // have is a key it doesn't want, so it goes. half-pasting one session over
+  // another leaves a mix that belongs to neither
+  const applyState = async (s) => {
+    for (const k of STATE_KEYS) {
+      if (s.ls && s.ls[k] != null) localStorage.setItem(k, s.ls[k]);
+      else localStorage.removeItem(k);
+    }
+    const failed = [];
+    for (const k of STATE_FILES) {
+      const j = s.files && s.files[k];
+      if (!j) { idbDel(k, 'app'); continue; }
+      try {
+        if (!await idbPutChecked(k, await jsonToFile(j, k))) failed.push(k);
+      } catch (e) {
+        console.warn(`session: could not rebuild '${k}'`, e);
+        failed.push(k);
+      }
+    }
+    return failed;
+  };
+  const pasteState = async (text) => {
+    let s = null;
+    try { s = JSON.parse(text); } catch (e) {}
+    if (!s || s.tag !== STATE_TAG) return false;
+    const failed = await applyState(s);
+    if (failed.length) {
+      // the localstorage half landed and the files didn't, so reloading now
+      // would show a session missing its photo or track and say nothing
+      toast(`pasted, but ${failed.join(' and ')} did not fit in storage — see the console`);
+      return true;
+    }
+    toast('session pasted — reloading');
+    setTimeout(() => location.reload(), 250);
+    return true;
+  };
+  addEventListener('copy', (e) => {
+    // a real selection, or a cursor in a field, means the copy is about text
+    // on the page and not about the session
+    const t = e.target;
+    if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
+    const sel = getSelection();
+    if (sel && !sel.isCollapsed && String(sel).trim()) return;
+    e.preventDefault();
+    copyState();
+  });
+  addEventListener('paste', (e) => {
+    const t = e.target;
+    if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
+    const text = e.clipboardData && e.clipboardData.getData('text/plain');
+    // anything that isn't one of our bundles is left to whatever else on the
+    // page might want it
+    if (!text || text.indexOf(STATE_TAG) < 0) return;
+    e.preventDefault();
+    pasteState(text);
+  });
+
   // for devtools poking and automated testing
   window.__demo = { view, map, marker, isFollowing: () => following,
     tube: () => ({ rect: tubeRect, on: tubeOn, curl }),
     path: () => path, loadGpx: (text) => setPath(parseGpx(text), true),
     clearTiles,
     align: () => ({ pairs, solving, dof: dofCount(), errs: lastErrs }),
-    solve: startSolve };
+    solve: startSolve,
+    copyState, pasteState };
 
   let lastSynced = { lat: 1e9, lon: 1e9 };
   let saveTimer = 0;
