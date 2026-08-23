@@ -3,8 +3,8 @@
 // window, no input, and no main loop — the host page schedules frames and
 // optionally supplies a fetch function to control transport and caching.
 //
-// build: ./build.sh weblib  ->  web/earth.js + web/earth.wasm
-// usage: see web/demo.html
+// build: ./build.sh  ->  web/earth.js + web/earth.wasm
+// usage: see web/index.html
 //
 //   const Module = await createEarthModule();
 //   const view = Module.createView('#canvas', async (path, id) => {
