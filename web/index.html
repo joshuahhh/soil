@@ -19,7 +19,11 @@
   html, body { margin: 0; height: 100%; }
   body { display: flex; }
   #map, #right { flex: 1; height: 100%; }
-  #right { position: relative; }
+  /* the containing block for everything drawn over the 3d view, and the clip
+     for it: the photo can be scaled to 400% and dragged around, and the pair
+     markers hang off its corners (#pairs is overflow: visible on purpose), so
+     without this they spill left across the divider and sit on the map */
+  #right { position: relative; overflow: hidden; }
   /* the strip between the panes; hovering it reveals an arrow that collapses
      the map so the 3d view gets the whole window (and back) */
   #divider { flex: 0 0 8px; position: relative; background: #333; z-index: 20;
