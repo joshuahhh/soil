@@ -792,6 +792,24 @@ struct earth_core_t {
 			projection = perspective(fov, aspect_ratio, near, far);
 		}
 
+		// the miniature pass needs the clip range to read depth back into
+		// meters, and focuses on the terrain under the crosshair
+		if (ctx.dof.on) {
+			ctx.dof.near = (float)near;
+			ctx.dof.far = (float)far;
+			ctx.dof.ortho = cam.ortho;
+			auto focus = fmax(1.0, centerDistanceMesh(cam));
+			ctx.dof.focus = (float)focus;
+			// the host's sharp band is a fraction of the focus distance *at
+			// the default 45-degree fov*. what the eye judges is how much of
+			// the frame is sharp, and the depth a frame spans scales with its
+			// angular height — so scale the band with it, and zooming (Z/X)
+			// keeps the look. in ortho the same quantity is the half-extent
+			// over the focus distance
+			auto half_angle = cam.ortho ? ortho_half_extent / focus : tan(fov / 2.0);
+			ctx.dof.range = ctx.dof.range_host * (float)(half_angle / tan(0.125 * M_PI));
+		}
+
 		auto t0 = ticksMs();
 
 		auto view = lookAt(eye, eye + direction, up);

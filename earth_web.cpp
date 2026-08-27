@@ -15,6 +15,7 @@
 //   view.fly(yaw, pitch, roll, fwd, back, left, right, up, down, slow, viewFrame, gain, dtMs);
 //   view.frame(dtMs);                              // from requestAnimationFrame
 //   view.setOrtho(on);                             // orthographic projection
+//   view.setMiniature(on, strength, range);        // tilt-shift depth-of-field look
 //   view.orbit(headingDeg, tiltDeg);               // revolve around the screen-center point
 //   view.zoomOrtho(factor);                        // ortho zoom (boresight dolly), >1 zooms in
 //   view.pickCenter();                             // {lat,lon,alt,dist,src} under the crosshair, or null
@@ -353,6 +354,17 @@ struct EarthView {
 	}
 	bool getOrtho() { return camera.ortho; }
 
+	// the miniature look (see dof_gl_t): a depth-of-field blur around the
+	// crosshair distance. strength is the max blur radius as a fraction of
+	// the view height, range the half-width of the sharp band as a fraction
+	// of the focus distance at the default 45-degree fov (the engine scales
+	// it with the fov so zooming keeps the look)
+	void setMiniature(bool on, double strength, double range) {
+		ctx.dof.on = on;
+		ctx.dof.strength = (float)fmax(0.0, strength);
+		ctx.dof.range_host = (float)fmax(0.01, range);
+	}
+
 	// airplane controls (tube flying): yaw/pitch/roll about the camera's own
 	// axes, movement in the body frame, no horizon clamps
 	void setAirplane(bool on) {
@@ -633,6 +645,7 @@ EMSCRIPTEN_BINDINGS(earth) {
 		.function("setFov", &EarthView::setFov)
 		.function("setOrtho", &EarthView::setOrtho)
 		.function("getOrtho", &EarthView::getOrtho)
+		.function("setMiniature", &EarthView::setMiniature)
 		.function("getOrthoExtent", &EarthView::getOrthoExtent)
 		.function("setAirplane", &EarthView::setAirplane)
 		.function("setTerrainFollow", &EarthView::setTerrainFollow)

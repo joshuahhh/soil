@@ -20,8 +20,29 @@ struct path_gl_t {
 	int vert_count = 0;
 };
 
+// the miniature ("tilt-shift") post-process: the frame is drawn into an
+// offscreen color+depth pair instead of the canvas, then a fullscreen pass
+// blurs each pixel by how far its depth is from a focus distance — the
+// shallow depth of field of a macro lens, which is what makes a city read
+// as a model of one — and pushes the colors toward toy paint
+struct dof_gl_t {
+	bool on = false;
+	GLuint fbo = 0, color = 0, depth = 0, program = 0, vao = 0;
+	int w = 0, h = 0; // the attachments' allocated size
+	GLint color_loc, depth_loc, viewport_loc, planes_loc, params_loc;
+	// set per frame by the engine (it knows the clip planes and where the
+	// terrain under the crosshair is); strength/range by the host
+	float focus = 1000.0f;   // meters, the sharp plane
+	float strength = 0.015f; // max blur radius as a fraction of the height
+	float range_host = 0.35f; // half-width of the sharp band, as a fraction of focus, at a 45-degree fov
+	float range = 0.35f;      // the same, scaled by the engine to the current fov
+	float near = 1.0f, far = 1.0e6f;
+	bool ortho = false;
+};
+
 struct gl_ctx_t {
 	int width, height; // weblib: canvas drawable size, set by the shell
+	dof_gl_t dof;
 	GLuint program;
 	GLint transform_loc;
 	GLint tube_on_loc;
@@ -183,7 +204,41 @@ void renderDrawableSize(render_ctx_t &ctx, void *window, int *w, int *h) {
 }
 #endif
 
+void renderDofEnsure(render_ctx_t &ctx, int w, int h) {
+	auto &d = ctx.dof;
+	if (d.fbo && d.w == w && d.h == h) return;
+	if (!d.fbo) glGenFramebuffers(1, &d.fbo);
+	if (!d.color) glGenTextures(1, &d.color);
+	if (!d.depth) glGenTextures(1, &d.depth);
+	glBindTexture(GL_TEXTURE_2D, d.color);
+	glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+	glBindTexture(GL_TEXTURE_2D, d.depth);
+	glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT24, w, h, 0, GL_DEPTH_COMPONENT, GL_UNSIGNED_INT, NULL);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+	glBindTexture(GL_TEXTURE_2D, 0);
+	glBindFramebuffer(GL_FRAMEBUFFER, d.fbo);
+	glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, d.color, 0);
+	glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, d.depth, 0);
+	auto status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+	if (status != GL_FRAMEBUFFER_COMPLETE) {
+		printf("miniature framebuffer incomplete: 0x%x\n", status);
+		d.on = false;
+		glBindFramebuffer(GL_FRAMEBUFFER, 0);
+	}
+	d.w = w;
+	d.h = h;
+}
+
 void renderFrameBegin(render_ctx_t &ctx, void *window, int width, int height, int sky) {
+	if (ctx.dof.on) renderDofEnsure(ctx, width, height);
+	glBindFramebuffer(GL_FRAMEBUFFER, ctx.dof.on ? ctx.dof.fbo : 0);
 	glViewport(0, 0, width, height);
 	glClearColor((sky>>16 & 0xff) / 255.0f, (sky>>8 & 0xff) / 255.0f, (sky & 0xff) / 255.0f, 1.0f);
 	glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
@@ -218,7 +273,34 @@ void renderSetTubeNode(render_ctx_t &ctx, const float *m16) {
 	glUniformMatrix4fv(ctx.tube_mesh_to_local_loc, 1, GL_FALSE, m16);
 }
 
-void renderFrameEnd(render_ctx_t &ctx) {}
+// resolve the miniature pass onto the canvas (see dof_gl_t). the terrain
+// program is left current again, as the rest of the frame code assumes
+void renderFrameEnd(render_ctx_t &ctx) {
+	auto &d = ctx.dof;
+	if (!d.on) return;
+	glBindFramebuffer(GL_FRAMEBUFFER, 0);
+	glViewport(0, 0, d.w, d.h);
+	glDisable(GL_DEPTH_TEST);
+	glUseProgram(d.program);
+	glBindVertexArray(d.vao);
+	glActiveTexture(GL_TEXTURE0);
+	glBindTexture(GL_TEXTURE_2D, d.color);
+	glActiveTexture(GL_TEXTURE1);
+	glBindTexture(GL_TEXTURE_2D, d.depth);
+	glUniform1i(d.color_loc, 0);
+	glUniform1i(d.depth_loc, 1);
+	glUniform2f(d.viewport_loc, (float)d.w, (float)d.h);
+	glUniform3f(d.planes_loc, d.near, d.far, d.ortho ? 1.0f : 0.0f);
+	glUniform3f(d.params_loc, d.focus, d.strength * d.h, d.range);
+	glDrawArrays(GL_TRIANGLES, 0, 3);
+	glBindVertexArray(0);
+	glActiveTexture(GL_TEXTURE1);
+	glBindTexture(GL_TEXTURE_2D, 0);
+	glActiveTexture(GL_TEXTURE0); // the terrain textures live on unit 0
+	glEnable(GL_DEPTH_TEST);
+	glUseProgram(ctx.program);
+}
+
 
 bool renderReadPixels(render_ctx_t &ctx, int w, int h, uint8_t *rgb) {
 	glPixelStorei(GL_PACK_ALIGNMENT, 1);
@@ -263,6 +345,75 @@ GLuint makeShader(const char* vert_src, const char* frag_src) {
 	glDeleteShader(vert_shader);
 	glDeleteShader(frag_shader);
 	return program;
+}
+
+void renderDofInit(render_ctx_t &ctx) {
+	auto &d = ctx.dof;
+	d.program = makeShader(
+		"#version 300 es\n"
+		// one triangle covering the screen, no buffers
+		"out vec2 v_uv;"
+		"void main() {"
+		"	vec2 p = vec2(gl_VertexID == 1 ? 3.0 : -1.0, gl_VertexID == 2 ? 3.0 : -1.0);"
+		"	v_uv = p * 0.5 + 0.5;"
+		"	gl_Position = vec4(p, 0.0, 1.0);"
+		"}",
+		"#version 300 es\n"
+		"precision highp float;"
+		"uniform sampler2D color_tex;"
+		"uniform sampler2D depth_tex;"
+		"uniform vec2 viewport;"
+		"uniform vec3 planes;" // near, far, ortho flag
+		"uniform vec3 params;" // focus (m), max radius (px), sharp band (fraction of focus)
+		"in vec2 v_uv;"
+		"out vec4 frag_color;"
+		// depth buffer value -> distance along the view axis, meters
+		"float lin(float d) {"
+		"	if (planes.z > 0.5) return planes.x + d * (planes.y - planes.x);"
+		"	float z = d * 2.0 - 1.0;"
+		"	return 2.0 * planes.x * planes.y / (planes.y + planes.x - z * (planes.y - planes.x));"
+		"}"
+		// circle of confusion in pixels: zero inside the sharp band around
+		// the focus distance, ramping to the max over another band's width.
+		// relative to the focus, so the look is the same at any altitude
+		"float coc(vec2 uv) {"
+		"	float t = abs(lin(texture(depth_tex, uv).r) - params.x) / (params.x * params.z) - 1.0;"
+		"	return clamp(t, 0.0, 1.0) * params.y;"
+		"}"
+		"void main() {"
+		"	float c0 = coc(v_uv);"
+		"	vec3 sum = texture(color_tex, v_uv).rgb;"
+		"	float wsum = 1.0;"
+		"	if (c0 > 0.5) {"
+		// a golden-angle spiral disc of taps out to the pixel's own radius.
+		// a tap only counts if its own blur disc reaches back here, which
+		// keeps a sharp foreground from smearing into a soft background
+		"		const int N = 32;"
+		"		for (int i = 0; i < N; i++) {"
+		"			float r = sqrt((float(i) + 0.5) / float(N)) * c0;"
+		"			float a = float(i) * 2.39996;"
+		"			vec2 uv = v_uv + vec2(cos(a), sin(a)) * r / viewport;"
+		"			float w = clamp(coc(uv) - r + 1.0, 0.0, 1.0);"
+		"			sum += texture(color_tex, uv).rgb * w;"
+		"			wsum += w;"
+		"		}"
+		"	}"
+		"	vec3 c = sum / wsum;"
+		// toy paint: a little more saturation and contrast
+		"	float l = dot(c, vec3(0.299, 0.587, 0.114));"
+		"	c = mix(vec3(l), c, 1.35);"
+		"	c = (c - 0.5) * 1.12 + 0.5;"
+		"	frag_color = vec4(clamp(c, 0.0, 1.0), 1.0);"
+		"}"
+	);
+	d.color_loc = glGetUniformLocation(d.program, "color_tex");
+	d.depth_loc = glGetUniformLocation(d.program, "depth_tex");
+	d.viewport_loc = glGetUniformLocation(d.program, "viewport");
+	d.planes_loc = glGetUniformLocation(d.program, "planes");
+	d.params_loc = glGetUniformLocation(d.program, "params");
+	// an empty vao: the terrain program's attribute arrays are enabled on
+	// the default one, and drawing with those enabled but unbacked is an error
+	glGenVertexArrays(1, &d.vao);
 }
 
 // --- path overlay ---------------------------------------------------------
@@ -585,5 +736,6 @@ void renderInit(render_ctx_t &ctx, void *) {
 	glEnableVertexAttribArray(ctx.texcoords_loc);
 
 	renderPathInit(ctx);
-	glUseProgram(ctx.program); // path init left its own program current
+	renderDofInit(ctx);
+	glUseProgram(ctx.program); // the overlay inits left their own programs current
 }

@@ -707,7 +707,7 @@
   // view state (camera pose, fov, speed gain, map zoom) persists in
   // localstorage so a reload puts you back where you were
   // the seattle skyline from out on elliott bay
-  const DEFAULT_VIEW = { lat: 47.5980, lon: -122.3750, alt: 800, heading: 65, tilt: -12, fov: 45, zoom: 12, gain: 1, ortho: false, tube: null, full3d: false };
+  const DEFAULT_VIEW = { lat: 47.5980, lon: -122.3750, alt: 800, heading: 65, tilt: -12, fov: 45, zoom: 12, gain: 1, ortho: false, miniature: false, tube: null, full3d: false };
   const START = (() => {
     // test mode ignores saved state entirely: a capture must not depend on
     // whatever pose the last interactive session happened to leave behind
@@ -735,7 +735,7 @@
     try {
       localStorage.setItem('earth-view', JSON.stringify({
         lat: p.lat, lon: p.lon, alt: p.alt, heading: p.heading, tilt: p.tilt,
-        roll: p.roll, fov: p.fov, zoom: map.getZoom(), gain, ortho, hug, full3d,
+        roll: p.roll, fov: p.fov, zoom: map.getZoom(), gain, ortho, hug, miniature, full3d,
         tube: tubeRect ? { rect: tubeRect, on: tubeOn, ewAxis: tubeAxisEw } : null,
       }));
     } catch (e) {}
@@ -961,10 +961,12 @@
   // frame: W/S dolly along the view, Q/E boom along view-up. arrows pan/tilt
   // so no mouse is needed. Z/X zoom (fov). -/= sticky speed gain. shift slow
   const keys = {};
-  const handled = new Set(['KeyW','KeyA','KeyS','KeyD','KeyQ','KeyE','KeyR','KeyF','KeyZ','KeyX','KeyG','KeyO','KeyC','KeyK','KeyL','KeyM','KeyT','KeyP','KeyV',
+  const handled = new Set(['KeyW','KeyA','KeyS','KeyD','KeyQ','KeyE','KeyR','KeyF','KeyZ','KeyX','KeyG','KeyO','KeyC','KeyK','KeyL','KeyM','KeyT','KeyP','KeyV','KeyN',
     'Space','ArrowLeft','ArrowRight','ArrowUp','ArrowDown','Minus','Equal','Digit0','Numpad0','Home']);
   let gain = 1; // re-initialized from the saved view once it loads
   let ortho = false;
+  let miniature = false; // the tilt-shift look (N)
+  const setMiniature = (on) => { miniature = on; view.setMiniature(on, 0.015, 0.35); updateHint(); };
   let hug = false; // terrain hug: hold height above the mesh, not the sphere
   // riding the dropped track (V). declared up here with the other mode flags
   // because updateHint reads it long before the path section is evaluated
@@ -975,6 +977,7 @@
     document.getElementById('hint').textContent =
       HINTS[followOn ? 'follow' : tubeOn ? 'tube' : ortho ? 'ortho' : 'persp']
         + (mipmaps ? '' : ' · MIPMAPS OFF')
+        + (miniature ? ' · MINIATURE (N off)' : ' · N miniature')
       // T only does anything once a rect exists
       + (!tubeOn && tubeRect ? ' · T roll tube · esc clear' : '');
     document.getElementById('speed').textContent =
@@ -997,6 +1000,7 @@
     view.setRoll(0);
     gain = DEFAULT_VIEW.gain;
     if (ortho) { ortho = false; view.setOrtho(false); }
+    if (miniature) setMiniature(false);
     if (hug) { hug = false; view.setTerrainFollow(false); }
     map.setZoom(DEFAULT_VIEW.zoom);
     following = true;
@@ -1012,6 +1016,7 @@
     if (e.code === 'Equal' && !e.repeat) { gain = Math.min(16, gain*2); updateHint(); }
     // no ortho inside the tube: its extent/zoom anchoring assumes normal
     // terrain below, and a parallel projection of the tube reads as mush
+    if (e.code === 'KeyN' && !e.repeat) setMiniature(!miniature);
     if (e.code === 'KeyO' && !e.repeat && !tubeOn) { ortho = !ortho; view.setOrtho(ortho); updateHint(); }
     // terrain hug: cruise at a fixed height above the mesh — over the
     // sphere normally, radially above the wall inside the tube
@@ -2429,7 +2434,7 @@
     statusEl.textContent = bits.join(' · ');
   }
   const dofCount = () => (freeFlags.pos ? 3 : 0) + (freeFlags.aim ? 2 : 0)
-    + (freeFlags.fov ? 1 : 0);
+    + (freeFlags.fov ? 1 : 0) + (freeFlags.roll ? 1 : 0);
 
   // --- capturing a new pair ---
   // two clicks: first the point in the photo, then the same feature on the
@@ -2886,6 +2891,11 @@
       view.setOrtho(ortho);
       hug = !!START.hug;
       view.setTerrainFollow(hug);
+      if (START.miniature) setMiniature(true);
+      // a banked camera comes back banked. inside the tube the bank belongs to
+      // the airplane frame and is restored after the roll-up below instead,
+      // because that is what creates the frame to bank
+      if (START.roll && !(START.tube && START.tube.on)) view.setRoll(START.roll);
       // restore a saved tube rect; if it was rolled, it rolls up again from
       // flat (the camera pose is already wherever it was saved)
       if (START.tube && START.tube.rect) {
