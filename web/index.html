@@ -96,17 +96,15 @@
            width: 236px; max-width: 100%; color: #fff;
            background: rgba(0,0,0,.72); font: 12px sans-serif;
            padding: 8px; border-radius: 5px; }
-  /* one panel for the photo and its pairs: the photo's own controls are up
-     whenever there is a photo, and the pair machinery folds away inside it
-     (the 'pairs' button in its head, or P). two panels meant the opacity of a
-     picture and the size of the same picture lived in different boxes */
+  /* one panel for the photo and its pairs: both are up whenever there is a
+     photo. two panels meant the opacity of a picture and the size of the
+     same picture lived in different boxes */
   body.overlay #photopanel { display: flex; }
   #appairsblock { display: none; flex-direction: column; gap: 6px; min-height: 0; }
   body.align #appairsblock { display: flex; }
-  body.align #appairs { background: #ff7f0e; color: #000; }
-  /* asked for the pairs, but this view can't have them */
+  /* there's a photo, but this view can't have pairs */
   #apoff { display: none; }
-  body.pairswanted:not(.align) #apoff { display: block; }
+  body.overlay:not(.align) #apoff { display: block; }
   body.path #pathpanel { display: flex; }
   /* roll has no other marker in the ui — nothing in the hud says the horizon
      is off — so it gets a panel whose whole job is to be present when the
@@ -218,10 +216,9 @@
     <div id="speed"></div>
     <div id="photopanel" class="panel">
       <div class="head"><span>photo</span>
-        <button id="appairs" title="point pairs (P)">pairs</button>
         <button class="x" id="apforget" title="remove the photo">✕</button>
       </div>
-      <div class="row"><span id="overlayblendtoggle" title="toggle the photo on and off (click)">opacity</span>
+      <div class="row"><span id="overlayblendtoggle" title="toggle the photo on and off (P)">opacity</span>
         <input id="overlayblend" type="range" min="0" max="100" value="50" title="overlay opacity">
         <button id="apfit" title="size the photo to fit the view">fit</button>
       </div>
@@ -275,7 +272,7 @@
   const HINTS = {
     persp: 'WASD move · R/F up/down · hold space: view-frame · arrows/drag look · ' +
       'Z/X zoom · shift slow · G hug terrain · O ortho · C pick debug · L lod debug · M mipmaps · 0 reset view · ' +
-      'P point pairs · click map to teleport · ⇧drag map: tube rect',
+      'P photo on/off · click map to teleport · ⇧drag map: tube rect',
     ortho: 'WASD/drag pan · arrows orbit around center · wheel/Z/X/R/F zoom · ' +
       'shift slow · O perspective · C pick debug · L lod debug · M mipmaps · 0 reset view · ' +
       'click map to teleport · ⇧drag map: tube rect',
@@ -966,12 +963,14 @@
   overlayBlend.addEventListener('input', applyOverlayBlend);
   // the word "opacity" is a switch: full if the photo is faded at all, off if
   // it's full. quicker than dragging the slider end to end while comparing
-  document.getElementById('overlayblendtoggle').addEventListener('click', () => {
+  const toggleOverlayBlend = () => {
+    if (!document.body.classList.contains('overlay')) return;
     overlayBlend.value = +overlayBlend.value >= 100 ? 0 : 100;
     applyOverlayBlend();
     saveAlign();
     canvas.focus();
-  });
+  };
+  document.getElementById('overlayblendtoggle').addEventListener('click', toggleOverlayBlend);
   // the ✕ that removes the photo lives in the panel head now, and is wired
   // where the rest of that panel is
   // dragover has to be cancelled or the browser navigates to the dropped file.
@@ -1109,7 +1108,7 @@
     // ride the dropped track; does nothing without one
     if (e.code === 'KeyV' && !e.repeat) toggleFollow();
     // the point-pair panel; only does anything with a photo up, in perspective
-    if (e.code === 'KeyP' && !e.repeat) togglePanel();
+    if (e.code === 'KeyP' && !e.repeat) toggleOverlayBlend();
     if ((e.code === 'Digit0' || e.code === 'Numpad0' || e.code === 'Home') && !e.repeat) resetView();
     // like the native app's L key: tint octants red where a finer tile is
     // wanted but not yet downloaded
@@ -2281,7 +2280,6 @@
   // markers out in the view are two views of the same pair, so hovering
   // either lights up both
   let hovPair = -1;
-  let panelOpen = false;
   let refImageKey = null; // name:size of the stored photo, to spot a re-drop
   const freeFlags = { pos: true, aim: true, fov: true, roll: false };
   const listEl = document.getElementById('aplist');
@@ -2316,7 +2314,7 @@
     if (storageFrozen) return;
     try {
       localStorage.setItem('earth-align', JSON.stringify({
-        pairs, ov, free: freeFlags, open: panelOpen, key: refImageKey,
+        pairs, ov, free: freeFlags, key: refImageKey,
         opacity: +overlayBlend.value,
       }));
     } catch (e) {}
@@ -2333,12 +2331,11 @@
   // pointless without a photo. called from updateHint, so every mode switch
   // re-evaluates it
   function alignRefresh() {
-    const on = panelOpen && document.body.classList.contains('overlay')
-      && !ortho && !tubeOn;
+    // pairs come with the photo, except where they can't (ortho, or inside
+    // the tube) — and then the panel says so rather than silently dropping
+    // half of itself
+    const on = document.body.classList.contains('overlay') && !ortho && !tubeOn;
     document.body.classList.toggle('align', on);
-    // wanted but not possible (ortho, or inside the tube): the panel says so
-    // rather than silently dropping half of itself
-    document.body.classList.toggle('pairswanted', panelOpen);
     if (!on) { cancelCapture(); stopSolve(); }
     document.getElementById('apfreepos').checked = freeFlags.pos;
     document.getElementById('apfreeaim').checked = freeFlags.aim;
@@ -2795,13 +2792,6 @@
   // the head's ✕ gets rid of the photo, which is the only destructive thing
   // this panel does; 'pairs' folds the pair machinery away without touching it
   document.getElementById('apforget').addEventListener('click', clearOverlay);
-  const togglePanel = () => {
-    panelOpen = !panelOpen;
-    alignRefresh();
-    saveAlign();
-    canvas.focus();
-  };
-  document.getElementById('appairs').addEventListener('click', togglePanel);
   for (const [id, key] of [['apfreepos', 'pos'], ['apfreeaim', 'aim'],
                           ['apfreefov', 'fov'], ['apfreeroll', 'roll']]) {
     document.getElementById(id).addEventListener('change', (e) => {
@@ -2838,7 +2828,6 @@
         overlayBlend.value = saved.opacity;
         applyOverlayBlend();
       }
-      panelOpen = !!saved.open;
       refImageKey = saved.key || null;
       if (Array.isArray(saved.pairs))
         pairs = saved.pairs.filter((p) => p && Number.isFinite(p.u) && Number.isFinite(p.v)
