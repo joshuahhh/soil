@@ -1219,7 +1219,12 @@
       const r = rightEl.getBoundingClientRect();
       const x = e.clientX - r.left, y = e.clientY - r.top;
       const held = viewToPhoto(x, y);
-      ov.scale = clampScale(ov.scale * Math.pow(0.9, e.deltaY / 200));
+      // a mouse wheel with shift held arrives as a *horizontal* scroll (the
+      // browser's shift-scroll convention), and some wheels count in lines
+      // rather than pixels — a trackpad gives a plain deltaY, so take
+      // whichever axis has the motion and put lines on a pixel scale
+      const d = (e.deltaY || e.deltaX) * (e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? 400 : 1);
+      ov.scale = clampScale(ov.scale * Math.pow(0.9, d / 200));
       const b = overlayBox();
       if (held && b) {
         ov.cx = (x + (0.5 - held.u) * b.w) / r.width;
