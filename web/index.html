@@ -113,6 +113,8 @@
      camera is banked, and to level it when dismissed */
   body.rolled #rollpanel { display: flex; }
   #rollamount { font: 11px monospace; opacity: .85; }
+  #overlayblendtoggle { cursor: pointer; user-select: none; }
+  #overlayblendtoggle:hover { text-decoration: underline; }
   .panel .head { display: flex; align-items: center; justify-content: space-between;
                  gap: 6px; font-weight: bold; }
   /* the title takes the slack, so the head's buttons sit together on the right
@@ -219,7 +221,7 @@
         <button id="appairs" title="point pairs (P)">pairs</button>
         <button class="x" id="apforget" title="remove the photo">✕</button>
       </div>
-      <div class="row">opacity
+      <div class="row"><span id="overlayblendtoggle" title="toggle the photo on and off (click)">opacity</span>
         <input id="overlayblend" type="range" min="0" max="100" value="50" title="overlay opacity">
         <button id="apfit" title="size the photo to fit the view">fit</button>
       </div>
@@ -962,6 +964,14 @@
     canvas.focus();
   };
   overlayBlend.addEventListener('input', applyOverlayBlend);
+  // the word "opacity" is a switch: full if the photo is faded at all, off if
+  // it's full. quicker than dragging the slider end to end while comparing
+  document.getElementById('overlayblendtoggle').addEventListener('click', () => {
+    overlayBlend.value = +overlayBlend.value >= 100 ? 0 : 100;
+    applyOverlayBlend();
+    saveAlign();
+    canvas.focus();
+  });
   // the ✕ that removes the photo lives in the panel head now, and is wired
   // where the rest of that panel is
   // dragover has to be cancelled or the browser navigates to the dropped file.
@@ -1013,7 +1023,13 @@
     const key = file.name + ':' + file.size;
     const same = key === refImageKey;
     refImageKey = key;
-    if (!same) clearPairs();
+    if (!same) {
+      clearPairs();
+      // a new subject starts fully visible: you look at the photo first and
+      // fade it once you're lining the view up
+      overlayBlend.value = 100;
+      applyOverlayBlend();
+    }
     setOverlay(file, same);
     idbPut('ref-image', file, 'app');
     saveAlign();
@@ -2533,6 +2549,11 @@
     if (!document.body.classList.contains('align')) return;
     capture = { stage: 'photo' };
     document.body.classList.add('capturing');
+    // the photo is the thing being clicked, so show all of it; the slider
+    // comes back to where it was when the capture ends
+    blendBeforeCapture = +overlayBlend.value;
+    overlayBlend.value = 100;
+    applyOverlayBlend();
     setBanner('click the point in the photo   (esc to cancel)');
     addBtn.textContent = 'cancel';
     canvas.focus();
@@ -2556,9 +2577,8 @@
         return;
       }
       capture = { stage: 'mesh', u: p.u, v: p.v };
-      // fade the photo down so the terrain under it is clickable by eye
-      blendBeforeCapture = +overlayBlend.value;
-      overlayBlend.value = Math.min(blendBeforeCapture, 15);
+      // now the terrain is the thing being clicked: the photo goes away
+      overlayBlend.value = 0;
       applyOverlayBlend();
       setBanner('now click the same feature on the terrain   (esc to cancel)');
       return;
