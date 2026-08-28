@@ -1226,9 +1226,13 @@
       const d = (e.deltaY || e.deltaX) * (e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? 400 : 1);
       ov.scale = clampScale(ov.scale * Math.pow(0.9, d / 200));
       const b = overlayBox();
+      // divide by the same size overlayBox() multiplies by — the rect is
+      // fractional and clientWidth/Height are rounded, and solving against
+      // one while drawing against the other nudges the photo a little the
+      // same way every tick, which reads as a drift while zooming
       if (held && b) {
-        ov.cx = (x + (0.5 - held.u) * b.w) / r.width;
-        ov.cy = (y + (0.5 - held.v) * b.h) / r.height;
+        ov.cx = (x + (0.5 - held.u) * b.w) / rightEl.clientWidth;
+        ov.cy = (y + (0.5 - held.v) * b.h) / rightEl.clientHeight;
       }
       layoutOverlay();
       saveAlign();
