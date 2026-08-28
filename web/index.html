@@ -66,6 +66,8 @@
   #pairs { position: absolute; inset: 0; width: 100%; height: 100%;
            z-index: 6; pointer-events: none; overflow: visible; display: none; }
   body.align #pairs { display: block; }
+  /* a minimized photo panel takes its markers off the view with it */
+  body:has(#photopanel.min) #pairs { display: none; }
   /* what the pointer can take hold of. the visible art is thin — a 2.5px ring
      and a dashed line — so hit targets are separate invisible shapes over it:
      a fat line along the residual, a disc at each end, and the number itself.
@@ -114,7 +116,9 @@
   #overlayblendtoggle { cursor: pointer; user-select: none; }
   #overlayblendtoggle:hover { text-decoration: underline; }
   .panel .head { display: flex; align-items: center; justify-content: space-between;
-                 gap: 6px; font-weight: bold; }
+                 gap: 6px; font-weight: bold; cursor: pointer; user-select: none;
+                 /* reach the panel's edges, so a click just off the title still counts */
+                 margin: -8px -8px 0; padding: 8px 8px 0; }
   /* the title takes the slack, so the head's buttons sit together on the right
      however many of them a panel has */
   .panel .head span { flex: 1; min-width: 0; }
@@ -125,6 +129,10 @@
   .panel button:disabled { opacity: .4; cursor: default; }
   .panel button.primary { background: #ff7f0e; color: #000; font-weight: bold; }
   .panel .x { background: none; padding: 0 4px; font-size: 14px; }
+  /* minimized: just the head line, so a panel can get out of the way without
+     giving up what it holds (the ✕ is what gives that up) */
+  .panel.min > :not(.head) { display: none !important; }
+  .panel .minbtn { background: none; padding: 0 4px; font-size: 14px; line-height: 1; }
   .panel label { display: flex; align-items: center; gap: 2px; }
   .panel input[type=range] { flex: 1; min-width: 0; }
   /* a locked switch (the drape one, on a file with no elevations) should read
@@ -961,6 +969,25 @@
     canvas.focus();
   };
   overlayBlend.addEventListener('input', applyOverlayBlend);
+  // a panel's head is its minimize switch: click anywhere on it (except its
+  // other buttons, like ✕) and the panel shrinks to that line; the –/+ in
+  // it says which way the next click goes
+  for (const panel of document.querySelectorAll('.panel')) {
+    const head = panel.querySelector('.head');
+    const btn = document.createElement('button');
+    btn.className = 'minbtn';
+    btn.textContent = '–';
+    head.insertBefore(btn, head.querySelector('button'));
+    head.title = 'minimize';
+    head.addEventListener('click', (e) => {
+      const b = e.target.closest('button');
+      if (b && b !== btn) return; // ✕ and friends do their own thing
+      const min = panel.classList.toggle('min');
+      btn.textContent = min ? '+' : '–';
+      head.title = min ? 'expand' : 'minimize';
+      canvas.focus();
+    });
+  }
   // the word "opacity" is a switch: full if the photo is faded at all, off if
   // it's full. quicker than dragging the slider end to end while comparing
   const toggleOverlayBlend = () => {
