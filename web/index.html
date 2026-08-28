@@ -1034,11 +1034,17 @@
     saveAlign();
   });
 
-  // --- input on the canvas -> built-in flying controls ----------------------
+  // --- keyboard -> built-in flying controls -----------------------------------
   // ground frame: WASD cruise/truck, Q/E pedestal. hold Space for the view
   // frame: W/S dolly along the view, Q/E boom along view-up. arrows pan/tilt
-  // so no mouse is needed. Z/X zoom (fov). -/= sticky speed gain. shift slow
+  // so no mouse is needed. Z/X zoom (fov). -/= sticky speed gain. shift slow.
+  // the keys are the page's, not the canvas's: nudging a slider or clicking
+  // a button in a panel used to take them away until you clicked the view
+  // again. only a field you can type into keeps them for itself
   const keys = {};
+  const typingIn = (t) => !!t && (t.tagName === 'TEXTAREA' || t.isContentEditable
+    || t.tagName === 'SELECT'
+    || (t.tagName === 'INPUT' && !['range', 'checkbox', 'color', 'button', 'radio'].includes(t.type)));
   const handled = new Set(['KeyW','KeyA','KeyS','KeyD','KeyQ','KeyE','KeyR','KeyF','KeyZ','KeyX','KeyG','KeyO','KeyC','KeyK','KeyL','KeyM','KeyT','KeyP','KeyV','KeyN',
     'Space','ArrowLeft','ArrowRight','ArrowUp','ArrowDown','Minus','Equal','Digit0','Numpad0','Home']);
   let gain = 1; // re-initialized from the saved view once it loads
@@ -1085,9 +1091,10 @@
     followVel = prevMark = null; // a jump, not motion: don't lead the ease
     updateHint();
   };
-  canvas.addEventListener('keydown', (e) => {
+  addEventListener('keydown', (e) => {
     // browser/os shortcuts (cmd-R reload etc.) pass through untouched
     if (e.metaKey || e.ctrlKey || e.altKey) return;
+    if (typingIn(e.target)) return;
     if (handled.has(e.code)) e.preventDefault();
     keys[e.code] = true;
     if (e.code === 'Minus' && !e.repeat) { gain = Math.max(1/16, gain/2); updateHint(); }
@@ -1162,8 +1169,10 @@
     const x = e.clientX - r.left, y = e.clientY - r.top;
     captureClick(x, y, (x / r.width) * 2 - 1, 1 - (y / r.height) * 2);
   });
-  canvas.addEventListener('keyup', (e) => { keys[e.code] = false; });
-  canvas.addEventListener('blur', () => { for (const k in keys) keys[k] = false; });
+  addEventListener('keyup', (e) => { keys[e.code] = false; });
+  // leaving the window (cmd-tab mid-flight) loses the keyups, so let go of
+  // everything rather than cruising on until the next keypress
+  addEventListener('blur', () => { for (const k in keys) keys[k] = false; });
   let dragging = false, yaw = 0, pitch = 0;
   let ovDragging = false; // shift+drag slides the reference photo instead
   canvas.addEventListener('pointerdown', (e) => {
