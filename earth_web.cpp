@@ -295,7 +295,7 @@ struct EarthView {
 		o.set("heading", p.heading * 180.0 / M_PI);
 		o.set("tilt", p.tilt * 180.0 / M_PI);
 		o.set("fov", camera.fov * 180.0 / M_PI);
-		double roll = 0;
+		double roll = camera.roll;
 		if (camera.airplane) {
 			auto up = camera.eye.normalized();
 			Vector3d right = camera.direction.cross(up);
@@ -312,7 +312,7 @@ struct EarthView {
 	// bank the airplane frame to an absolute roll angle (degrees, 0 =
 	// wings level); the setPose counterpart for the roll degree of freedom
 	void setRoll(double deg) {
-		if (!camera.airplane) return;
+		if (!camera.airplane) { camera.roll = deg * M_PI / 180.0; return; }
 		alignAirplaneUp(camera);
 		camera.body_up = AngleAxisd(deg * M_PI / 180.0, camera.direction) * camera.body_up;
 	}
@@ -330,10 +330,12 @@ struct EarthView {
 		auto ortho = camera.ortho;
 		auto ortho_extent = camera.ortho_extent;
 		auto airplane = camera.airplane;
+		auto roll = camera.roll;
 		camera = poseToCamera(p, planetRadius(), camera.fov);
 		camera.ortho = ortho;
 		camera.ortho_extent = ortho_extent;
 		camera.airplane = airplane;
+		camera.roll = roll;
 		if (airplane) alignAirplaneUp(camera); // teleports land wings-level
 		clampOrthoTilt(camera);
 	}
@@ -467,7 +469,8 @@ struct EarthView {
 		if (w <= 0 || h <= 0) return val::null();
 		// the frustum ray, built from the same basis lookAt derives (right =
 		// direction x up, view-up = right x direction)
-		Vector3d world_up = camera.eye.normalized();
+		Vector3d world_up = AngleAxisd(camera.roll, camera.direction)
+			* camera.eye.normalized();
 		Vector3d right = camera.direction.cross(world_up);
 		if (right.norm() < 1e-9) return val::null(); // looking straight down the axis
 		right.normalize();
@@ -675,11 +678,11 @@ EMSCRIPTEN_BINDINGS(earth) {
 		.function("getPathGroundAlt", &EarthView::getPathGroundAlt)
 		.function("setSkyColor", &EarthView::setSkyColor)
 		.function("setDebugLod", &EarthView::setDebugLod)
+		.function("setLodScale", &EarthView::setLodScale)
+		.function("getLodScale", &EarthView::getLodScale)
 		.function("setMipmaps", &EarthView::setMipmaps)
 		.function("getStats", &EarthView::getStats)
 		.function("getDrawnNodes", &EarthView::getDrawnNodes)
-		.function("setLodScale", &EarthView::setLodScale)
-		.function("getLodScale", &EarthView::getLodScale)
 		.function("fly", &EarthView::fly);
 	emscripten::function("createView", &createView, emscripten::allow_raw_pointers());
 	emscripten::function("deliverFetch", &deliverFetch);

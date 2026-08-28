@@ -21,6 +21,12 @@ struct camera_t {
 	// clamps. body_up is only meaningful while airplane is set
 	bool airplane = false;
 	Vector3d body_up = Vector3d::UnitZ();
+	// radians about the boresight, for the ordinary ground-frame camera: the
+	// image rotates, the controls don't. airplane mode expresses the same
+	// freedom through body_up instead (it owns its whole frame), so this is
+	// only read when airplane is off. a photo taken by a hand-held camera is
+	// almost never level, and matching one is what this is for
+	double roll = 0;
 };
 
 // (re)level the airplane frame: body up from the planet's up at the current

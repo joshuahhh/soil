@@ -57,19 +57,7 @@
      the window or collapsing the map can't change which part of the frustum
      a given point of the photo stands for — an alignment stays aligned */
   #overlay { position: absolute; pointer-events: none; z-index: 4; }
-  #overlaybar { position: absolute; right: 8px; bottom: 8px; z-index: 11;
-                display: none; align-items: center; gap: 8px; color: #fff;
-                background: rgba(0,0,0,.55); font: 12px sans-serif;
-                padding: 4px 6px 4px 8px; border-radius: 4px; }
-  #overlaybar input[type=range] { width: 90px; }
-  #overlayclose { border: 0; background: none; color: #fff; font: 14px sans-serif;
-                  cursor: pointer; padding: 0 3px; line-height: 1; }
-  #overlaypairs { border: 0; background: rgba(255,255,255,.15); color: #fff;
-                  font: 12px sans-serif; cursor: pointer; padding: 3px 7px;
-                  border-radius: 3px; }
-  body.align #overlaypairs { background: #ff7f0e; color: #000; }
   body:not(.overlay) #overlay { display: none; }
-  body.overlay #overlaybar { display: flex; }
 
   /* --- point-pair alignment -------------------------------------------------
      each pair ties a point of the photo to a point on the mesh; the solver
@@ -99,19 +87,37 @@
   #pairs g.hov .res { stroke-width: 2.5; opacity: 1; }
   #pairs g.sel .res { stroke: #ff7f0e; stroke-width: 2.5; opacity: 1; }
   #pairs g.sel .lbl { fill: #ff7f0e; }
-  /* the panel: pair list and solver controls. it lives in the hud's column
-     rather than floating in the same corner, so the two lay themselves out
-     instead of being kept apart by a hardcoded offset. min-height: 0 lets it
-     give way in a short window — #aplist takes up the slack by scrolling */
-  /* the two hud panels (point pairs, path) share their chrome */
+  /* the two hud panels (photo, path) share their chrome. they live in the
+     hud's column rather than floating in a corner, so the two lay themselves
+     out instead of being kept apart by a hardcoded offset. min-height: 0 lets
+     a panel give way in a short window — #aplist takes up the slack by
+     scrolling */
   .panel { display: none; flex-direction: column; gap: 6px; min-height: 0;
            width: 236px; max-width: 100%; color: #fff;
            background: rgba(0,0,0,.72); font: 12px sans-serif;
            padding: 8px; border-radius: 5px; }
-  body.align #alignpanel { display: flex; }
+  /* one panel for the photo and its pairs: the photo's own controls are up
+     whenever there is a photo, and the pair machinery folds away inside it
+     (the 'pairs' button in its head, or P). two panels meant the opacity of a
+     picture and the size of the same picture lived in different boxes */
+  body.overlay #photopanel { display: flex; }
+  #appairsblock { display: none; flex-direction: column; gap: 6px; min-height: 0; }
+  body.align #appairsblock { display: flex; }
+  body.align #appairs { background: #ff7f0e; color: #000; }
+  /* asked for the pairs, but this view can't have them */
+  #apoff { display: none; }
+  body.pairswanted:not(.align) #apoff { display: block; }
   body.path #pathpanel { display: flex; }
+  /* roll has no other marker in the ui — nothing in the hud says the horizon
+     is off — so it gets a panel whose whole job is to be present when the
+     camera is banked, and to level it when dismissed */
+  body.rolled #rollpanel { display: flex; }
+  #rollamount { font: 11px monospace; opacity: .85; }
   .panel .head { display: flex; align-items: center; justify-content: space-between;
                  gap: 6px; font-weight: bold; }
+  /* the title takes the slack, so the head's buttons sit together on the right
+     however many of them a panel has */
+  .panel .head span { flex: 1; min-width: 0; }
   .panel .row { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
   .panel button { border: 0; border-radius: 3px; padding: 4px 8px; cursor: pointer;
                   font: 12px sans-serif; background: rgba(255,255,255,.15); color: #fff; }
@@ -135,7 +141,7 @@
   /* how far along the track the follow camera has got; only up while riding */
   #pathprogress { display: none; font: 11px monospace; }
   body.riding #pathprogress { display: block; }
-  #alignpanel .tip, #pathpanel .tip { font: 10px sans-serif; opacity: .55; line-height: 1.35; }
+  .panel .tip { font: 10px sans-serif; opacity: .55; line-height: 1.35; }
   #aplist { overflow-y: auto; min-height: 0; display: flex; flex-direction: column; gap: 2px; }
   #aplist .pair { display: flex; align-items: center; gap: 6px; padding: 2px 4px;
                   border-radius: 3px; cursor: pointer; font: 11px monospace; }
@@ -154,8 +160,6 @@
               white-space: nowrap; pointer-events: none; }
   body.capturing #apbanner { display: block; }
   body.capturing #globe { cursor: crosshair; }
-  /* the pick readout lives in the same corner; get out of the bar's way */
-  body.overlay #pickinfo { bottom: 44px; }
   /* drop target while an image is being dragged over the window */
   body.dropping #right::after { content: ''; position: absolute; inset: 6px; z-index: 12;
              border: 2px dashed rgba(255,255,255,.85); border-radius: 6px;
@@ -207,37 +211,42 @@
   <div id="pickinfo"></div>
   <div id="tubeinfo"></div>
   <div id="apbanner"></div>
-  <div id="overlaybar">
-    <button id="overlaypairs" title="point-pair alignment (P)">pairs</button>
-    <input id="overlayblend" type="range" min="0" max="100" value="50" title="overlay opacity">
-    <button id="overlayclose" title="remove overlay">✕</button>
-  </div>
   <div id="hud">
     <div id="hint"></div>
     <div id="speed"></div>
-    <div id="alignpanel" class="panel">
-      <div class="head"><span>point pairs</span><button class="x" id="apclose" title="close panel">✕</button></div>
-      <div class="row">
-        <button id="apadd">+ add pair</button>
-        <button id="apsolve" class="primary">solve</button>
+    <div id="photopanel" class="panel">
+      <div class="head"><span>photo</span>
+        <button id="appairs" title="point pairs (P)">pairs</button>
+        <button class="x" id="apforget" title="remove the photo">✕</button>
       </div>
-      <div class="row">free:
-        <label><input type="checkbox" id="apfreepos" checked>position</label>
-        <label><input type="checkbox" id="apfreeaim" checked>aim</label>
-        <label><input type="checkbox" id="apfreefov" checked>fov</label>
-      </div>
-      <div id="aplist"></div>
-      <div id="apstatus"></div>
-      <div class="row">photo
-        <input id="apscale" type="range" min="10" max="400" title="photo size">
+      <div class="row">opacity
+        <input id="overlayblend" type="range" min="0" max="100" value="50" title="overlay opacity">
         <button id="apfit" title="size the photo to fit the view">fit</button>
       </div>
-      <div class="row">
-        <button id="apclear">clear pairs</button>
-        <button id="apforget">forget photo</button>
+      <div id="appairsblock">
+        <div class="row">
+          <button id="apadd">+ add pair</button>
+          <button id="apsolve" class="primary">solve</button>
+        </div>
+        <div class="row">free:
+          <label><input type="checkbox" id="apfreepos" checked>position</label>
+          <label><input type="checkbox" id="apfreeaim" checked>aim</label>
+          <label><input type="checkbox" id="apfreefov" checked>fov</label>
+          <label><input type="checkbox" id="apfreeroll">roll</label>
+        </div>
+        <div id="aplist"></div>
+        <div id="apstatus"></div>
+        <div class="row"><button id="apclear">clear pairs</button></div>
+        <div class="tip">drag either end of a pair to adjust it ·
+          shift-drag moves the photo, shift-wheel sizes it about the pointer</div>
       </div>
-      <div class="tip">drag either end of a pair to adjust it ·
-        shift-drag / shift-wheel on the view moves the photo</div>
+      <div id="apoff" class="tip">point pairs need the perspective view</div>
+    </div>
+    <div id="rollpanel" class="panel">
+      <div class="head"><span>roll</span><button class="x" id="rolllevel" title="level the camera">✕</button></div>
+      <div id="rollamount"></div>
+      <div class="tip">the horizon is banked — solving with roll free can do
+        this, and so can flying the tube. ✕ puts it back level</div>
     </div>
     <div id="pathpanel" class="panel">
       <div class="head"><span id="pathname">path</span><button class="x" id="pathclose" title="remove path">✕</button></div>
@@ -629,15 +638,6 @@
   const stats = window.__stats = {
     issued: 0, delivered: 0, failed: 0, inflight: 0,
     idbHits: 0, netHits: 0, maxMs: 0, log: [],
-  };
-  const fetchTile = async (path, id) => {
-    const t0 = performance.now();
-    stats.issued++;
-    stats.inflight++;
-    try {
-      let bytes = path[0] !== 'P' ? await idbGet(path) : undefined;
-      // a hit is a use: it moves the tile to the young end of the lru, and
-      // re-registers one whose bookkeeping went missing (a meta write that
     // the same counts split by what was asked for, with the two waits kept
     // apart: the cache lookup and the network. the engine schedules bulks and
     // nodes separately and a bulk gates a whole subtree, so when a deep zoom
@@ -649,29 +649,39 @@
     const k = stats.kinds[path[0]] || (stats.kinds[path[0]] = {
       n: 0, idb: 0, net: 0, fail: 0, inflight: 0, idbMs: 0, netMs: 0, maxMs: 0 });
     return k;
-      // failed, or a store carried over from before the budget existed)
-      if (bytes) { stats.idbHits++; k.idb++; noteTileUse(path, bytes.length); }
-      if (!bytes) {
-        const resp = await fetch('https://kh.google.com/rt/earth/' + path);
-        if (!resp.ok) throw new Error('http ' + resp.status);
+  };
+  const fetchTile = async (path, id) => {
+    const t0 = performance.now();
+    stats.issued++;
+    stats.inflight++;
     const k = statKind(path);
     k.n++;
     k.inflight++;
-        bytes = new Uint8Array(await resp.arrayBuffer());
-        stats.netHits++;
+    try {
+      let bytes = path[0] !== 'P' ? await idbGet(path) : undefined;
       k.idbMs += performance.now() - t0;
+      // a hit is a use: it moves the tile to the young end of the lru, and
+      // re-registers one whose bookkeeping went missing (a meta write that
+      // failed, or a store carried over from before the budget existed)
+      if (bytes) { stats.idbHits++; k.idb++; noteTileUse(path, bytes.length); }
+      if (!bytes) {
+        const t1 = performance.now();
+        const resp = await fetch('https://kh.google.com/rt/earth/' + path);
+        if (!resp.ok) throw new Error('http ' + resp.status);
+        bytes = new Uint8Array(await resp.arrayBuffer());
+        k.netMs += performance.now() - t1;
+        stats.netHits++;
+        k.net++;
         if (path[0] !== 'P') putTile(path, bytes);
       }
       stats.delivered++;
       Module.deliverFetch(id, true, bytes);
     } catch (e) {
-        const t1 = performance.now();
       stats.failed++;
+      k.fail++;
       stats.log.push(path + ' -> ' + e.message);
       Module.deliverFetch(id, false, null);
-        k.netMs += performance.now() - t1;
     } finally {
-        k.net++;
       stats.inflight--;
       k.inflight--;
       const ms = performance.now() - t0;
@@ -679,16 +689,6 @@
       k.maxMs = Math.max(k.maxMs, ms);
     }
   };
-
-  const canvas = document.getElementById('globe');
-      k.fail++;
-  // the reference-overlay section installs its relayout here. deliberately
-  // var: resize() runs (and setFull3d can call it) long before that section
-  // is evaluated, and reading a let/const from its dead zone would throw
-  var afterResize = null;
-  const resize = () => {
-    const dpr = window.devicePixelRatio || 1;
-    canvas.width = Math.round(canvas.clientWidth * dpr);
   // alongside the engine's own 2s line, so the two can be read together.
   // ?fetchlog=0 turns it off
   if (new URLSearchParams(location.search).get('fetchlog') !== '0') setInterval(() => {
@@ -703,6 +703,15 @@
     }
     if (parts.length) console.log('fetch · ' + parts.join(' · '));
   }, 2000);
+
+  const canvas = document.getElementById('globe');
+  // the reference-overlay section installs its relayout here. deliberately
+  // var: resize() runs (and setFull3d can call it) long before that section
+  // is evaluated, and reading a let/const from its dead zone would throw
+  var afterResize = null;
+  const resize = () => {
+    const dpr = window.devicePixelRatio || 1;
+    canvas.width = Math.round(canvas.clientWidth * dpr);
     canvas.height = Math.round(canvas.clientHeight * dpr);
     // the overlay is placed in viewport-relative terms, so it follows
     // window resizes and the map pane collapsing/expanding
@@ -875,6 +884,13 @@
   // relative, so a window resize rescales the photo with the frustum instead
   // of sliding the picture through it
   let ov = { scale: 1, cx: 0.5, cy: 0.5 };
+  // how far the photo can be blown up: 16x the viewport height is enough to
+  // put a window frame or a roof ridge under the pointer when placing a pair,
+  // which is what the big end is for. the slider's own units are log across
+  // that range — linear, it would spend four fifths of its track above 4x and
+  // leave the small end unadjustable
+  const SCALE_MIN = 0.05, SCALE_MAX = 16;
+  const clampScale = (s) => Math.max(SCALE_MIN, Math.min(SCALE_MAX, s));
   const applyOverlayBlend = () => { overlayImg.style.opacity = overlayBlend.value / 100; };
   // the photo's box in viewport pixels; null until the image has decoded
   const overlayBox = () => {
@@ -946,7 +962,8 @@
     canvas.focus();
   };
   overlayBlend.addEventListener('input', applyOverlayBlend);
-  document.getElementById('overlayclose').addEventListener('click', clearOverlay);
+  // the ✕ that removes the photo lives in the panel head now, and is wired
+  // where the rest of that panel is
   // dragover has to be cancelled or the browser navigates to the dropped file.
   // a depth counter keeps the highlight steady as the drag crosses children
   // (dragenter on a child fires before dragleave on its parent)
@@ -1168,9 +1185,21 @@
     // shift+wheel resizes the reference photo rather than the view, the
     // companion of shift+drag's reposition
     if (e.shiftKey && document.body.classList.contains('overlay')) {
-      ov.scale = Math.max(0.05, Math.min(4, ov.scale * Math.pow(0.9, e.deltaY / 200)));
+      // zoom about the pointer: whatever point of the picture is under it
+      // stays under it, so you can wind in on a window frame without chasing
+      // the photo back across the viewport afterwards. the centre is stored
+      // as a fraction of the viewport, so solve for the one that puts that
+      // photo point back where it was at the new size
+      const r = rightEl.getBoundingClientRect();
+      const x = e.clientX - r.left, y = e.clientY - r.top;
+      const held = viewToPhoto(x, y);
+      ov.scale = clampScale(ov.scale * Math.pow(0.9, e.deltaY / 200));
+      const b = overlayBox();
+      if (held && b) {
+        ov.cx = (x + (0.5 - held.u) * b.w) / r.width;
+        ov.cy = (y + (0.5 - held.v) * b.h) / r.height;
+      }
       layoutOverlay();
-      scaleEl.value = Math.round(ov.scale * 100);
       saveAlign();
       return;
     }
@@ -2187,7 +2216,17 @@
     if (!dir) return null;
     const right = vnorm(vcross(dir, up)); // straight up/down: right is undefined
     if (!right) return null;
-    return { eye: vmul(up, planetR + p.alt), dir, right, vup: vcross(right, dir) };
+    const vup = vcross(right, dir);
+    const eye = vmul(up, planetR + p.alt);
+    // the camera's bank turns the screen axes about the boresight — the same
+    // rotation the engine applies to gravity when it builds the view matrix,
+    // so a pair drawn from this basis stays on its feature in a rolled view
+    const r = (p.roll || 0) * D2R;
+    if (!r) return { eye, dir, right, vup };
+    const c = Math.cos(r), sn = Math.sin(r);
+    return { eye, dir,
+      right: vsub(vmul(right, c), vmul(vup, sn)),
+      vup: vadd(vmul(vup, c), vmul(right, sn)) };
   };
   // ecef -> viewport pixels; null when the point is behind the camera
   const projectWith = (b, fovDeg, P, W, H) => {
@@ -2209,12 +2248,11 @@
   let hovPair = -1;
   let panelOpen = false;
   let refImageKey = null; // name:size of the stored photo, to spot a re-drop
-  const freeFlags = { pos: true, aim: true, fov: true };
+  const freeFlags = { pos: true, aim: true, fov: true, roll: false };
   const listEl = document.getElementById('aplist');
   const statusEl = document.getElementById('apstatus');
   const bannerEl = document.getElementById('apbanner');
   const svgEl = document.getElementById('pairs');
-  const scaleEl = document.getElementById('apscale');
   const solveBtn = document.getElementById('apsolve');
   const addBtn = document.getElementById('apadd');
 
@@ -2263,11 +2301,14 @@
     const on = panelOpen && document.body.classList.contains('overlay')
       && !ortho && !tubeOn;
     document.body.classList.toggle('align', on);
+    // wanted but not possible (ortho, or inside the tube): the panel says so
+    // rather than silently dropping half of itself
+    document.body.classList.toggle('pairswanted', panelOpen);
     if (!on) { cancelCapture(); stopSolve(); }
-    scaleEl.value = Math.round(ov.scale * 100);
     document.getElementById('apfreepos').checked = freeFlags.pos;
     document.getElementById('apfreeaim').checked = freeFlags.aim;
     document.getElementById('apfreefov').checked = freeFlags.fov;
+    document.getElementById('apfreeroll').checked = freeFlags.roll;
     buildMarkers();
     renderList();
   }
@@ -2541,6 +2582,11 @@
     if (freeFlags.pos) s.push('e', 'n', 'u');
     if (freeFlags.aim) s.push('h', 't');
     if (freeFlags.fov) s.push('f');
+    // off by default: a hand-held photo is usually a little banked, but so is
+    // a fit that has gone wrong, and a free roll will happily take a bad
+    // solution the rest of the way. tick it when the horizon in the picture
+    // isn't level
+    if (freeFlags.roll) s.push('r');
     return s;
   };
   const stepFor = (spec, base) => (spec === 'e' || spec === 'n' || spec === 'u')
@@ -2548,7 +2594,8 @@
     : 1e-3; // degrees
   const applyDelta = (base, specs, d) => {
     const p = { lat: base.lat, lon: base.lon, alt: base.alt,
-      heading: base.heading, tilt: base.tilt, fov: base.fov };
+      heading: base.heading, tilt: base.tilt, fov: base.fov,
+      roll: base.roll || 0 };
     const mPerDeg = (planetR + Math.max(0, base.alt)) * D2R;
     specs.forEach((s, i) => {
       const x = d[i];
@@ -2558,6 +2605,7 @@
       else if (s === 'h') p.heading += x;
       else if (s === 't') p.tilt += x;
       else if (s === 'f') p.fov += x;
+      else if (s === 'r') p.roll += x;
     });
     // the same limits the engine enforces, so an accepted step survives
     // being handed to setPose/setFov unchanged
@@ -2659,6 +2707,9 @@
         if (cost < cost0) {
           view.setPose(cand.lat, cand.lon, cand.alt, cand.heading, cand.tilt);
           view.setFov(cand.fov);
+          // setPose carries the old roll over, so this only has to run when
+          // roll is one of the parameters being fitted
+          if (freeFlags.roll) view.setRoll(cand.roll);
           following = true; // the map should come along
           lambda = Math.max(1e-9, lambda / 3);
           const rel = (cost0 - cost) / Math.max(cost0, 1e-12);
@@ -2702,35 +2753,29 @@
   });
   solveBtn.addEventListener('click', startSolve);
   document.getElementById('apclear').addEventListener('click', clearPairs);
+  // the head's ✕ gets rid of the photo, which is the only destructive thing
+  // this panel does; 'pairs' folds the pair machinery away without touching it
   document.getElementById('apforget').addEventListener('click', clearOverlay);
-  document.getElementById('apclose').addEventListener('click', () => {
-    panelOpen = false;
-    alignRefresh();
-    saveAlign();
-    canvas.focus();
-  });
   const togglePanel = () => {
     panelOpen = !panelOpen;
     alignRefresh();
     saveAlign();
     canvas.focus();
   };
-  document.getElementById('overlaypairs').addEventListener('click', togglePanel);
-  for (const [id, key] of [['apfreepos', 'pos'], ['apfreeaim', 'aim'], ['apfreefov', 'fov']]) {
+  document.getElementById('appairs').addEventListener('click', togglePanel);
+  for (const [id, key] of [['apfreepos', 'pos'], ['apfreeaim', 'aim'],
+                          ['apfreefov', 'fov'], ['apfreeroll', 'roll']]) {
     document.getElementById(id).addEventListener('change', (e) => {
       freeFlags[key] = e.target.checked;
       renderList();
       saveAlign();
     });
   }
-  scaleEl.addEventListener('input', () => {
-    ov.scale = Math.max(0.05, scaleEl.value / 100);
-    layoutOverlay();
-    saveAlign();
-  });
+  // no size slider: shift-wheel sizes the photo about the pointer, which is
+  // the only way anyone actually places one. 'fit' is the thing a wheel can't
+  // do — put the whole picture back in the frame
   document.getElementById('apfit').addEventListener('click', () => {
     fitOverlay();
-    scaleEl.value = Math.round(ov.scale * 100);
     saveAlign();
     canvas.focus();
   });
@@ -2896,14 +2941,45 @@
     pasteState(text);
   });
 
+  // ?lod=2 draws half as fine, which is a quarter of the tiles — the volume
+  // of data a view asks for is what decides whether a deep zoom ever finishes,
+  // and this is the only lever on it. live from the console too, via __demo
+  if (QS.has('lod')) {
+    const v = parseFloat(QS.get('lod'));
+    if (Number.isFinite(v) && v > 0) view.setLodScale(v);
+  }
+
   // for devtools poking and automated testing
   window.__demo = { view, map, marker, isFollowing: () => following,
+    lod: (v) => { if (v != null) view.setLodScale(v); return view.getLodScale(); },
     tube: () => ({ rect: tubeRect, on: tubeOn, curl }),
     path: () => path, loadGpx: (text) => setPath(parseGpx(text), true),
     clearTiles,
     align: () => ({ pairs, solving, dof: dofCount(), errs: lastErrs }),
     solve: startSolve,
     copyState, pasteState };
+
+  // roll is the one part of the pose with no other sign in the hud, and it can
+  // arrive from the solver or from banking the tube, so the panel is driven by
+  // what the camera actually reports rather than by whoever set it. inside the
+  // tube a bank is the normal way to fly and needs no announcing
+  const rollAmountEl = document.getElementById('rollamount');
+  let shownRoll = null;
+  const refreshRoll = () => {
+    const roll = view.ready() ? (view.getPose().roll || 0) : 0;
+    const on = !tubeOn && Math.abs(roll) > 0.05;
+    const shown = on ? Math.round(roll * 10) / 10 : null;
+    if (shown === shownRoll) return;
+    shownRoll = shown;
+    document.body.classList.toggle('rolled', on);
+    if (on) rollAmountEl.textContent = `${shown > 0 ? '+' : ''}${shown.toFixed(1)}° from level`;
+  };
+  document.getElementById('rolllevel').addEventListener('click', () => {
+    view.setRoll(0);
+    refreshRoll();
+    saveView();
+    canvas.focus();
+  });
 
   let lastSynced = { lat: 1e9, lon: 1e9 };
   let saveTimer = 0;
@@ -2941,17 +3017,8 @@
         setRectData(tubeRect);
         if (START.tube.on) {
           applyTube(tubeRect, false); // reload + roll in place at the saved pose
-  // ?lod=2 draws half as fine, which is a quarter of the tiles — the volume
-  // of data a view asks for is what decides whether a deep zoom ever finishes,
-  // and this is the only lever on it. live from the console too, via __demo
-  if (QS.has('lod')) {
-    const v = parseFloat(QS.get('lod'));
-    if (Number.isFinite(v) && v > 0) view.setLodScale(v);
-  }
-
           if (START.roll) view.setRoll(START.roll); // restore the bank angle
         } else {
-    lod: (v) => { if (v != null) view.setLodScale(v); return view.getLodScale(); },
           view.setTubeRect(tubeRect[0], tubeRect[1], tubeRect[2], tubeRect[3], tubeAxisEw);
         }
       }
@@ -3083,6 +3150,7 @@
         saveView();
       }
     }
+    refreshRoll();
     frameCount++;
     // a capture has to read the canvas in the same task that drew it: the
     // context is created without preserveDrawingBuffer, so the backbuffer is
