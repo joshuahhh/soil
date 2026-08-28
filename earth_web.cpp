@@ -324,19 +324,16 @@ struct EarthView {
 		p.alt = alt;
 		p.heading = heading * M_PI / 180.0;
 		p.tilt = tilt * M_PI / 180.0;
-		// poseToCamera builds a fresh camera_t; carry over the state that
-		// isn't part of a pose (otherwise e.g. a map-click teleport silently
-		// drops orthographic mode)
-		auto ortho = camera.ortho;
-		auto ortho_extent = camera.ortho_extent;
-		auto airplane = camera.airplane;
-		auto roll = camera.roll;
-		camera = poseToCamera(p, planetRadius(), camera.fov);
-		camera.ortho = ortho;
-		camera.ortho_extent = ortho_extent;
-		camera.airplane = airplane;
-		camera.roll = roll;
-		if (airplane) alignAirplaneUp(camera); // teleports land wings-level
+		// a pose is only where the eye is and which way it looks. take just
+		// that from poseToCamera's fresh camera_t and leave every other field
+		// alone — ortho, roll, near cut, whatever comes next. (replacing the
+		// whole struct and copying favourites back silently dropped each new
+		// field until someone noticed: a map-click teleport lost ortho, the
+		// solver's setPose lost the near cut)
+		auto posed = poseToCamera(p, planetRadius(), camera.fov);
+		camera.eye = posed.eye;
+		camera.direction = posed.direction;
+		if (camera.airplane) alignAirplaneUp(camera); // teleports land wings-level
 		clampOrthoTilt(camera);
 	}
 
