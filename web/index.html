@@ -1298,8 +1298,8 @@
     if (typingIn(e.target)) return;
     if (handled.has(e.code)) e.preventDefault();
     keys[e.code] = true;
-    if (e.code === 'Minus' && !e.repeat) { gain = Math.max(1/16, gain/2); updateHint(); }
-    if (e.code === 'Equal' && !e.repeat) { gain = Math.min(16, gain*2); updateHint(); }
+    if (e.code === 'Minus' && !e.repeat) { gain = Math.max(1/128, gain/2); updateHint(); }
+    if (e.code === 'Equal' && !e.repeat) { gain = Math.min(128, gain*2); updateHint(); }
     // no ortho inside the tube: its extent/zoom anchoring assumes normal
     // terrain below, and a parallel projection of the tube reads as mush
     if (e.code === 'KeyN' && !e.repeat) setMiniature(!miniature);
