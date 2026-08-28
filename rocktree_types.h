@@ -39,6 +39,7 @@ struct rocktree_t {
 		}
 
 		void setFailedDownloading() {
+			dl_fails++;
 			dl_state = dl_state_stub;
 			if (parent) parent->busy_ctr--;
 		}
@@ -49,6 +50,12 @@ struct rocktree_t {
 		}
 
 		double last_wanted_ms = 0; // last time this node was in the potential set (render thread only)
+		// a request that failed comes back to stub so it can be asked for
+		// again, but a url that is failing for a reason won't start working
+		// this frame: the scheduler holds off until dl_next_try_ms, which it
+		// pushes further out with every attempt
+		int dl_fails = 0;
+		double dl_next_try_ms = 0;
 
 		float meters_per_texel;
 		OrientedBoundingBox obb;
@@ -98,6 +105,7 @@ struct rocktree_t {
 		}
 
 		void setFailedDownloading() {
+			dl_fails++;
 			dl_state = dl_state_stub;
 			if (parent) parent->busy_ctr--;
 		}
@@ -108,6 +116,12 @@ struct rocktree_t {
 		}
 
 		double last_wanted_ms = 0; // last time this bulk was in the potential set (render thread only)
+		// a request that failed comes back to stub so it can be asked for
+		// again, but a url that is failing for a reason won't start working
+		// this frame: the scheduler holds off until dl_next_try_ms, which it
+		// pushes further out with every attempt
+		int dl_fails = 0;
+		double dl_next_try_ms = 0;
 
 		Vector3f head_node_center;
 

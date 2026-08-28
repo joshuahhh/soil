@@ -15,6 +15,16 @@ struct earth_core_t {
 	bool scene_complete = false;
 	// last walk's want/have node counts, for download progress display
 	int stat_nodes_wanted = 0, stat_nodes_loaded = 0;
+	// the rest of the download picture, reported with the 2s sections line.
+	// 'stuck' is the one to watch: nodes the walk still wants whose request
+	// went out and never came back either way. a transport error resolves
+	// the request without resetting the node to a stub, so it is never
+	// retried and never drawn — and it isn't in flight either, so the
+	// scheduler has nothing left to say about it
+	int stat_nodes_stub = 0, stat_nodes_stuck = 0, stat_bulk_blocked = 0, stat_max_level = 0;
+	int stat_nodes_failed = 0, stat_bulks_started = 0;
+	// <= 0 means "not decided yet": the first walk seeds it from the env
+	double lod_scale = 0;
 	// tint octants where a finer tile is wanted but not yet drawn (L key)
 	bool debug_lod = false;
 	// print per-frame scheduler state (bench mode)
@@ -235,6 +245,13 @@ struct earth_core_t {
 	// download slots in flight, held from request through decode; the cap
 	// needs to stay comfortably above the decode pool's thread count
 	std::atomic<int> nodes_in_flight{0};
+	// bulks get their own, much smaller slot count. a bulk is a few KB against
+	// a node's ~100KB, but every one of them gates a four-level subtree, so
+	// they must not be allowed to queue in front of the node data that
+	// actually puts pixels on screen — which is exactly what an uncapped
+	// firehose of them did: a deep zoom wants thousands, and both the http
+	// connection pool and the page's indexeddb lookup serve first-come
+	std::atomic<int> bulks_in_flight{0};
 
 	// nodes actually drawn last frame with their octant masks, kept for the
 	// center-pick raycast. refreshed every updateAndDraw; valid to use
@@ -755,8 +772,12 @@ struct earth_core_t {
 
 		auto &eye = cam.eye;
 		auto &direction = cam.direction;
-		// airplane mode owns its up vector (roll); otherwise up is gravity
-		auto up = cam.airplane ? cam.body_up : Vector3d(eye.normalized());
+		// airplane mode owns its up vector (roll); otherwise up is gravity,
+		// turned about the boresight by the camera's roll. lookAt
+		// orthogonalizes, so rotating the world up is enough to bank the
+		// picture without touching where the camera is or what it looks at
+		auto up = cam.airplane ? cam.body_up
+			: Vector3d(AngleAxisd(cam.roll, direction) * eye.normalized());
 
 		// projection
 		float aspect_ratio = (float)width / (float)height;
@@ -860,6 +881,9 @@ struct earth_core_t {
 		// frame's time during the walk; membership tests elsewhere (eviction,
 		// bulk purge) compare against the stamp instead of consulting a map
 		auto potential_bulk_count = 0;
+		stat_bulk_blocked = 0; // counted over this frame's walk only
+		struct bulk_candidate_t { double priority; size_t level; rocktree_t::bulk_t *bulk; };
+		std::vector<bulk_candidate_t> to_download_bulks;
 
 		// node culling and level of detail using breadth-first search
 		bool all_loaded = true;
@@ -877,10 +901,26 @@ struct earth_core_t {
 					auto b = bulk_kv->second.get();
 					b->last_wanted_ms = now_ms;
 					if (b->dl_state == dl_state_stub) {
-						b->setStartedDownloading();
-						getBulk(b->request, b, [=](auto) {});
+						// ranked and issued after the walk, like nodes. the
+						// yardstick is the node this bulk hangs under — the
+						// subtree's own apparent size — so the bulks under
+						// what you are looking at resolve first and the view
+						// refines outward from there instead of every subtree
+						// in the frustum competing at once
+						double pri = 1e300;
+						auto head = bulk->nodes.find(rel);
+						if (head != bulk->nodes.end()) {
+							auto radius = head->second->obb.extents.norm();
+							auto dist = fmax(0.0, (head->second->obb.center - eye).norm() - radius);
+							if (radius > 0) pri = dist / (2 * radius);
+						}
+						to_download_bulks.push_back({ pri, cur.size(), b });
 					}
 					if (b->dl_state != dl_state_downloaded) {
+						// the walk cannot see past a bulk it doesn't have: this
+						// is a whole 4-level subtree that stays coarse until it
+						// lands, which is what a deep zoom is waiting on
+						stat_bulk_blocked++;
 						all_loaded = false;
 						continue;
 					}
@@ -948,7 +988,12 @@ struct earth_core_t {
 					// decent imagery over the whole rect
 					// EARTH_LOD_SCALE=n: draw n-times coarser than the
 					// standard target (lod experiment knob)
-					static const double lod_scale = getenv("EARTH_LOD_SCALE")
+					// draw n-times coarser than the standard target. the env
+					// var seeds it for native runs; the web shell sets it live
+					// (see setLodScale) because the volume of data a view asks
+					// for is the one thing that decides whether a deep zoom can
+					// finish at all, and that is worth being able to feel
+					if (lod_scale <= 0) lod_scale = getenv("EARTH_LOD_SCALE")
 						? atof(getenv("EARTH_LOD_SCALE")) : 1.0;
 					auto tube_floor = tube_on
 						&& node->meters_per_texel > tube_lock_mpt * 0.5;
@@ -1084,16 +1129,54 @@ struct earth_core_t {
 		// order the first frame it becomes visible
 		{
 			const auto max_nodes_in_flight = 32;
+			// small on purpose: see bulks_in_flight. eight is enough to keep
+			// the descent moving down the path you're looking along without
+			// the metadata ever being what the node requests wait behind
+			const auto max_bulks_in_flight = 16;
+			// how long a thing that just failed has to wait before being asked
+			// for again: half a second, doubling per failure, capped at half a
+			// minute. set when the request goes out, so a failure that returns
+			// immediately still can't be retried before the delay is up
+			auto retry_delay_ms = [](int fails) {
+				return 500.0 * (double)(1 << (fails < 6 ? fails : 6));
+			};
+			// ready if it has never failed, or if its penalty box has expired
+			auto retry_ready = [&](auto *x) {
+				return x->dl_fails == 0 || now_ms >= x->dl_next_try_ms;
+			};
+
+			// bulks first: they cost little and the walk cannot see past them,
+			// so a slot spent here opens four levels of everything below
+			std::sort(to_download_bulks.begin(), to_download_bulks.end(),
+				[](const bulk_candidate_t &a, const bulk_candidate_t &b) {
+					return a.priority != b.priority ? a.priority < b.priority : a.level < b.level;
+				});
+			stat_bulks_started = 0;
+			for (auto &c : to_download_bulks) {
+				if (bulks_in_flight >= max_bulks_in_flight) break;
+				if (!retry_ready(c.bulk)) continue;
+				bulks_in_flight++;
+				stat_bulks_started++;
+				c.bulk->dl_next_try_ms = now_ms + retry_delay_ms(c.bulk->dl_fails);
+				c.bulk->setStartedDownloading();
+				getBulk(c.bulk->request, c.bulk, [this](auto) { bulks_in_flight--; });
+			}
 
 			struct candidate_t { double priority; size_t level; rocktree_t::node_t *node; };
 			std::vector<candidate_t> to_download;
 			stat_nodes_wanted = (int)potential_nodes.size();
-			stat_nodes_loaded = 0;
+			stat_nodes_loaded = stat_nodes_stub = stat_nodes_stuck = 0;
+			stat_nodes_failed = stat_max_level = 0;
 			for (auto &kv : potential_nodes) {
 				auto node = kv.second;
+				if ((int)kv.first.size() > stat_max_level) stat_max_level = (int)kv.first.size();
 				if (node->dl_state != dl_state_downloaded) all_loaded = false;
 				else stat_nodes_loaded++;
+				if (node->dl_state == dl_state_stub) stat_nodes_stub++;
+				else if (node->dl_state == dl_state_downloading) stat_nodes_stuck++;
+				if (node->dl_fails) stat_nodes_failed++;
 				if (node->dl_state != dl_state_stub) continue;
+				if (!retry_ready(node)) continue; // waiting out a failure
 				auto radius = node->obb.extents.norm();
 				auto dist = fmax(0.0, (node->obb.center - eye).norm() - radius);
 				to_download.push_back({ dist / (2 * radius), kv.first.size(), node });
@@ -1108,6 +1191,7 @@ struct earth_core_t {
 				auto node = c.node;
 				nodes_in_flight++;
 				started++;
+				node->dl_next_try_ms = now_ms + retry_delay_ms(node->dl_fails);
 				node->setStartedDownloading();
 				getNode(node->request, node, [node, this](auto) { nodes_in_flight--; });
 			}
@@ -1380,6 +1464,16 @@ struct earth_core_t {
 			printf("sections avg ms: bfs %.2f, dl %.2f, evict %.2f, draw %.2f (%d frames; per frame: oct %ld, cull %ld, lod %ld)\n",
 				avg_bfs, avg_dl, avg_evict, avg_draw,
 				sec_frames, avg_oct, avg_cull, avg_lod);
+			// what the view is still waiting for. the section above times the
+			// cpu work; this says whether anything is actually coming. a view
+			// that never completes with waiting=0 and inflight=0 is not slow,
+			// it is stuck: those nodes asked once and nothing answered
+			printf("tiles: want %d loaded %d waiting %d inflight %d downloading %d retrying %d"
+				" · deepest level %d · bulks: blocked %d inflight %d started %d%s\n",
+				stat_nodes_wanted, stat_nodes_loaded, stat_nodes_stub,
+				(int)nodes_in_flight, stat_nodes_stuck, stat_nodes_failed,
+				stat_max_level, stat_bulk_blocked, (int)bulks_in_flight,
+				stat_bulks_started, scene_complete ? " · complete" : "");
 			sec_bfs = sec_dl = sec_evict = sec_draw = 0;
 			cnt_oct = cnt_cull = cnt_lod = 0;
 			sec_frames = 0;

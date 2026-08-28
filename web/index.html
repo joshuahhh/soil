@@ -638,28 +638,50 @@
       let bytes = path[0] !== 'P' ? await idbGet(path) : undefined;
       // a hit is a use: it moves the tile to the young end of the lru, and
       // re-registers one whose bookkeeping went missing (a meta write that
+    // the same counts split by what was asked for, with the two waits kept
+    // apart: the cache lookup and the network. the engine schedules bulks and
+    // nodes separately and a bulk gates a whole subtree, so when a deep zoom
+    // is slow the question is which of these two queues a bulk is sitting in
+    kinds: {},
+  };
+  // 'B' bulk metadata, 'N' node data, 'P' the planetoid header
+  const statKind = (path) => {
+    const k = stats.kinds[path[0]] || (stats.kinds[path[0]] = {
+      n: 0, idb: 0, net: 0, fail: 0, inflight: 0, idbMs: 0, netMs: 0, maxMs: 0 });
+    return k;
       // failed, or a store carried over from before the budget existed)
-      if (bytes) { stats.idbHits++; noteTileUse(path, bytes.length); }
+      if (bytes) { stats.idbHits++; k.idb++; noteTileUse(path, bytes.length); }
       if (!bytes) {
         const resp = await fetch('https://kh.google.com/rt/earth/' + path);
         if (!resp.ok) throw new Error('http ' + resp.status);
+    const k = statKind(path);
+    k.n++;
+    k.inflight++;
         bytes = new Uint8Array(await resp.arrayBuffer());
         stats.netHits++;
+      k.idbMs += performance.now() - t0;
         if (path[0] !== 'P') putTile(path, bytes);
       }
       stats.delivered++;
       Module.deliverFetch(id, true, bytes);
     } catch (e) {
+        const t1 = performance.now();
       stats.failed++;
       stats.log.push(path + ' -> ' + e.message);
       Module.deliverFetch(id, false, null);
+        k.netMs += performance.now() - t1;
     } finally {
+        k.net++;
       stats.inflight--;
-      stats.maxMs = Math.max(stats.maxMs, performance.now() - t0);
+      k.inflight--;
+      const ms = performance.now() - t0;
+      stats.maxMs = Math.max(stats.maxMs, ms);
+      k.maxMs = Math.max(k.maxMs, ms);
     }
   };
 
   const canvas = document.getElementById('globe');
+      k.fail++;
   // the reference-overlay section installs its relayout here. deliberately
   // var: resize() runs (and setFull3d can call it) long before that section
   // is evaluated, and reading a let/const from its dead zone would throw
@@ -667,6 +689,20 @@
   const resize = () => {
     const dpr = window.devicePixelRatio || 1;
     canvas.width = Math.round(canvas.clientWidth * dpr);
+  // alongside the engine's own 2s line, so the two can be read together.
+  // ?fetchlog=0 turns it off
+  if (new URLSearchParams(location.search).get('fetchlog') !== '0') setInterval(() => {
+    const parts = [];
+    for (const [kind, k] of Object.entries(stats.kinds)) {
+      if (!k.n) continue;
+      const avg = (ms, n) => n ? Math.round(ms / n) : 0;
+      parts.push(`${kind}: ${k.n} (${k.idb} cached, ${k.net} net, ${k.fail} failed)`
+        + ` idb ${avg(k.idbMs, k.n)}ms net ${avg(k.netMs, k.net)}ms`
+        + ` max ${Math.round(k.maxMs)}ms inflight ${k.inflight}`);
+      k.maxMs = 0; // a running max says nothing after the first stall
+    }
+    if (parts.length) console.log('fetch · ' + parts.join(' · '));
+  }, 2000);
     canvas.height = Math.round(canvas.clientHeight * dpr);
     // the overlay is placed in viewport-relative terms, so it follows
     // window resizes and the map pane collapsing/expanding
@@ -2905,8 +2941,17 @@
         setRectData(tubeRect);
         if (START.tube.on) {
           applyTube(tubeRect, false); // reload + roll in place at the saved pose
+  // ?lod=2 draws half as fine, which is a quarter of the tiles — the volume
+  // of data a view asks for is what decides whether a deep zoom ever finishes,
+  // and this is the only lever on it. live from the console too, via __demo
+  if (QS.has('lod')) {
+    const v = parseFloat(QS.get('lod'));
+    if (Number.isFinite(v) && v > 0) view.setLodScale(v);
+  }
+
           if (START.roll) view.setRoll(START.roll); // restore the bank angle
         } else {
+    lod: (v) => { if (v != null) view.setLodScale(v); return view.getLodScale(); },
           view.setTubeRect(tubeRect[0], tubeRect[1], tubeRect[2], tubeRect[3], tubeAxisEw);
         }
       }

@@ -205,6 +205,12 @@ struct EarthView {
 
 	void setSkyColor(int rgb) { sky_color = rgb; }
 	void setDebugLod(bool on) { earth.debug_lod = on; }
+	// 1 = the standard target; 2 = half the linear resolution, which is a
+	// quarter of the tiles. the pixel budget of a view is the whole story on
+	// how long it takes to arrive, so this is the knob that decides whether a
+	// deep zoom settles in seconds or minutes
+	void setLodScale(double s) { earth.lod_scale = s > 0.05 ? s : 0.05; }
+	double getLodScale() { return earth.lod_scale; }
 	// M key: mipmaps + anisotropy on the uncompressed texture path. the dxt
 	// path has no mip chain to switch to (crn ships a single level and
 	// glGenerateMipmap rejects compressed textures), so pair this with ?jpg
@@ -672,6 +678,8 @@ EMSCRIPTEN_BINDINGS(earth) {
 		.function("setMipmaps", &EarthView::setMipmaps)
 		.function("getStats", &EarthView::getStats)
 		.function("getDrawnNodes", &EarthView::getDrawnNodes)
+		.function("setLodScale", &EarthView::setLodScale)
+		.function("getLodScale", &EarthView::getLodScale)
 		.function("fly", &EarthView::fly);
 	emscripten::function("createView", &createView, emscripten::allow_raw_pointers());
 	emscripten::function("deliverFetch", &deliverFetch);

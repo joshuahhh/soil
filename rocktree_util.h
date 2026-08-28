@@ -157,7 +157,15 @@ void getBulk(BulkMetadataRequest req, rocktree_t::bulk_t *b, std::function<void(
 		auto cb = pair.first;
 		auto b = pair.second;
   		if (error) {
-			fprintf(stderr, "could not load node\n");
+			// back to a stub, or this node is never asked for again: the walk
+			// only ever schedules stubs, so a transport failure that left the
+			// state at 'downloading' meant the tile was lost for the life of
+			// the page, and the view could never complete. the scheduler backs
+			// off between attempts (dl_next_try_ms) so a url that keeps failing
+			// costs one request every few seconds, not one every frame
+			b->setFailedDownloading();
+			fprintf(stderr, "could not load bulk %s (attempt %d)\n",
+				b->request.node_key().path().c_str(), b->dl_fails);
 			cb(NULL);
 		} else {
 			auto vec = std::vector<uint8_t>(data, data+len);
@@ -227,7 +235,15 @@ void getNode(NodeDataRequest req, rocktree_t::node_t *n, std::function<void(std:
 		auto cb = pair.first;
 		auto n = pair.second;
   		if (error) {
-			fprintf(stderr, "could not load node\n");
+			// back to a stub, or this node is never asked for again: the walk
+			// only ever schedules stubs, so a transport failure that left the
+			// state at 'downloading' meant the tile was lost for the life of
+			// the page, and the view could never complete. the scheduler backs
+			// off between attempts (dl_next_try_ms) so a url that keeps failing
+			// costs one request every few seconds, not one every frame
+			n->setFailedDownloading();
+			fprintf(stderr, "could not load node %s (attempt %d)\n",
+				n->request.node_key().path().c_str(), n->dl_fails);
 			cb(NULL);
 		} else {			
 			auto vec = std::vector<uint8_t>(data, data+len);
