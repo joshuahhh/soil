@@ -216,7 +216,7 @@
     <div id="speed"></div>
     <div id="photopanel" class="panel">
       <div class="head"><span>photo</span>
-        <button class="x" id="apforget" title="remove the photo">✕</button>
+        <button class="x" id="apforget" title="remove the photo and its point pairs (P hides the photo instead)">✕</button>
       </div>
       <div class="row"><span id="overlayblendtoggle" title="toggle the photo on and off (P)">opacity</span>
         <input id="overlayblend" type="range" min="0" max="100" value="50" title="overlay opacity">
@@ -2797,10 +2797,21 @@
     if (capture) cancelCapture(); else startCapture();
   });
   solveBtn.addEventListener('click', startSolve);
-  document.getElementById('apclear').addEventListener('click', clearPairs);
+  // both of these throw away work placed by hand — the photo's position and
+  // size, and pairs put down one click at a time — and the ✕ sits exactly
+  // where a "close this panel" button would. so ask first
+  const pairsPlural = () => `${pairs.length} point pair${pairs.length === 1 ? '' : 's'}`;
+  document.getElementById('apclear').addEventListener('click', () => {
+    if (pairs.length && !confirm(`clear ${pairsPlural()}?`)) return;
+    clearPairs();
+  });
   // the head's ✕ gets rid of the photo, which is the only destructive thing
   // this panel does; 'pairs' folds the pair machinery away without touching it
-  document.getElementById('apforget').addEventListener('click', clearOverlay);
+  document.getElementById('apforget').addEventListener('click', () => {
+    const what = pairs.length ? `the photo and its ${pairsPlural()}` : 'the photo and its placement';
+    if (!confirm(`remove ${what}?\n\n(to just hide the photo, press P or click "opacity")`)) return;
+    clearOverlay();
+  });
   for (const [id, key] of [['apfreepos', 'pos'], ['apfreeaim', 'aim'],
                           ['apfreefov', 'fov'], ['apfreeroll', 'roll']]) {
     document.getElementById(id).addEventListener('change', (e) => {
