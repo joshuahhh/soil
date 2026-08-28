@@ -394,6 +394,9 @@ struct EarthView {
 		terrain_follow = on;
 		follow_height = NAN;
 	}
+	// the held height above the mesh (or the radial gap to the tube wall),
+	// meters; nan until the hug has locked. for the hud's readout
+	double getFollowHeight() { return follow_height; }
 
 	// ortho zoom: dolly along the boresight, which scales the derived view
 	// extent by exactly 1/factor while the screen center stays put. leaves
@@ -664,6 +667,7 @@ EMSCRIPTEN_BINDINGS(earth) {
 		.function("getOrthoExtent", &EarthView::getOrthoExtent)
 		.function("setAirplane", &EarthView::setAirplane)
 		.function("setTerrainFollow", &EarthView::setTerrainFollow)
+		.function("getFollowHeight", &EarthView::getFollowHeight)
 		.function("orbit", &EarthView::orbit)
 		.function("zoomOrtho", &EarthView::zoomOrtho)
 		.function("panOrtho", &EarthView::panOrtho)

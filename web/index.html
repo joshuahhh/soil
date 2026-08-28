@@ -197,9 +197,11 @@
             readouts want no clicks at all; the panels take theirs back */
          pointer-events: none; }
   #hud .panel { pointer-events: auto; }
-  #hint, #speed { color: #fff; background: rgba(0,0,0,.55); font: 12px sans-serif;
-                  padding: 6px 8px; border-radius: 4px; }
-  #hint:empty { display: none; }
+  /* the state readouts sit in a row along the top, opaque like the panels */
+  #status { display: flex; justify-content: flex-end; gap: 4px; max-width: 100%; }
+  #hint, #hug, #speed { color: #fff; background: #1c1c1c; font: 12px sans-serif;
+                        padding: 6px 8px; border-radius: 4px; white-space: nowrap; }
+  #hint:empty, #hug:empty { display: none; }
   /* the key reference: a ? in the view's bottom-right corner, and the table
      it opens. the hint line above only says what mode the view is in */
   #keysbtn { position: fixed; right: 8px; bottom: 24px; z-index: 10; width: 26px; height: 26px;
@@ -233,7 +235,7 @@
            opacity: 0; transition: opacity .2s; }
   #toast.on { opacity: 1; }
   #axisbtn { position: fixed; left: 8px; bottom: 24px; z-index: 10; color: #fff;
-             background: rgba(0,0,0,.55); font: 12px sans-serif; padding: 6px 8px;
+             background: #1c1c1c; font: 12px sans-serif; padding: 6px 8px;
              border-radius: 4px; cursor: pointer; user-select: none; }
 </style>
 <div id="toast"></div>
@@ -254,8 +256,11 @@
   <div id="tubeinfo"></div>
   <div id="apbanner"></div>
   <div id="hud">
-    <div id="hint"></div>
-    <div id="speed"></div>
+    <div id="status">
+      <div id="hint"></div>
+      <div id="hug"></div>
+      <div id="speed"></div>
+    </div>
     <div id="photopanel" class="panel">
       <div class="head"><span>photo</span>
         <button class="x" id="apforget" title="remove the photo and its point pairs (P hides the photo instead)">✕</button>
@@ -335,7 +340,7 @@
     tube: 'in the tube',
   };
   document.getElementById('hint').textContent = HINTS.persp;
-  document.getElementById('speed').textContent = '-/= speed x1';
+  document.getElementById('speed').textContent = 'speed 1';
 </script>
 <script src="earth.js"></script>
 <script>
@@ -1243,6 +1248,18 @@
   let followOn = false;
   let debugLod = false;
   let mipmaps = true;
+  // the speed chip, and the hug chip with the height it is holding — which
+  // moves with R/F, so the frame loop refreshes this while hugging
+  const updateSpeed = () => {
+    document.getElementById('speed').textContent =
+      `speed ${gain >= 1 ? gain : '1/' + (1/gain)}`;
+    const h = hug ? view.getFollowHeight() : NaN;
+    const height = Number.isFinite(h) ? ` at ${h < 10 ? h.toFixed(1) : Math.round(h)} m` : '';
+    document.getElementById('hug').textContent =
+      hug && tubeOn ? `hugging the wall${height}`
+        : hug && !ortho ? `hugging terrain${height}` : '';
+  };
+  let speedAt = 0;
   const updateHint = () => {
     document.getElementById('hint').textContent = [
       HINTS[followOn ? 'follow' : tubeOn ? 'tube' : ortho ? 'ortho' : 'persp'],
@@ -1251,10 +1268,7 @@
       // T only does anything once a rect exists
       !tubeOn && tubeRect ? 'tube rect drawn (T rolls it up)' : '',
     ].filter(Boolean).join(' · ');
-    document.getElementById('speed').textContent =
-      `-/= speed x${gain >= 1 ? gain : '1/' + (1/gain)}`
-      + (hug && tubeOn ? ' · hugging the wall'
-        : hug && !ortho ? ' · hugging terrain' : '');
+    updateSpeed();
     // point-pair alignment is perspective-only, so every mode switch has to
     // re-decide whether its panel and markers belong on screen
     alignRefresh();
@@ -3256,6 +3270,7 @@
     const dt = TEST ? TEST.dt : Math.min(100, now - last);
     last = now;
     refreshKeys(now);
+    if (hug && now - speedAt > 100) { speedAt = now; updateSpeed(); }
 
     if (view.ready() && !posed) {
       // once the planet metadata is in, jump to the start (or saved) pose
