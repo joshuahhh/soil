@@ -96,7 +96,7 @@
      scrolling */
   .panel { display: none; flex-direction: column; gap: 6px; min-height: 0;
            width: 236px; max-width: 100%; color: #fff;
-           background: rgba(0,0,0,.72); font: 12px sans-serif;
+           background: #1c1c1c; font: 12px sans-serif;
            padding: 8px; border-radius: 5px; }
   /* one panel for the photo and its pairs: both are up whenever there is a
      photo. two panels meant the opacity of a picture and the size of the
@@ -112,7 +112,7 @@
      is off — so it gets a panel whose whole job is to be present when the
      camera is banked, and to level it when dismissed */
   body.rolled #rollpanel { display: flex; }
-  #rollamount { font: 11px monospace; opacity: .85; }
+  #rollamount { font: 11px sans-serif; opacity: .85; }
   #overlayblendtoggle { cursor: pointer; user-select: none; }
   #overlayblendtoggle:hover { text-decoration: underline; }
   .panel .head { display: flex; align-items: center; justify-content: space-between;
@@ -150,6 +150,12 @@
   #pathprogress { display: none; font: 11px monospace; }
   body.riding #pathprogress { display: block; }
   .panel .tip { font: 10px sans-serif; opacity: .55; line-height: 1.35; }
+  /* a section inside a panel: its own lightly raised box, so the things
+     that belong together sit together without a label saying so */
+  .panel .group { display: flex; flex-direction: column; gap: 6px; min-height: 0;
+                  padding: 6px; border-radius: 4px; background: rgba(255,255,255,.07); }
+  /* a button that lives inside a tip, sized to its text */
+  .panel button.tiny { font-size: 10px; padding: 1px 5px; margin-left: 4px; vertical-align: baseline; }
   #aplist { overflow-y: auto; min-height: 0; display: flex; flex-direction: column; gap: 2px; }
   #aplist .pair { display: flex; align-items: center; gap: 6px; padding: 2px 4px;
                   border-radius: 3px; cursor: pointer; font: 11px monospace; }
@@ -161,6 +167,8 @@
   #aplist .pair .err { margin-left: auto; opacity: .8; }
   #aplist .pair.off .err { color: #ff6b6b; }
   #apstatus { font: 11px sans-serif; opacity: .85; line-height: 1.35; }
+  #apwarn { font: 11px sans-serif; color: #ffb366; line-height: 1.35; }
+  #apwarn:empty { display: none; }
   /* the step-by-step prompt while a pair is being captured */
   #apbanner { position: absolute; left: 50%; top: 12px; transform: translateX(-50%);
               z-index: 14; display: none; color: #000; background: #ff7f0e;
@@ -228,32 +236,38 @@
       </div>
       <div class="row"><span id="overlayblendtoggle" title="toggle the photo on and off (P)">opacity</span>
         <input id="overlayblend" type="range" min="0" max="100" value="50" title="overlay opacity">
-        <button id="apfit" title="size the photo to fit the view">fit</button>
       </div>
       <div id="appairsblock">
-        <div class="row">
-          <button id="apadd">+ add pair</button>
-          <button id="apsolve" class="primary">solve</button>
+        <!-- the pairs: what ties the photo to the ground -->
+        <div class="group">
+          <div class="row">
+            <button id="apadd">+ add pair</button>
+            <button id="apclear" style="margin-left:auto;background:none;opacity:.7">clear</button>
+          </div>
+          <div id="aplist"></div>
         </div>
-        <div class="row">free:
-          <label><input type="checkbox" id="apfreepos" checked>position</label>
-          <label><input type="checkbox" id="apfreeaim" checked>aim</label>
-          <label><input type="checkbox" id="apfreefov" checked>fov</label>
-          <label><input type="checkbox" id="apfreeroll">roll</label>
+        <!-- the solver: what it may move, and how it is doing -->
+        <div class="group">
+          <div class="row"><button id="apsolve" class="primary">solve</button></div>
+          <div>solve for:
+            <div class="row" style="margin-top:2px">
+              <label><input type="checkbox" id="apfreepos" checked>position</label>
+              <label><input type="checkbox" id="apfreeaim" checked>aim</label>
+              <label><input type="checkbox" id="apfreefov" checked>fov</label>
+              <label><input type="checkbox" id="apfreeroll">roll</label>
+            </div>
+          </div>
+          <div id="apstatus"></div>
+          <div id="apwarn"></div>
         </div>
-        <div id="aplist"></div>
-        <div id="apstatus"></div>
-        <div class="row"><button id="apclear">clear pairs</button></div>
-        <div class="tip">drag either end of a pair to adjust it ·
-          shift-drag moves the photo, shift-wheel sizes it about the pointer</div>
       </div>
       <div id="apoff" class="tip">point pairs need the perspective view</div>
+      <div class="tip">shift-drag moves the photo, shift-wheel sizes it about the pointer
+        <button id="apfit" class="tiny" title="put the whole photo back in the frame">reset</button></div>
     </div>
     <div id="rollpanel" class="panel">
       <div class="head"><span>roll</span><button class="x" id="rolllevel" title="level the camera">✕</button></div>
       <div id="rollamount"></div>
-      <div class="tip">the horizon is banked — solving with roll free can do
-        this, and so can flying the tube. ✕ puts it back level</div>
     </div>
     <div id="pathpanel" class="panel">
       <div class="head"><span id="pathname">path</span><button class="x" id="pathclose" title="remove path">✕</button></div>
@@ -2320,6 +2334,7 @@
   const freeFlags = { pos: true, aim: true, fov: true, roll: false };
   const listEl = document.getElementById('aplist');
   const statusEl = document.getElementById('apstatus');
+  const warnEl = document.getElementById('apwarn');
   const bannerEl = document.getElementById('apbanner');
   const svgEl = document.getElementById('pairs');
   const solveBtn = document.getElementById('apsolve');
@@ -2571,12 +2586,14 @@
     });
     const k = dofCount();
     const need = Math.ceil(k / 2);
-    const bits = [`${pairs.length} pair${pairs.length === 1 ? '' : 's'} · ${k} free parameter${k === 1 ? '' : 's'}`];
+    const bits = [`${pairs.length} pair${pairs.length === 1 ? '' : 's'} · ${k} unknown${k === 1 ? '' : 's'}`];
     if (rms != null) bits.push(`rms ${rms.toFixed(1)}px`);
-    if (!k) bits.push('nothing to solve for — tick a group');
-    else if (pairs.length && pairs.length < need)
-      bits.push(`under-determined: ${need} pairs would pin all ${k} down`);
     statusEl.textContent = bits.join(' · ');
+    // the facts above, the caveat on its own line: a run-on of both was hard
+    // to scan
+    warnEl.textContent = !k ? 'nothing to solve for — tick something above'
+      : (pairs.length && pairs.length < need)
+        ? `under-determined: ${need} pairs would pin all ${k} down` : '';
   }
   const dofCount = () => (freeFlags.pos ? 3 : 0) + (freeFlags.aim ? 2 : 0)
     + (freeFlags.fov ? 1 : 0) + (freeFlags.roll ? 1 : 0);
@@ -2848,8 +2865,8 @@
     });
   }
   // no size slider: shift-wheel sizes the photo about the pointer, which is
-  // the only way anyone actually places one. 'fit' is the thing a wheel can't
-  // do — put the whole picture back in the frame
+  // the only way anyone actually places one. 'reset' is the thing a wheel
+  // can't do — put the whole picture back in the frame
   document.getElementById('apfit').addEventListener('click', () => {
     fitOverlay();
     saveAlign();
