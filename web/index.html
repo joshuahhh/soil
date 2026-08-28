@@ -199,6 +199,29 @@
   #hud .panel { pointer-events: auto; }
   #hint, #speed { color: #fff; background: rgba(0,0,0,.55); font: 12px sans-serif;
                   padding: 6px 8px; border-radius: 4px; }
+  #hint:empty { display: none; }
+  /* the key reference: a ? in the view's bottom-right corner, and the table
+     it opens. the hint line above only says what mode the view is in */
+  #keysbtn { position: fixed; right: 8px; bottom: 24px; z-index: 10; width: 26px; height: 26px;
+             border: 0; border-radius: 13px; cursor: pointer; color: #fff; font: bold 14px sans-serif;
+             background: #1c1c1c; }
+  #keysbtn:hover, body.keys #keysbtn { background: #ff7f0e; color: #000; }
+  #keys { display: none; position: fixed; right: 8px; bottom: 56px; z-index: 25; color: #fff;
+          background: #1c1c1c; border-radius: 5px; padding: 10px 12px; font: 12px sans-serif;
+          /* over the hud (z 12), and edged so it reads as its own sheet where
+             it overlaps a panel of the same colour */
+          border: 1px solid rgba(255,255,255,.35); box-shadow: 0 4px 24px rgba(0,0,0,.7);
+          max-height: calc(100% - 80px); max-width: calc(100% - 16px); overflow: auto;
+          columns: 2; column-gap: 20px; }
+  body.keys #keys { display: block; }
+  #keys section { break-inside: avoid; margin-bottom: 10px; }
+  #keys h4 { margin: 0 0 3px; font: bold 11px sans-serif; text-transform: uppercase;
+             letter-spacing: .06em; opacity: .6; }
+  #keys table { border-collapse: collapse; }
+  #keys td { padding: 1px 0; vertical-align: top; }
+  #keys td:first-child { padding-right: 10px; white-space: nowrap; }
+  #keys kbd { font: 11px monospace; background: rgba(255,255,255,.15); padding: 0 4px;
+              border-radius: 3px; }
   /* geolocate button and search box side by side in the map's top-left */
   .maplibregl-ctrl-top-left { display: flex; align-items: flex-start; }
   /* tube axis switch, over the map's bottom-left corner */
@@ -300,20 +323,16 @@
   </div>
 </div>
 <div id="axisbtn"></div>
+<button id="keysbtn" title="keyboard and mouse (?)">?</button>
+<div id="keys"></div>
 <script>
-  // per-mode control hints; the active one is set by updateHint() below
+  // the hint line names the mode the view is in and any switch that is
+  // not at its default; the keys themselves are in the ? table
   const HINTS = {
-    persp: 'WASD move · R/F up/down · hold space: view-frame · arrows/drag look · ' +
-      'Z/X zoom · shift slow · G hug terrain · O ortho · C pick debug · L lod debug · M mipmaps · 0 reset view · ' +
-      'P photo on/off · H near cut · click map to teleport · ⇧drag map: tube rect',
-    ortho: 'WASD/drag pan · arrows orbit around center · wheel/Z/X/R/F zoom · ' +
-      'shift slow · O perspective · C pick debug · L lod debug · M mipmaps · 0 reset view · ' +
-      'click map to teleport · ⇧drag map: tube rect',
-    follow: 'following the path — W/S run along it · arrows swing the view around it ' +
-      '(left/right relative to the path, so a bend carries you with it) · R/F standoff (zoom in ortho) · ' +
-      'Z/X zoom · shift slow · V or esc to leave',
-    tube: 'airplane controls — W/S thrust · A/D strafe · R/F up/down · arrows/drag pitch+yaw · Q/E roll · ' +
-      'Z/X zoom · shift slow · G hug the wall · 0 reset view · T unroll · esc clear tube · ⇧drag map: new rect',
+    persp: '',
+    ortho: 'orthographic',
+    follow: 'following the path',
+    tube: 'in the tube',
   };
   document.getElementById('hint').textContent = HINTS.persp;
   document.getElementById('speed').textContent = '-/= speed x1';
@@ -1024,6 +1043,85 @@
     canvas.focus();
   };
   document.getElementById('overlayblendtoggle').addEventListener('click', toggleOverlayBlend);
+  // --- the key table (?) ----------------------------------------------------
+  // what every key does *in the current mode* — a key that does nothing here
+  // isn't listed, and one that does something different (arrows orbit in
+  // ortho, look around in perspective) says what it does here. rebuilt by
+  // updateHint on every mode switch
+  const K = (t) => t.split(' ').map((k) => `<kbd>${k}</kbd>`).join(' ');
+  const keysFor = () => {
+    const mode = followOn ? 'follow' : tubeOn ? 'tube' : ortho ? 'ortho' : 'persp';
+    const g = [];
+    if (mode === 'persp') g.push(['flying', [
+      [K('W A S D'), 'move'], [K('R F'), 'up / down'],
+      [K('space') + ' +', 'move in the view frame instead'],
+      [K('←↑↓→') + ' drag', 'look around'], [K('Z X') + ' wheel', 'zoom (fov)'],
+      [K('- ='), 'speed'], [K('shift') + ' +', 'slow'],
+      [K('G'), hug ? 'stop hugging the terrain' : 'hug the terrain'], [K('0'), 'reset view']]]);
+    if (mode === 'ortho') g.push(['moving', [
+      [K('W A S D') + ' drag', 'pan'], [K('←↑↓→'), 'orbit around the center'],
+      [K('Z X R F') + ' wheel', 'zoom'], [K('- ='), 'speed'], [K('shift') + ' +', 'slow'],
+      [K('0'), 'reset view']]]);
+    if (mode === 'tube') g.push(['flying the tube', [
+      [K('W S'), 'thrust'], [K('A D'), 'strafe'], [K('R F'), 'up / down'],
+      [K('←↑↓→') + ' drag', 'pitch + yaw'], [K('Q E'), 'roll'], [K('Z X') + ' wheel', 'zoom'],
+      [K('- ='), 'speed'], [K('shift') + ' +', 'slow'],
+      [K('G'), hug ? 'stop hugging the wall' : 'hug the wall'], [K('0'), 'reset view'],
+      [K('T'), 'unroll the tube'], [K('esc'), 'clear the tube']]]);
+    if (mode === 'follow') g.push(['following the path', [
+      [K('W S'), 'run along it'], [K('←↑↓→'), 'swing the view around it'],
+      [K('R F'), ortho ? 'zoom' : 'standoff'], [K('Z X'), 'zoom'], [K('shift') + ' +', 'slow'],
+      [K('V') + ' ' + K('esc'), 'stop following']]]);
+    const viewRows = [];
+    if (mode !== 'tube') viewRows.push([K('O'), ortho ? 'perspective' : 'orthographic']);
+    viewRows.push([K('N'), miniature ? 'miniature off' : 'miniature (tilt-shift)']);
+    if (!ortho) viewRows.push([K('H'), 'near cut']);
+    viewRows.push([K('C L K M'), 'debug: pick · lod · smoothing · mipmaps']);
+    g.push(['view', viewRows]);
+    if (document.body.classList.contains('overlay')) {
+      const rows = [[K('P'), 'photo on / off'], [K('shift') + ' drag', 'move the photo'],
+        [K('shift') + ' wheel', 'size it about the pointer']];
+      if (mode === 'persp') rows.push(['drag', 'either end of a pair, to adjust it'],
+        [K('esc'), 'cancel adding a pair']);
+      g.push(['photo', rows]);
+    }
+    const mapRows = [['click', 'teleport there'],
+      [K('shift') + ' drag', tubeRect ? 'draw a new tube rect' : 'draw a tube rect']];
+    if (mode !== 'tube' && tubeRect) mapRows.push([K('T'), 'roll the tube up'], [K('esc'), 'clear the tube']);
+    if (mode !== 'follow' && mode !== 'tube' && document.body.classList.contains('path'))
+      mapRows.push([K('V'), 'follow the path']);
+    g.push(['map', mapRows]);
+    g.push(['session', [[K('⌘C ⌘V'), 'copy / paste the whole session'],
+      [K('⌘S'), 'save it as a file'],
+      ['drop a file', 'image → photo · .gpx → path · session .json → restore'], [K('?'), 'this']]]);
+    return g;
+  };
+  // the table is a pure function of the view's state, and that state changes
+  // from a dozen places (a key, a drop, a rect on the map). rather than have
+  // each of them remember to redraw it, the frame loop re-derives it a few
+  // times a second while it is open and only touches the dom when the
+  // result differs — poor man's react, at the cost of building a short
+  // string every 250ms
+  let keysHtml = '', keysAt = 0;
+  const renderKeys = () => {
+    const html = keysFor().map(([title, rows]) =>
+      `<section><h4>${title}</h4><table>${rows.map(([k, what]) =>
+        `<tr><td>${k}</td><td>${what}</td></tr>`).join('')}</table></section>`).join('');
+    if (html === keysHtml) return;
+    keysHtml = html;
+    document.getElementById('keys').innerHTML = html;
+  };
+  const refreshKeys = (now) => {
+    if (!document.body.classList.contains('keys') || now - keysAt < 250) return;
+    keysAt = now;
+    renderKeys();
+  };
+  const toggleKeys = () => {
+    if (!document.body.classList.contains('keys')) renderKeys();
+    document.body.classList.toggle('keys');
+    canvas.focus();
+  };
+  document.getElementById('keysbtn').addEventListener('click', toggleKeys);
   // --- near cut (H) ---------------------------------------------------------
   // the slider is log across 0.5m..2km, with the bottom notch meaning off: a
   // window is a metre or two away and a courtyard wall fifty, and both need
@@ -1146,12 +1244,13 @@
   let debugLod = false;
   let mipmaps = true;
   const updateHint = () => {
-    document.getElementById('hint').textContent =
-      HINTS[followOn ? 'follow' : tubeOn ? 'tube' : ortho ? 'ortho' : 'persp']
-        + (mipmaps ? '' : ' · MIPMAPS OFF')
-        + (miniature ? ' · MINIATURE (N off)' : ' · N miniature')
+    document.getElementById('hint').textContent = [
+      HINTS[followOn ? 'follow' : tubeOn ? 'tube' : ortho ? 'ortho' : 'persp'],
+      mipmaps ? '' : 'mipmaps off',
+      miniature ? 'miniature' : '',
       // T only does anything once a rect exists
-      + (!tubeOn && tubeRect ? ' · T roll tube · esc clear' : '');
+      !tubeOn && tubeRect ? 'tube rect drawn (T rolls it up)' : '',
+    ].filter(Boolean).join(' · ');
     document.getElementById('speed').textContent =
       `-/= speed x${gain >= 1 ? gain : '1/' + (1/gain)}`
       + (hug && tubeOn ? ' · hugging the wall'
@@ -1205,6 +1304,11 @@
     // the point-pair panel; only does anything with a photo up, in perspective
     if (e.code === 'KeyP' && !e.repeat) toggleOverlayBlend();
     if (e.code === 'KeyH' && !e.repeat) toggleCutPanel();
+    if (e.key === '?' && !e.repeat) toggleKeys();
+    if (e.code === 'Escape' && document.body.classList.contains('keys')) {
+      document.body.classList.remove('keys');
+      return; // that is all this esc does
+    }
     if ((e.code === 'Digit0' || e.code === 'Numpad0' || e.code === 'Home') && !e.repeat) resetView();
     // like the native app's L key: tint octants red where a finer tile is
     // wanted but not yet downloaded
@@ -3151,6 +3255,7 @@
   const tick = (now) => {
     const dt = TEST ? TEST.dt : Math.min(100, now - last);
     last = now;
+    refreshKeys(now);
 
     if (view.ready() && !posed) {
       // once the planet metadata is in, jump to the start (or saved) pose
