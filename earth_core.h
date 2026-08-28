@@ -750,7 +750,8 @@ struct earth_core_t {
 	// (looking at the sky, tiles not yet loaded)
 	double centerDistanceMesh(const camera_t &cam) {
 		Vector3d hit;
-		if (raycast(cam.eye, cam.direction, hit) == raycast_mesh)
+		// past the near cut, like everything else that looks along a ray
+		if (raycast(cam.eye + cam.direction * cam.near_cut, cam.direction, hit) == raycast_mesh)
 			return (hit - cam.eye).norm();
 		return centerDistance(cam, planetoid->radius);
 	}
@@ -790,6 +791,10 @@ struct earth_core_t {
 		const double highest_peak = 8849; // everest
 		auto peak_horizon = sqrt( highest_peak * (2*planet_radius + highest_peak) );
 		auto near = horizon > 370000 ? altitude / 2 : 1.0;
+		// the near cut is the near plane: whatever is closer than that just
+		// isn't drawn. (a plane, so at the frame's edges the cut reaches a
+		// little further along the ray than straight ahead — near enough)
+		if (!cam.ortho && cam.near_cut > 0) near = fmax(near, cam.near_cut);
 		auto far = horizon + peak_horizon;
 		if (near >= far) near = far - 1;
 		if (isnan(far) || far < near) far = near + 1;

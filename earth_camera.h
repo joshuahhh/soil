@@ -15,6 +15,11 @@ struct camera_t {
 	// entering ortho and scaled by zooms. deriving it per frame from the
 	// terrain distance under the boresight made movement pump the zoom
 	double ortho_extent = 0;
+	// meters of mesh in front of the eye to ignore, both drawn and picked
+	// (perspective only). a photo solved from inside a building puts the
+	// camera in a room whose walls hide the view the picture actually has
+	// through a window; this is the window. 0 = off
+	double near_cut = 0;
 	// airplane mode (tube flying): the camera owns its up vector instead of
 	// deriving it from the planet center, so roll is a real degree of
 	// freedom and yaw/pitch happen about the body axes with no horizon

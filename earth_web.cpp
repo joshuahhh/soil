@@ -344,6 +344,13 @@ struct EarthView {
 		camera.fov = fmax(1.0, fmin(deg, 100.0)) * M_PI / 180.0;
 	}
 
+	// ignore the mesh closer than this many meters to the eye — see
+	// camera_t::near_cut. drawing and every pick through the view honor it
+	void setNearCut(double meters) { camera.near_cut = fmax(0.0, meters); }
+	double getNearCut() { return camera.near_cut; }
+	// where a ray through the view starts: at the eye, or past the cut
+	Vector3d rayOrigin(const Vector3d &dir) { return camera.eye + dir * camera.near_cut; }
+
 	// orthographic projection; on entry the view extent is initialized to
 	// what the fov shows at the terrain distance, so the mode switch keeps
 	// the apparent scale — from then on only zooms change it
@@ -434,7 +441,7 @@ struct EarthView {
 	void orbit(double heading_deg, double tilt_deg) {
 		if (!earth.ready()) return;
 		Vector3d pivot;
-		if (!earth.raycast(camera.eye, camera.direction, pivot)) return;
+		if (!earth.raycast(rayOrigin(camera.direction), camera.direction, pivot)) return;
 		if (heading_deg != 0) orbitCamera(camera, pivot, -heading_deg * M_PI / 180.0);
 		if (tilt_deg != 0) orbitCameraTilt(camera, pivot, tilt_deg * M_PI / 180.0);
 	}
@@ -445,7 +452,7 @@ struct EarthView {
 	val pickCenter() {
 		Vector3d hit;
 		if (!earth.ready()) return val::null();
-		if (earth.raycast(camera.eye, camera.direction, hit) == earth_core_t::raycast_miss)
+		if (earth.raycast(rayOrigin(camera.direction), camera.direction, hit) == earth_core_t::raycast_miss)
 			return val::null();
 		auto r = hit.norm();
 		val o = val::object();
@@ -479,7 +486,7 @@ struct EarthView {
 		Vector3d dir = (camera.direction + right * (nx * t * ((double)w / h))
 			+ up * (ny * t)).normalized();
 		Vector3d hit;
-		if (earth.raycast(camera.eye, dir, hit) == earth_core_t::raycast_miss)
+		if (earth.raycast(rayOrigin(dir), dir, hit) == earth_core_t::raycast_miss)
 			return val::null();
 		auto r = hit.norm();
 		val o = val::object();
@@ -652,6 +659,8 @@ EMSCRIPTEN_BINDINGS(earth) {
 		.function("setRoll", &EarthView::setRoll)
 		.function("getTubePose", &EarthView::getTubePose)
 		.function("setFov", &EarthView::setFov)
+		.function("setNearCut", &EarthView::setNearCut)
+		.function("getNearCut", &EarthView::getNearCut)
 		.function("setOrtho", &EarthView::setOrtho)
 		.function("getOrtho", &EarthView::getOrtho)
 		.function("setMiniature", &EarthView::setMiniature)

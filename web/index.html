@@ -112,6 +112,9 @@
      is off — so it gets a panel whose whole job is to be present when the
      camera is banked, and to level it when dismissed */
   body.rolled #rollpanel { display: flex; }
+  /* the near cut (H): ignore the mesh within some distance of the eye */
+  body.cut #cutpanel { display: flex; }
+  #cutamount { font: 11px sans-serif; opacity: .85; white-space: nowrap; }
   #rollamount { font: 11px sans-serif; opacity: .85; }
   #overlayblendtoggle { cursor: pointer; user-select: none; }
   #overlayblendtoggle:hover { text-decoration: underline; }
@@ -265,6 +268,14 @@
       <div class="tip">shift-drag moves the photo, shift-wheel sizes it about the pointer
         <button id="apfit" class="tiny" title="put the whole photo back in the frame">reset</button></div>
     </div>
+    <div id="cutpanel" class="panel">
+      <div class="head"><span>near cut</span><button class="x" id="cutoff" title="turn the cut off">✕</button></div>
+      <div class="row">
+        <input id="cutdist" type="range" min="0" max="1000" value="0" title="ignore the mesh closer than this">
+        <span id="cutamount"></span>
+      </div>
+      <div class="tip">nothing closer than this is drawn or picked</div>
+    </div>
     <div id="rollpanel" class="panel">
       <div class="head"><span>roll</span><button class="x" id="rolllevel" title="level the camera">✕</button></div>
       <div id="rollamount"></div>
@@ -294,7 +305,7 @@
   const HINTS = {
     persp: 'WASD move · R/F up/down · hold space: view-frame · arrows/drag look · ' +
       'Z/X zoom · shift slow · G hug terrain · O ortho · C pick debug · L lod debug · M mipmaps · 0 reset view · ' +
-      'P photo on/off · click map to teleport · ⇧drag map: tube rect',
+      'P photo on/off · H near cut · click map to teleport · ⇧drag map: tube rect',
     ortho: 'WASD/drag pan · arrows orbit around center · wheel/Z/X/R/F zoom · ' +
       'shift slow · O perspective · C pick debug · L lod debug · M mipmaps · 0 reset view · ' +
       'click map to teleport · ⇧drag map: tube rect',
@@ -802,6 +813,7 @@
       localStorage.setItem('earth-view', JSON.stringify({
         lat: p.lat, lon: p.lon, alt: p.alt, heading: p.heading, tilt: p.tilt,
         roll: p.roll, fov: p.fov, zoom: map.getZoom(), gain, ortho, hug, miniature, full3d,
+        nearCut: view.getNearCut(),
         tube: tubeRect ? { rect: tubeRect, on: tubeOn, ewAxis: tubeAxisEw } : null,
       }));
     } catch (e) {}
@@ -1012,6 +1024,41 @@
     canvas.focus();
   };
   document.getElementById('overlayblendtoggle').addEventListener('click', toggleOverlayBlend);
+  // --- near cut (H) ---------------------------------------------------------
+  // the slider is log across 0.5m..2km, with the bottom notch meaning off: a
+  // window is a metre or two away and a courtyard wall fifty, and both need
+  // to be settable on the same track
+  const cutDist = document.getElementById('cutdist');
+  const cutAmount = document.getElementById('cutamount');
+  const CUT_MIN = 0.5, CUT_MAX = 2000;
+  const cutFromSlider = (v) => v <= 0 ? 0
+    : CUT_MIN * Math.pow(CUT_MAX / CUT_MIN, v / 1000);
+  const sliderFromCut = (m) => m <= 0 ? 0
+    : Math.round(1000 * Math.log(m / CUT_MIN) / Math.log(CUT_MAX / CUT_MIN));
+  const showCut = () => {
+    const m = view.getNearCut();
+    cutDist.value = sliderFromCut(m);
+    cutAmount.textContent = m <= 0 ? 'off' : m < 10 ? m.toFixed(1) + ' m'
+      : Math.round(m) + ' m';
+    document.body.classList.add('cut');
+  };
+  cutDist.addEventListener('input', () => {
+    view.setNearCut(cutFromSlider(+cutDist.value));
+    showCut();
+  });
+  cutDist.addEventListener('change', saveView);
+  document.getElementById('cutoff').addEventListener('click', () => {
+    view.setNearCut(0);
+    document.body.classList.remove('cut');
+    saveView();
+    canvas.focus();
+  });
+  // H shows the panel (with whatever cut is set); H again hides the panel
+  // but leaves the cut alone — ✕ is what turns it off
+  const toggleCutPanel = () => {
+    if (document.body.classList.contains('cut')) document.body.classList.remove('cut');
+    else showCut();
+  };
   // the ✕ that removes the photo lives in the panel head now, and is wired
   // where the rest of that panel is
   // dragover has to be cancelled or the browser navigates to the dropped file.
@@ -1087,7 +1134,7 @@
     || t.tagName === 'SELECT'
     || (t.tagName === 'INPUT' && !['range', 'checkbox', 'color', 'button', 'radio'].includes(t.type)));
   const handled = new Set(['KeyW','KeyA','KeyS','KeyD','KeyQ','KeyE','KeyR','KeyF','KeyZ','KeyX','KeyG','KeyO','KeyC','KeyK','KeyL','KeyM','KeyT','KeyP','KeyV','KeyN',
-    'Space','ArrowLeft','ArrowRight','ArrowUp','ArrowDown','Minus','Equal','Digit0','Numpad0','Home']);
+    'Space','ArrowLeft','ArrowRight','ArrowUp','ArrowDown','Minus','Equal','Digit0','Numpad0','Home','KeyH']);
   let gain = 1; // re-initialized from the saved view once it loads
   let ortho = false;
   let miniature = false; // the tilt-shift look (N)
@@ -1157,6 +1204,7 @@
     if (e.code === 'KeyV' && !e.repeat) toggleFollow();
     // the point-pair panel; only does anything with a photo up, in perspective
     if (e.code === 'KeyP' && !e.repeat) toggleOverlayBlend();
+    if (e.code === 'KeyH' && !e.repeat) toggleCutPanel();
     if ((e.code === 'Digit0' || e.code === 'Numpad0' || e.code === 'Home') && !e.repeat) resetView();
     // like the native app's L key: tint octants red where a finer tile is
     // wanted but not yet downloaded
@@ -3112,6 +3160,10 @@
       planetR = view.planetRadius();
       view.setPose(START.lat, START.lon, START.alt, START.heading, START.tilt);
       view.setFov(START.fov);
+      if (Number.isFinite(START.nearCut) && START.nearCut > 0) {
+        view.setNearCut(START.nearCut);
+        showCut();
+      }
       gain = START.gain;
       ortho = !!START.ortho;
       view.setOrtho(ortho);
