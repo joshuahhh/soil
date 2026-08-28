@@ -973,7 +973,8 @@
   // on the drop, where the filename is finally visible
   const isFileDrag = (e) => [...(e.dataTransfer ? e.dataTransfer.items : [])]
     .some((it) => it.kind === 'file'
-      && (!it.type || it.type.startsWith('image/') || it.type.includes('xml')));
+      && (!it.type || it.type.startsWith('image/') || it.type.includes('xml')
+        || it.type.includes('json')));
   addEventListener('dragenter', (e) => {
     if (!isFileDrag(e)) return;
     e.preventDefault();
@@ -992,6 +993,15 @@
     if (gpx) {
       e.preventDefault();
       loadGpxFile(gpx);
+      return;
+    }
+    // a session file (the thing ⌘S writes) is the drop-shaped twin of ⌘V
+    const json = dropped.find((f) => /\.json$/i.test(f.name) || f.type.includes('json'));
+    if (json) {
+      e.preventDefault();
+      json.text().then((text) => {
+        if (!pasteState(text)) toast('that json is not a session file');
+      });
       return;
     }
     const file = dropped.find((f) => f.type.startsWith('image/'));
@@ -2817,7 +2827,8 @@
   // clipboard carries it. cmd-C anywhere on the page bundles the whole
   // session — view, path settings and the two dropped files — into one json
   // blob; cmd-V on the other build unpacks it and reloads into exactly that
-  // session. the tile cache is deliberately left out: it is megabytes of
+  // session. cmd-S writes the same blob to a .json, and dropping that file on
+  // the page reads it back. the tile cache is deliberately left out: it is megabytes of
   // bytes that re-download themselves, and the only cost of leaving it
   // behind is that the first minute over the same ground is slower
   const STATE_TAG = 'soil-session-v1';
@@ -2880,6 +2891,27 @@
     }
     return text;
   };
+  // ⌘S writes the same bundle to a file — for keeping a session around, or
+  // moving it somewhere a clipboard doesn't reach. dropping it back on the
+  // page is the other half
+  const saveState = async () => {
+    const text = await collectState();
+    const stamp = new Date().toISOString().slice(0, 19).replace(/[T:]/g, '-');
+    const url = URL.createObjectURL(new Blob([text], { type: 'application/json' }));
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `soil-session-${stamp}.json`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    toast(`session saved (${(text.length / 1e6).toFixed(1)} MB) — drop the file on the page to restore it`);
+  };
+  addEventListener('keydown', (e) => {
+    if (e.code !== 'KeyS' || !(e.metaKey || e.ctrlKey) || e.shiftKey || e.altKey) return;
+    e.preventDefault(); // or the browser offers to save the html
+    saveState();
+  });
   // applying is destructive on purpose: a key the incoming session doesn't
   // have is a key it doesn't want, so it goes. half-pasting one session over
   // another leaves a mix that belongs to neither
@@ -2957,7 +2989,7 @@
     clearTiles,
     align: () => ({ pairs, solving, dof: dofCount(), errs: lastErrs }),
     solve: startSolve,
-    copyState, pasteState };
+    copyState, pasteState, saveState };
 
   // roll is the one part of the pose with no other sign in the hud, and it can
   // arrive from the solver or from banking the tube, so the panel is driven by
