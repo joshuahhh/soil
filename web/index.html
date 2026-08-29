@@ -3418,10 +3418,14 @@
     saveView();
     savePath();
     saveAlign();
+    // localstorage holds strings, but the file is for reading and diffing
+    // too, so each entry goes in as the object it is — not a json string
+    // escaped inside the json. (a value that isn't json stays a string)
     const ls = {};
     for (const k of STATE_KEYS) {
       const v = localStorage.getItem(k);
-      if (v != null) ls[k] = v;
+      if (v == null) continue;
+      try { ls[k] = JSON.parse(v); } catch (e) { ls[k] = v; }
     }
     const files = {};
     for (const k of STATE_FILES) {
@@ -3431,7 +3435,7 @@
       if (j) files[k] = j;
       else console.warn(`session: could not read '${k}' out of idb — copying without it`);
     }
-    return JSON.stringify({ tag: STATE_TAG, ls, files });
+    return JSON.stringify({ tag: STATE_TAG, ls, files }, null, 2);
   };
   const copyState = async () => {
     const text = await collectState();
@@ -3475,7 +3479,10 @@
   const applyState = async (s) => {
     storageFrozen = true; // before the first write: nothing may save over it now
     for (const k of STATE_KEYS) {
-      if (s.ls && s.ls[k] != null) localStorage.setItem(k, s.ls[k]);
+      // objects from the current format, strings from files written before
+      // it stored them parsed
+      if (s.ls && s.ls[k] != null)
+        localStorage.setItem(k, typeof s.ls[k] === 'string' ? s.ls[k] : JSON.stringify(s.ls[k]));
       else localStorage.removeItem(k);
     }
     const failed = [];
