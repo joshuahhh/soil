@@ -118,6 +118,11 @@
      is off — so it gets a panel whose whole job is to be present when the
      camera is banked, and to level it when dismissed */
   body.rolled #rollpanel { display: flex; }
+  body.tunnel #tunnelpanel { display: flex; }
+  #tunnelamount { font: 11px sans-serif; opacity: .85; white-space: nowrap; min-width: 13ch; }
+  /* the range input carries a default 2px margin, which is what put its
+     track's left end right of the text on the row below */
+  #tunnelc { margin: 0; }
   /* lens distortion, likewise: present when the photo has some, or when the
      solver has been asked to look for it and it wants setting by eye */
   body.overlay.distorted #lenspanel, body.overlay.lenswanted #lenspanel { display: flex; }
@@ -325,6 +330,14 @@
       <div class="head"><span>roll</span><button class="x" id="rolllevel" title="level the camera">✕</button></div>
       <div id="rollamount"></div>
     </div>
+    <div id="tunnelpanel" class="panel">
+      <div class="head"><span>tunnel</span><button class="x" id="tunneloff" title="leave the tunnel (T)">✕</button></div>
+      <div class="row">
+        <input id="tunnelc" type="range" min="0" max="1" step="0.001" value="0.5" title="circumference">
+        <span id="tunnelamount"></span>
+      </div>
+      <div class="row">rolls up <button id="tunnelaxis" class="tiny" title="which way the ground rolls"></button></div>
+    </div>
     <div id="lenspanel" class="panel">
       <div class="head"><span>lens</span><button class="x" id="lensreset" title="no distortion">✕</button></div>
       <div class="row">
@@ -362,6 +375,7 @@
     ortho: 'orthographic',
     follow: 'following the path',
     tube: 'in the tube',
+    tunnel: '', // its panel says so
   };
   document.getElementById('hint').textContent = HINTS.persp;
   document.getElementById('speed').textContent = 'speed 1';
@@ -863,6 +877,7 @@
         roll: p.roll, fov: p.fov, zoom: map.getZoom(), gain, ortho, hug, miniature, full3d,
         nearCut: view.getNearCut(),
         tube: tubeRect ? { rect: tubeRect, on: tubeOn, ewAxis: tubeAxisEw } : null,
+        tunnel: { on: tunnelOn, c: tunnelC, across: tunnelAcross },
       }));
     } catch (e) {}
   };
@@ -1258,8 +1273,15 @@
   // updateHint on every mode switch
   const K = (t) => t.split(' ').map((k) => `<kbd>${k}</kbd>`).join(' ');
   const keysFor = () => {
-    const mode = followOn ? 'follow' : tubeOn ? 'tube' : ortho ? 'ortho' : 'persp';
+    const mode = followOn ? 'follow' : tunnelOn ? 'tunnel' : tubeOn ? 'tube' : ortho ? 'ortho' : 'persp';
     const g = [];
+    if (mode === 'tunnel') g.push(['flying the tunnel', [
+      [K('W A S D'), 'move'], [K('R F'), 'up / down'],
+      [K('space') + ' +', 'move in the view frame instead'],
+      [K('←↑↓→') + ' drag', 'look around'], [K('Z X') + ' wheel', 'zoom (fov)'],
+      [K('- ='), 'speed'], [K('shift') + ' +', 'slow'],
+      [K('G'), hug ? 'stop hugging the terrain' : 'hug the terrain'],
+      [K('T') + ' ' + K('esc'), 'leave the tunnel']]]);
     if (mode === 'persp') g.push(['flying', [
       [K('W A S D'), 'move'], [K('R F'), 'up / down'],
       [K('space') + ' +', 'move in the view frame instead'],
@@ -1281,7 +1303,8 @@
       [K('R F'), ortho ? 'zoom' : 'standoff'], [K('Z X'), 'zoom'], [K('shift') + ' +', 'slow'],
       [K('V') + ' ' + K('esc'), 'stop following']]]);
     const viewRows = [];
-    if (mode !== 'tube') viewRows.push([K('O'), ortho ? 'perspective' : 'orthographic']);
+    if (mode !== 'tube' && mode !== 'tunnel') viewRows.push([K('O'), ortho ? 'perspective' : 'orthographic']);
+    if (mode === 'persp' && !tubeRect) viewRows.push([K('T'), 'tunnel']);
     viewRows.push([K('N'), miniature ? 'miniature off' : 'miniature (tilt-shift)']);
     if (!ortho) viewRows.push([K('H'), 'near cut']);
     viewRows.push([K('C L K M'), 'debug: pick · lod · smoothing · mipmaps']);
@@ -1465,7 +1488,7 @@
   let speedAt = 0;
   const updateHint = () => {
     document.getElementById('hint').textContent = [
-      HINTS[followOn ? 'follow' : tubeOn ? 'tube' : ortho ? 'ortho' : 'persp'],
+      HINTS[followOn ? 'follow' : tunnelOn ? 'tunnel' : tubeOn ? 'tube' : ortho ? 'ortho' : 'persp'],
       mipmaps ? '' : 'mipmaps off',
       miniature ? 'miniature' : '',
       // T only does anything once a rect exists
@@ -1506,7 +1529,7 @@
     // no ortho inside the tube: its extent/zoom anchoring assumes normal
     // terrain below, and a parallel projection of the tube reads as mush
     if (e.code === 'KeyN' && !e.repeat) setMiniature(!miniature);
-    if (e.code === 'KeyO' && !e.repeat && !tubeOn) { ortho = !ortho; view.setOrtho(ortho); updateHint(); }
+    if (e.code === 'KeyO' && !e.repeat && !tubeOn && !tunnelOn) { ortho = !ortho; view.setOrtho(ortho); updateHint(); }
     // terrain hug: cruise at a fixed height above the mesh — over the
     // sphere normally, radially above the wall inside the tube
     if (e.code === 'KeyG' && !e.repeat && !followOn) {
@@ -1546,6 +1569,10 @@
     // from outside mostly shows the back of the sheet
     // clear the tube entirely: unroll, drop the rect, back to normal flight
     if (e.code === 'Escape' && followOn) setFollow(false);
+    if (e.code === 'Escape' && tunnelOn) { setTunnel(false); return; }
+    // T is the tunnel — unless a rect is drawn on the map, when it rolls
+    // that instead (esc clears the rect)
+    if (e.code === 'KeyT' && !e.repeat && !followOn && (tunnelOn || !tubeRect)) { setTunnel(!tunnelOn); return; }
     if (e.code === 'Escape' && tubeRect) {
       tubeRect = null;
       tubeOn = false;
@@ -1555,7 +1582,7 @@
       setRectData(null);
       updateHint();
     }
-    if (e.code === 'KeyT' && !e.repeat && tubeRect) {
+    if (e.code === 'KeyT' && !e.repeat && tubeRect && !tunnelOn) {
       tubeOn = !tubeOn;
       view.setTubeEnabled(tubeOn);
       view.setAirplane(tubeOn); // tube flying is airplane-frame
@@ -1740,6 +1767,65 @@
     const p = view.getPose();
     view.setPose(e.lngLat.lat, e.lngLat.lng, p.alt, p.heading, p.tilt);
   });
+
+  // --- tunnel mode ----------------------------------------------------------
+  // the tube without the rect: the ground ahead curls up in front of the
+  // camera, over it and down behind, whichever way it faces — the camera
+  // on the axis, looking along the circle, new land rolling up ahead as
+  // you fly (earth_core tunnelUpdate). one parameter, the circumference;
+  // T toggles it, the panel's slider sets it
+  let tunnelOn = false;
+  let tunnelC = 2000; // metres around
+  let tunnelAcross = true; // the roll runs along the heading (else around it)
+  const tunnelAxisBtn = document.getElementById('tunnelaxis');
+  const TUNNEL_MIN = 200, TUNNEL_MAX = 20000;
+  const tunnelSlider = document.getElementById('tunnelc');
+  const tunnelAmountEl = document.getElementById('tunnelamount');
+  // the slider is log across its range: a tunnel is felt in ratios
+  const tunnelFromSlider = (v) => TUNNEL_MIN * Math.pow(TUNNEL_MAX / TUNNEL_MIN, v);
+  const tunnelToSlider = (c) => Math.log(c / TUNNEL_MIN) / Math.log(TUNNEL_MAX / TUNNEL_MIN);
+  const fmtM = (m) => m >= 1000 ? `${(m / 1000).toFixed(m >= 10000 ? 0 : 1)} km` : `${Math.round(m)} m`;
+  const refreshTunnel = () => {
+    tunnelSlider.value = tunnelToSlider(Math.max(TUNNEL_MIN, Math.min(TUNNEL_MAX, tunnelC)));
+    tunnelAmountEl.textContent = `${fmtM(tunnelC)} around`;
+    tunnelAxisBtn.textContent = tunnelAcross ? 'forward and backward' : 'left to right';
+  };
+  tunnelAxisBtn.addEventListener('click', () => {
+    tunnelAcross = !tunnelAcross;
+    view.setTunnelAcross(tunnelAcross);
+    refreshTunnel();
+    saveView();
+    canvas.focus();
+  });
+  const setTunnel = (on) => {
+    if (on === tunnelOn) return;
+    tunnelOn = on;
+    if (on) {
+      // the rect tube and the tunnel are the same machinery; only one
+      if (tubeOn) { tubeOn = false; tubePending = null; view.setAirplane(false); }
+      if (ortho) { ortho = false; view.setOrtho(false); }
+      view.setTunnelAcross(tunnelAcross);
+      view.setTunnel(true, tunnelC);
+      curl = 0; // rolls up around you from flat
+      view.setTubeCurl(0);
+      following = true;
+    } else {
+      view.setTunnel(false, tunnelC);
+      view.setTubeEnabled(false);
+    }
+    document.body.classList.toggle('tunnel', on);
+    refreshTunnel();
+    updateHint();
+    saveView();
+    canvas.focus();
+  };
+  tunnelSlider.addEventListener('input', () => {
+    tunnelC = tunnelFromSlider(+tunnelSlider.value);
+    view.setTunnelCircumference(tunnelC);
+    refreshTunnel();
+    saveView();
+  });
+  document.getElementById('tunneloff').addEventListener('click', () => setTunnel(false));
 
   // --- tube mode ------------------------------------------------------------
   // shift+drag on the map draws a rectangle; that slab of territory is rolled
@@ -2415,7 +2501,7 @@
   };
 
   const setFollow = (on) => {
-    if (on && (!spine || !view.ready() || tubeOn)) on = false;
+    if (on && (!spine || !view.ready() || tubeOn || tunnelOn)) on = false;
     if (on === followOn) { refreshPathPanel(); return; }
     followOn = on;
     fol.heading = fol.alt = null; // don't ease out of a stale value
@@ -2754,7 +2840,7 @@
     // pairs come with the photo, except where they can't (ortho, or inside
     // the tube) — and then the panel says so rather than silently dropping
     // half of itself
-    const on = document.body.classList.contains('overlay') && !ortho && !tubeOn;
+    const on = document.body.classList.contains('overlay') && !ortho && !tubeOn && !tunnelOn;
     document.body.classList.toggle('align', on);
     if (!on) { cancelCapture(); stopSolve(); }
     document.getElementById('apfreepos').checked = freeFlags.pos;
@@ -3456,6 +3542,7 @@
   window.__demo = { view, map, marker, isFollowing: () => following,
     lod: (v) => { if (v != null) view.setLodScale(v); return view.getLodScale(); },
     tube: () => ({ rect: tubeRect, on: tubeOn, curl }),
+    tunnel: (c) => { if (c != null) { tunnelC = c; view.setTunnelCircumference(c); refreshTunnel(); } return view.getTunnelInfo(); },
     path: () => path, loadGpx: (text) => setPath(parseGpx(text), true),
     clearTiles,
     align: () => ({ pairs, solving, dof: dofCount(), errs: lastErrs }),
@@ -3470,7 +3557,7 @@
   let shownRoll = null;
   const refreshRoll = () => {
     const roll = view.ready() ? (view.getPose().roll || 0) : 0;
-    const on = !tubeOn && Math.abs(roll) > 0.05;
+    const on = !tubeOn && !tunnelOn && Math.abs(roll) > 0.05;
     const shown = on ? Math.round(roll * 10) / 10 : null;
     if (shown === shownRoll) return;
     shownRoll = shown;
@@ -3530,6 +3617,16 @@
         } else {
           view.setTubeRect(tubeRect[0], tubeRect[1], tubeRect[2], tubeRect[3], tubeAxisEw);
         }
+      }
+      if (START.tunnel && Number.isFinite(START.tunnel.c)) tunnelC = START.tunnel.c;
+      if (START.tunnel && START.tunnel.across === false) tunnelAcross = false;
+      refreshTunnel();
+      if (START.tunnel && START.tunnel.on && !(START.tube && START.tube.on)) setTunnel(true);
+      // ?tunnel=<circumference m> (test mode): straight into the tunnel at
+      // the given pose, for the render tests
+      if (TEST && QS.has('tunnel')) {
+        const c = parseFloat(QS.get('tunnel'));
+        if (Number.isFinite(c) && c > 0) { tunnelC = c; refreshTunnel(); setTunnel(true); }
       }
       // a track dropped (or restored) before the planet metadata arrived is
       // still sitting in js: its ecef points need the planetoid radius, and
@@ -3616,12 +3713,17 @@
         if (!tubePending && curl !== curlTarget) parts.push('rolling…');
         tubeInfoEl.style.display = parts.length ? '' : 'none';
         if (parts.length) tubeInfoEl.textContent = 'tube: ' + parts.join(' · ');
+      } else if (tunnelOn) {
+        const ti = view.getTunnelInfo();
+        const loading = ti.nodesLoaded < ti.nodesWanted;
+        tubeInfoEl.style.display = loading ? '' : 'none';
+        if (loading) tubeInfoEl.textContent = `tunnel: loading ${ti.nodesLoaded}/${ti.nodesWanted} tiles`;
       } else {
         tubeInfoEl.style.display = 'none';
       }
       // ease the roll toward closed; ~.7s time constant reads as the
       // ground curling up rather than snapping
-      if (tubeOn && !tubePending && curl !== curlTarget) {
+      if ((tubeOn && !tubePending || tunnelOn) && curl !== curlTarget) {
         curl += (curlTarget - curl) * (1 - Math.exp(-dt / 700));
         if (Math.abs(curlTarget - curl) < 0.001) curl = curlTarget;
         view.setTubeCurl(curl);
@@ -3630,7 +3732,7 @@
       // in tube mode the marker shows the camera in unrolled tube
       // coordinates — the spot on the rect whose imagery is wrapped around
       // the camera — rather than the now-meaningless ecef point under it
-      const tp = tubeOn ? view.getTubePose() : null;
+      const tp = (tubeOn || tunnelOn) ? view.getTubePose() : null;
       const m = tp || p;
       setMarkerHeading(m.heading);
       if (Math.abs(m.lat - lastSynced.lat) > 1e-7 || Math.abs(m.lon - lastSynced.lon) > 1e-7) {

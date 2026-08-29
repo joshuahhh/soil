@@ -24,6 +24,7 @@ export function shotQuery(shot) {
   if (shot.ortho) q.set('ortho', '1');
   if (shot.hug) q.set('hug', '1');
   if (shot.jpg) q.set('jpg', '1'); // force the no-s3tc texture path
+  if (shot.tunnel) q.set('tunnel', String(shot.tunnel)); // tunnel mode, circumference in m
   return q;
 }
 

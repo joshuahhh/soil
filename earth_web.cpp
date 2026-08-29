@@ -137,6 +137,41 @@ struct EarthView {
 	// host's escape hatch when a stuck download keeps coverage incomplete
 	void lockTubeGround() { earth.tubeLockGround(false); }
 	void setTubeCurl(double c) { earth.tube_curl = fmax(0.0, fmin(c, 1.0)); }
+
+	// tunnel mode (see earth_core tunnelUpdate): the tube that follows the
+	// camera. flight is the ordinary ground-frame kind; the shader's roll
+	// and the rect-driven node selection are the tube's
+	void setTunnel(bool on, double circumference) {
+		earth.tunnel_circumference = fmax(50.0, circumference);
+		if (on && !earth.tunnel_on) earth.tunnel_ground_measured = false;
+		earth.tunnel_on = on;
+		earth.tube_on = on;
+		earth.tube_ground_locked = on;
+		camera.airplane = false;
+		follow_height = NAN;
+		if (on) earth.tunnelUpdate(camera, 0);
+	}
+	void setTunnelCircumference(double c) {
+		earth.tunnel_circumference = fmax(50.0, c);
+	}
+	// which way the roll goes: across the heading (the ground ahead curls
+	// up in front of you) or around it (you look down the pipe)
+	void setTunnelAcross(bool across) {
+		earth.tunnel_across = across;
+		if (earth.tunnel_on) earth.tunnelUpdate(camera, 0);
+	}
+	val getTunnelInfo() {
+		val o = val::object();
+		o.set("on", earth.tunnel_on);
+		o.set("circumference", earth.tunnel_circumference);
+		o.set("across", earth.tunnel_across);
+		o.set("radius", earth.tunnel_circumference / (2.0 * M_PI));
+		o.set("groundAlt", earth.tunnel_ground_radius - planetRadius());
+		o.set("groundMeasured", earth.tunnel_ground_measured);
+		o.set("nodesWanted", earth.stat_nodes_wanted);
+		o.set("nodesLoaded", earth.stat_nodes_loaded);
+		return o;
+	}
 	// the camera in unrolled tube coordinates (see earth_core::tubePose):
 	// where on the original rect the imagery around the camera came from.
 	// null outside tube mode — hosts fall back to getPose for the marker
@@ -528,7 +563,9 @@ struct EarthView {
 		// the held height is the radial gap to the wall (tube flying is
 		// airplane-frame, so the two hug variants never overlap). movement
 		// and roll belong to the cylindrical walker below; the airplane
-		// branch only turns the head
+		// branch only turns the head. the tunnel is not this: it flies
+		// ground-frame, and its hug is the ordinary one over the unrolled
+		// ground, which the roll leaves in place at the tube's bottom
 		auto tube_hugging = terrain_follow && earth.tube_on && camera.airplane;
 		// until the gap locks (wall below measurable), tube G flies as a
 		// plain airplane — never strand the camera unable to move
@@ -681,6 +718,10 @@ EMSCRIPTEN_BINDINGS(earth) {
 		.function("setTubeEnabled", &EarthView::setTubeEnabled)
 		.function("lockTubeGround", &EarthView::lockTubeGround)
 		.function("setTubeCurl", &EarthView::setTubeCurl)
+		.function("setTunnel", &EarthView::setTunnel)
+		.function("setTunnelCircumference", &EarthView::setTunnelCircumference)
+		.function("setTunnelAcross", &EarthView::setTunnelAcross)
+		.function("getTunnelInfo", &EarthView::getTunnelInfo)
 		.function("getTubeInfo", &EarthView::getTubeInfo)
 		.function("setPath", &EarthView::setPath)
 		.function("clearPath", &EarthView::clearPath)

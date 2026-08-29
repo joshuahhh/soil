@@ -257,7 +257,7 @@ void renderSetTransform(render_ctx_t &ctx, const float *m16) {
 // tube mode (see earth_core.h): per-frame local-frame-to-clip matrix and warp
 // parameters (effective roll radius, rect half length/width in meters)
 void renderSetTube(render_ctx_t &ctx, bool on, const float *local_to_clip16,
-		float r_eff, float half_len, float half_wid) {
+		float r_eff, float half_len, float half_wid, float wid_offset) {
 	glUniform1i(ctx.tube_on_loc, on);
 	// draw both faces in tube mode: the camera legitimately sees walls from
 	// either side (approaching the tube from outside, or geometry the roll
@@ -265,7 +265,7 @@ void renderSetTube(render_ctx_t &ctx, bool on, const float *local_to_clip16,
 	if (on) glDisable(GL_CULL_FACE); else glEnable(GL_CULL_FACE);
 	if (!on) return;
 	glUniformMatrix4fv(ctx.tube_local_to_clip_loc, 1, GL_FALSE, local_to_clip16);
-	glUniform3f(ctx.tube_params_loc, r_eff, half_len, half_wid);
+	glUniform4f(ctx.tube_params_loc, r_eff, half_len, half_wid, wid_offset);
 }
 
 // per-node mesh-to-local-frame matrix (tube mode only)
@@ -641,7 +641,7 @@ void renderInit(render_ctx_t &ctx, void *) {
 		"uniform bool tube_on;"
 		"uniform mat4 tube_mesh_to_local;"
 		"uniform mat4 tube_local_to_clip;"
-		"uniform vec3 tube_params;" // (r_eff, half_len, half_wid)
+		"uniform vec4 tube_params;" // (r_eff, half_len, half_wid, wid_offset)
 		"uniform vec2 uv_offset;"
 		"uniform vec2 uv_scale;"
 		"uniform bool octant_mask[8];"
@@ -668,7 +668,7 @@ void renderInit(render_ctx_t &ctx, void *) {
 		"	vec4 p;"
 		"	if (tube_on) {"
 		"		vec3 l = (tube_mesh_to_local * vec4(position, 1.0)).xyz;"
-		"		v_rect = vec2(l.x / tube_params.y, l.y / tube_params.z);"
+		"		v_rect = vec2(l.x / tube_params.y, (l.y - tube_params.w) / tube_params.z);"
 		"		float R = tube_params.x;"
 		"		float th = l.y / R;"
 		// radial distance from the tube axis; the floor keeps terrain taller

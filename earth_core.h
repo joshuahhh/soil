@@ -49,12 +49,75 @@ struct earth_core_t {
 	double tube_curl = 1.0;
 	double tube_radius = 0; // fully-curled tube radius (m)
 	double tube_half_len = 0, tube_half_wid = 0; // rect half extents (m)
+	// where the wrapped range sits across the axis: the rect spans y in
+	// [offset - half_wid, offset + half_wid]. zero for a drawn rect (the
+	// seam straight up over its centre line); the tunnel's across mode
+	// sets a quarter circumference, which puts the seam level behind you
+	double tube_wid_offset = 0;
 	double tube_ground_radius = 0; // ecef radius of the ground at the rect center
 	bool tube_ground_locked = false; // true once measured from the loaded mesh
 	bool tube_ew_axis = true; // tube axis east-west (else north-south)
 	Vector3d tube_up = Vector3d::UnitZ(), tube_axis = Vector3d::UnitX();
 	Matrix4d tube_globe_from_local = Matrix4d::Identity();
 	Matrix4d tube_local_from_globe = Matrix4d::Identity();
+
+	// tunnel mode: the tube again, but the rect is not drawn on a map — it
+	// is wherever the camera is, and it turns with the heading. the camera
+	// flies as it does on the ground, at whatever height it likes, and the
+	// ground rolls up around it: with tunnel_across (the default) the ground
+	// ahead curls up in front of you, passes overhead — the seam, straight
+	// up — and comes down behind, so flying forward rolls the land past you
+	// and moves the seam's place on the ground along; without it the tube's
+	// axis runs along the heading instead, and you look down the pipe. one
+	// parameter, the circumference; the roll's radius is what puts the
+	// camera on the axis (height R above ground) or on the floor (low)
+	bool tunnel_on = false;
+	bool tunnel_across = true;
+	double tunnel_circumference = 2000;
+	// the ground under the camera, eased: the rect's zero-point has to be
+	// the terrain surface (see setTubeRect), and here the rect moves every
+	// frame, so the lock is a continuous measurement rather than a one-off
+	double tunnel_ground_radius = 0;
+	bool tunnel_ground_measured = false;
+
+	// the tunnel's frame from the camera: up at the eye; the axis sideways
+	// (heading x up, so the rect's across direction — the one that wraps —
+	// is the heading) or along the heading; ground measured under the eye.
+	// every frame, before the walk. the camera's own local position is
+	// then (0, 0, its height above that ground), which the roll leaves at
+	// the tube's bottom: the camera is inside wherever its altitude puts it
+	void tunnelUpdate(const camera_t &cam, double dt_ms) {
+		auto R_p = planetoid && planetoid->downloaded ? (double)planetoid->radius : 6371010.0;
+		Vector3d up = cam.eye.normalized();
+		Vector3d h = cam.direction - up * cam.direction.dot(up);
+		if (h.norm() < 1e-6) h = tunnel_across ? up.cross(tube_axis) : tube_axis - up * tube_axis.dot(up); // straight down: keep the old heading
+		if (h.norm() < 1e-6) h = up.cross(Vector3d::UnitZ());
+		h.normalize();
+		auto C = fmax(50.0, tunnel_circumference);
+		// the ground: straight down against the drawn meshes (stored
+		// unrolled, so the ray is the same as flat mode's). hold the last
+		// measurement while the mesh under the camera is missing or coarse
+		if (!tunnel_ground_measured) tunnel_ground_radius = R_p;
+		auto g = groundRadiusUnder(cam.eye);
+		if (g > 0) {
+			if (!tunnel_ground_measured) { tunnel_ground_radius = g; tunnel_ground_measured = true; }
+			else tunnel_ground_radius += (g - tunnel_ground_radius) * (1.0 - exp(-dt_ms / 250.0));
+		}
+		Vector3d axis = tunnel_across ? h.cross(up).normalized() : h;
+		tube_up = up;
+		tube_axis = axis;
+		tube_ew_axis = fabs(axis.z()) < 0.7; // roughly east-west, for the map's arrows
+		tube_half_wid = C / 2;                 // across the axis: what wraps
+		tube_half_len = fmax(500.0, 1.5 * C);  // along it
+		// across mode: the seam level behind you (theta = -90°), so the
+		// wrapped range runs from a quarter circumference behind to three
+		// quarters ahead. along the axis it stays overhead
+		tube_wid_offset = tunnel_across ? C / 4 : 0;
+		tube_radius = fmax(1.0, tube_half_wid / M_PI);
+		tube_ground_radius = tunnel_ground_radius;
+		tube_ground_locked = true;
+		tubeRebuild();
+	}
 
 	void tubeRebuild() {
 		Matrix4d g = Matrix4d::Identity();
@@ -91,6 +154,7 @@ struct earth_core_t {
 		tube_half_len = ew_axis ? ew_half : ns_half;
 		tube_half_wid = ew_axis ? ns_half : ew_half;
 		tube_radius = fmax(1.0, tube_half_wid / M_PI); // 2*half_wid = 2*pi*R
+		tube_wid_offset = 0;
 		tube_ground_locked = false;
 		// seed at the sphere radius: measured (straight-down mesh probes at
 		// many levels and latitudes) the mesh datum IS the planetoid sphere,
@@ -120,14 +184,17 @@ struct earth_core_t {
 		// unrolled across-component of the view direction: its projection on
 		// the tangential direction at angle theta
 		auto dy = d.y() * cos(theta) + d.z() * sin(theta);
-		// local (x, y) to east/north displacement by axis orientation
-		// (across = up x axis, so for a north-south axis, across is -east)
-		auto dE = tube_ew_axis ? l.x() : -y;
-		auto dN = tube_ew_axis ? y : l.x();
-		auto hE = tube_ew_axis ? d.x() : -dy;
-		auto hN = tube_ew_axis ? dy : d.x();
+		// local (x along the axis, y across) to east/north, for whatever
+		// direction the axis runs (a tunnel's follows the heading)
 		auto latc = asin(fmax(-1.0, fmin(1.0, tube_up.z())));
 		auto lonc = atan2(tube_up.y(), tube_up.x());
+		Vector3d east(-sin(lonc), cos(lonc), 0);
+		Vector3d north = tube_up.cross(east);
+		Vector3d across = tube_up.cross(tube_axis);
+		auto dE = l.x() * tube_axis.dot(east) + y * across.dot(east);
+		auto dN = l.x() * tube_axis.dot(north) + y * across.dot(north);
+		auto hE = d.x() * tube_axis.dot(east) + dy * across.dot(east);
+		auto hN = d.x() * tube_axis.dot(north) + dy * across.dot(north);
 		auto R_p = planetoid && planetoid->downloaded ? (double)planetoid->radius : 6371010.0;
 		lat = latc + dN / R_p;
 		lon = lonc + dE / (R_p * cos(latc));
@@ -191,7 +258,7 @@ struct earth_core_t {
 	bool tubeWallRho(double x, double theta, double &rho_wall) {
 		if (!tube_on || tube_radius <= 0) return false;
 		auto R = tube_radius / fmax(tube_curl, 1e-3);
-		auto y = remainder(theta, 2.0 * M_PI) * R;
+		auto y = tube_wid_offset + remainder(theta - tube_wid_offset / R, 2.0 * M_PI) * R;
 		Vector3d origin = (tube_globe_from_local
 			* Vector4d(x, y, 10000.0, 1.0)).head<3>();
 		Vector3d hit;
@@ -224,7 +291,7 @@ struct earth_core_t {
 			for (auto j = 0; j < 7; j++) {
 				Vector3d p = tube_up * (tube_ground_radius + 10000.0)
 					+ tube_axis * ((i / 3.0 - 1.0) * 0.9 * tube_half_len)
-					+ across * ((j / 3.0 - 1.0) * 0.9 * tube_half_wid);
+					+ across * (tube_wid_offset + (j / 3.0 - 1.0) * 0.9 * tube_half_wid);
 				Vector3d hit;
 				double mpt;
 				if (raycast(p, -tube_up, hit, &mpt) != raycast_mesh) {
@@ -768,7 +835,8 @@ struct earth_core_t {
 		// as soon as the whole rect is covered at measurement resolution —
 		// long before full res. the host watches groundLocked, rolls the
 		// tube up, and the remaining detail streams into the rolled tube
-		if (tube_on && !tube_ground_locked)
+		if (tunnel_on) tunnelUpdate(cam, dt_ms);
+		else if (tube_on && !tube_ground_locked)
 			tubeLockGround(true);
 
 		auto &eye = cam.eye;
@@ -971,7 +1039,7 @@ struct earth_core_t {
 						// heights (everest) plus a little below sea level
 						auto margin = node->obb.extents.norm();
 						if (fabs(tube_c.x()) > tube_half_len + margin
-							|| fabs(tube_c.y()) > tube_half_wid + margin
+							|| fabs(tube_c.y() - tube_wid_offset) > tube_half_wid + margin
 							|| tube_c.z() > 9000 + margin || tube_c.z() < -1500 - margin) {
 							continue;
 						}
@@ -1362,9 +1430,9 @@ struct earth_core_t {
 			Matrix4f l2cf = l2c.cast<float>();
 			auto r_eff = tube_radius / fmax(tube_curl, 1e-3);
 			renderSetTube(ctx, true, l2cf.data(),
-				(float)r_eff, (float)tube_half_len, (float)tube_half_wid);
+				(float)r_eff, (float)tube_half_len, (float)tube_half_wid, (float)tube_wid_offset);
 		} else {
-			renderSetTube(ctx, false, nullptr, 0, 0, 0);
+			renderSetTube(ctx, false, nullptr, 0, 0, 0, 0);
 		}
 
 		drawn_nodes.clear();
@@ -1387,6 +1455,17 @@ struct earth_core_t {
 			static const bool no_mask_debug = getenv("EARTH_NO_MASK") != nullptr;
 			auto self_mask = no_mask_debug ? (uint8_t)0 : mask_map[full_path];
 			if (self_mask == 0xff) continue;
+			// the tunnel rolls whatever is resident, and a tile that is
+			// coarse against the roll's radius can't be rolled: its
+			// triangles span a large arc, the shader's rect clip is
+			// interpolated straight across them while the warp is not, and
+			// a lake tile came out as a slab across half the view. the rect
+			// tube avoids this by staying flat until fine coverage locks;
+			// the tunnel re-enters coarse land every time it moves, so it
+			// leaves a hole there until the fine tile lands instead. the
+			// parent's mask bit is already set above, so no ancestor fills
+			// the hole with its own slab
+			if (tunnel_on && node->obb.extents.norm() > 3.0 * tube_radius) continue;
 
 			drawn_nodes.push_back({ node, self_mask });
 
