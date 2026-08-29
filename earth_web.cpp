@@ -338,7 +338,10 @@ struct EarthView {
 	}
 
 	void setFov(double deg) {
-		camera.fov = fmax(1.0, fmin(deg, 100.0)) * M_PI / 180.0;
+		// 150: a pinhole projection stops meaning anything as the half-angle's
+		// tangent runs away, and a lens that wide is a fisheye, which the
+		// page's distortion parameter is for
+		camera.fov = fmax(1.0, fmin(deg, 150.0)) * M_PI / 180.0;
 	}
 
 	// ignore the mesh closer than this many meters to the eye — see

@@ -58,6 +58,12 @@
      a given point of the photo stands for — an alignment stays aligned */
   #overlay { position: absolute; pointer-events: none; z-index: 4; }
   body:not(.overlay) #overlay { display: none; }
+  /* the photo undistorted (see renderWarp): drawn in place of the <img>
+     whenever the lens parameter is non-zero, and only then, since the warp
+     is a canvas that has to be redrawn when k changes */
+  #overlaywarp { position: absolute; pointer-events: none; z-index: 4; display: none; }
+  body.overlay.distorted #overlaywarp { display: block; }
+  body.distorted #overlay { visibility: hidden; }
 
   /* --- point-pair alignment -------------------------------------------------
      each pair ties a point of the photo to a point on the mesh; the solver
@@ -112,6 +118,15 @@
      is off — so it gets a panel whose whole job is to be present when the
      camera is banked, and to level it when dismissed */
   body.rolled #rollpanel { display: flex; }
+  /* lens distortion, likewise: present when the photo has some, or when the
+     solver has been asked to look for it and it wants setting by eye */
+  body.overlay.distorted #lenspanel, body.overlay.lenswanted #lenspanel { display: flex; }
+  /* fixed width: the readout flips between 'barrel' and 'pincushion' as the
+     slider crosses zero, and if the label reflowed the row the slider would
+     change size under the pointer mid-drag — a value would then map to a
+     different position depending on which side you came from */
+  #lensamount { font: 11px sans-serif; opacity: .85; white-space: nowrap;
+                min-width: 23ch; font-variant-numeric: tabular-nums; }
   /* the near cut (H): ignore the mesh within some distance of the eye */
   body.cut #cutpanel { display: flex; }
   #cutamount { font: 11px sans-serif; opacity: .85; white-space: nowrap; }
@@ -251,6 +266,7 @@
     </g>
   </svg>
   <img id="overlay" alt="">
+  <canvas id="overlaywarp"></canvas>
   <svg id="pairs"></svg>
   <div id="pickinfo"></div>
   <div id="tubeinfo"></div>
@@ -286,6 +302,7 @@
               <label><input type="checkbox" id="apfreeaim" checked>aim</label>
               <label><input type="checkbox" id="apfreefov" checked>fov</label>
               <label><input type="checkbox" id="apfreeroll">roll</label>
+              <label><input type="checkbox" id="apfreedist">lens</label>
             </div>
           </div>
           <div id="apstatus"></div>
@@ -307,6 +324,13 @@
     <div id="rollpanel" class="panel">
       <div class="head"><span>roll</span><button class="x" id="rolllevel" title="level the camera">✕</button></div>
       <div id="rollamount"></div>
+    </div>
+    <div id="lenspanel" class="panel">
+      <div class="head"><span>lens</span><button class="x" id="lensreset" title="no distortion">✕</button></div>
+      <div class="row">
+        <input id="lensk" type="range" min="-0.2" max="0.2" step="0.002" value="0" title="distortion: left barrel, right pincushion">
+        <span id="lensamount"></span>
+      </div>
     </div>
     <div id="pathpanel" class="panel">
       <div class="head"><span id="pathname">path</span><button class="x" id="pathclose" title="remove path">✕</button></div>
@@ -940,7 +964,10 @@
   // of the viewport's, cx/cy its center as a fraction of the viewport — all
   // relative, so a window resize rescales the photo with the frustum instead
   // of sliding the picture through it
-  let ov = { scale: 1, cx: 0.5, cy: 0.5 };
+  // k is the lens: a division-model distortion about the photo's centre,
+  // negative for barrel. it belongs to the photo, so it lives here with the
+  // photo's placement rather than in the camera pose
+  let ov = { scale: 1, cx: 0.5, cy: 0.5, k: 0 };
   // how far the photo can be blown up: 16x the viewport height is enough to
   // put a window frame or a roof ridge under the pointer when placing a pair,
   // which is what the big end is for. the slider's own units are log across
@@ -948,7 +975,10 @@
   // leave the small end unadjustable
   const SCALE_MIN = 0.05, SCALE_MAX = 16;
   const clampScale = (s) => Math.max(SCALE_MIN, Math.min(SCALE_MAX, s));
-  const applyOverlayBlend = () => { overlayImg.style.opacity = overlayBlend.value / 100; };
+  const applyOverlayBlend = () => {
+    overlayImg.style.opacity = overlayBlend.value / 100;
+    warpEl.style.opacity = overlayBlend.value / 100;
+  };
   // the photo's box in viewport pixels; null until the image has decoded
   const overlayBox = () => {
     if (!overlayImg.naturalWidth || !overlayImg.naturalHeight) return null;
@@ -963,9 +993,20 @@
     overlayImg.style.top = b.y + 'px';
     overlayImg.style.width = b.w + 'px';
     overlayImg.style.height = b.h + 'px';
+    // the warp canvas is the box grown by its margin: m in total, half a
+    // side each way, matching the ±(1+m) span it is drawn over
+    const m = warpMargin;
+    warpEl.style.left = (b.x - b.w * m / 2) + 'px';
+    warpEl.style.top = (b.y - b.h * m / 2) + 'px';
+    warpEl.style.width = b.w * (1 + m) + 'px';
+    warpEl.style.height = b.h * (1 + m) + 'px';
   };
   // photo coordinates (0..1 across the image) <-> viewport pixels. pairs are
-  // stored in photo coordinates so moving or resizing the photo carries them
+  // stored in photo coordinates so moving or resizing the photo carries them.
+  // these two are the box only: the image as displayed, which is the photo
+  // undistorted when k is set. a pair's own (u, v) are on the photo as
+  // shot, so they go through undistortUV on the way out and distortUV on
+  // the way in — a pair placed under one k stays on its feature under another
   const photoToView = (u, v) => {
     const b = overlayBox();
     return b ? { x: b.x + u * b.w, y: b.y + v * b.h } : null;
@@ -974,6 +1015,163 @@
     const b = overlayBox();
     return b ? { u: (x - b.x) / b.w, v: (y - b.y) / b.h } : null;
   };
+  // the lens. division model (fitzgibbon): r_u = r_d / (1 + k r_d²), radii
+  // from the centre with the photo's half-height as the unit, so k means the
+  // same thing whatever the picture's pixel size. one parameter, invertible
+  // in closed form (the inverse is a quadratic in r_d), and near-linear in k,
+  // which is what makes it fit alongside fov. the centre of distortion is
+  // taken to be the image centre — true of an uncropped photo
+  const lensAspect = () => overlayImg.naturalWidth / overlayImg.naturalHeight;
+  // how far k may go. the model folds at r = 1/√|k|. pincushion turns back
+  // from there, so the photo's corner (r = √(a² + 1)) must stay inside, with
+  // room. barrel sends that radius to infinity instead: past it the photo
+  // has no place on screen, which the warp shows as blank and a pair there
+  // as absent — so barrel may go until the fold reaches the half-width, and
+  // only the corners are lost
+  const lensLimits = () => {
+    const a = overlayImg.naturalWidth ? lensAspect() : 1.5;
+    return { barrel: -1 / (a * a), pincushion: 0.6 / (a * a + 1) };
+  };
+  const clampLens = (k) => {
+    const l = lensLimits();
+    return Math.max(l.barrel, Math.min(l.pincushion, Number(k) || 0));
+  };
+  // null past the fold: a point of the photo this barrel puts nowhere
+  const undistortUV = (u, v, k) => {
+    if (!k) return { u, v };
+    const a = lensAspect();
+    const X = (u - 0.5) * 2 * a, Y = (v - 0.5) * 2;
+    const d = 1 + k * (X * X + Y * Y);
+    if (d <= 1e-6) return null;
+    const f = 1 / d;
+    return { u: 0.5 + X * f / (2 * a), v: 0.5 + Y * f / 2 };
+  };
+  // null where the model has no answer: beyond 1/(4k) of pincushion, or a
+  // barrel corner pushed out past where the inverse is real
+  const distortUV = (u, v, k) => {
+    if (!k) return { u, v };
+    const a = lensAspect();
+    const X = (u - 0.5) * 2 * a, Y = (v - 0.5) * 2;
+    const ru = Math.hypot(X, Y);
+    if (ru < 1e-9) return { u, v };
+    const q = 4 * k * ru * ru;
+    if (q > 1) return null;
+    // (1 - sqrt(1 - q)) / (2 k r_u), with the series where the subtraction
+    // would lose its digits
+    const rd = Math.abs(q) < 1e-6 ? ru * (1 + k * ru * ru) : (1 - Math.sqrt(1 - q)) / (2 * k * ru);
+    const sc = rd / ru;
+    return { u: 0.5 + X * sc / (2 * a), v: 0.5 + Y * sc / 2 };
+  };
+  // where a photo point (as shot) shows on screen under lens k
+  const photoToViewK = (u, v, k) => {
+    const p = undistortUV(u, v, k);
+    return p ? photoToView(p.u, p.v) : null;
+  };
+
+  // the undistorted photo, when k is set: the <img> can't be warped, so a
+  // canvas is drawn in its place — a grid of cells over the undistorted
+  // picture, each filled from the source through the affine that carries
+  // its three corners. redrawn only when k changes, never per frame. barrel
+  // pushes the corners outward, so the canvas is the box plus a margin for
+  // them, capped: a strong lens sends a corner off to infinity
+  const warpEl = document.getElementById('overlaywarp');
+  let warpMargin = 0;
+  const renderWarp = () => {
+    const k = ov.k || 0;
+    const on = !!k && overlayImg.naturalWidth > 0;
+    document.body.classList.toggle('distorted', on);
+    if (!on) return;
+    const a = lensAspect();
+    const rc = Math.hypot(a, 1); // the corner, as shot
+    const ruc = rc / (1 + k * rc * rc);
+    // the corner's outward push, as a fraction of the box; capped, and
+    // doubled because it is spent half on each side
+    warpMargin = k < 0 ? Math.min(1.0, 2 * Math.max(0, (ruc > 0 ? ruc / rc : 9) - 1)) : 0;
+    const m = warpMargin;
+    // canvas pixels: the photo's own, capped — it is a viewport-sized picture
+    const natW = overlayImg.naturalWidth, natH = overlayImg.naturalHeight;
+    const sc = Math.min(1, 2048 / natW);
+    // the canvas spans ±a(1+m) by ±(1+m): the box grown by m in total,
+    // half on each side. every size below has to use the same (1 + m), or
+    // the picture is drawn at a different scale from the box the markers
+    // are laid out in (it was: barrel was a fraction too big, and the
+    // pairs slid off their features as k changed)
+    const cw = Math.round(natW * sc * (1 + m)), ch = Math.round(natH * sc * (1 + m));
+    warpEl.width = cw; warpEl.height = ch;
+    const ctx = warpEl.getContext('2d');
+    ctx.clearRect(0, 0, cw, ch);
+    // undistorted normalised coords (X in ±a(1+m), Y in ±(1+m)) -> canvas px
+    const toCanvas = (X, Y) => [(X / (2 * a * (1 + m)) + 0.5) * cw, (Y / (2 * (1 + m)) + 0.5) * ch];
+    // canvas px -> photo px as shot, through the lens; null off the model
+    const toSource = (X, Y) => {
+      const ru = Math.hypot(X, Y);
+      if (ru < 1e-9) return [natW / 2, natH / 2];
+      const q = 4 * k * ru * ru;
+      if (q > 1) return null;
+      const rd = Math.abs(q) < 1e-6 ? ru * (1 + k * ru * ru) : (1 - Math.sqrt(1 - q)) / (2 * k * ru);
+      const s = rd / ru;
+      return [(X * s / (2 * a) + 0.5) * natW, (Y * s / 2 + 0.5) * natH];
+    };
+    const N = 36;
+    const spanX = 2 * a * (1 + m), spanY = 2 * (1 + m);
+    for (let j = 0; j < N; j++) for (let i = 0; i < N; i++) {
+      const X0 = -a * (1 + m) + spanX * i / N, X1 = X0 + spanX / N;
+      const Y0 = -(1 + m) + spanY * j / N, Y1 = Y0 + spanY / N;
+      const s0 = toSource(X0, Y0), s1 = toSource(X1, Y0), s2 = toSource(X0, Y1);
+      if (!s0 || !s1 || !s2) continue;
+      // cells whose source lies wholly outside the photo have nothing to draw
+      if (Math.max(s0[0], s1[0], s2[0]) < 0 || Math.min(s0[0], s1[0], s2[0]) > natW
+        || Math.max(s0[1], s1[1], s2[1]) < 0 || Math.min(s0[1], s1[1], s2[1]) > natH) continue;
+      const t0 = toCanvas(X0, Y0), t1 = toCanvas(X1, Y0), t2 = toCanvas(X0, Y1);
+      // the affine with M s_i = t_i: M_lin = [t1-t0 t2-t0] [s1-s0 s2-s0]^-1
+      const ax = s1[0] - s0[0], ay = s1[1] - s0[1], bx = s2[0] - s0[0], by = s2[1] - s0[1];
+      const det = ax * by - ay * bx;
+      if (Math.abs(det) < 1e-12) continue;
+      const px = t1[0] - t0[0], py = t1[1] - t0[1], qx = t2[0] - t0[0], qy = t2[1] - t0[1];
+      // [p q] · inv([a b]) with inv = [by -bx; -ay ax] / det
+      const m11 = (px * by - qx * ay) / det, m12 = (-px * bx + qx * ax) / det;
+      const m21 = (py * by - qy * ay) / det, m22 = (-py * bx + qy * ax) / det;
+      const e = t0[0] - (m11 * s0[0] + m12 * s0[1]);
+      const f = t0[1] - (m21 * s0[0] + m22 * s0[1]);
+      ctx.save();
+      ctx.beginPath();
+      // a hair of overlap, or the cell seams show as a lattice of gaps
+      ctx.rect(t0[0] - 0.5, t0[1] - 0.5, t1[0] - t0[0] + 1, t2[1] - t0[1] + 1);
+      ctx.clip();
+      ctx.setTransform(m11, m21, m12, m22, e, f);
+      ctx.drawImage(overlayImg, 0, 0);
+      ctx.restore();
+    }
+  };
+  // ov.k, and everything that follows from it: the warp, its panel, the
+  // markers (alignRefresh's per-frame pass moves those on its own)
+  const lensAmountEl = document.getElementById('lensamount');
+  const lensSlider = document.getElementById('lensk');
+  const refreshLens = () => {
+    const k = ov.k || 0;
+    const lim = lensLimits();
+    lensSlider.min = lim.barrel;
+    lensSlider.max = lim.pincushion;
+    lensSlider.value = k;
+    // 'k' and the sign carry the number; the word is the reading of it
+    lensAmountEl.textContent = !k ? 'k = 0 · none'
+      : `k = ${k < 0 ? '−' : '+'}${Math.abs(k).toFixed(3)} · ${k < 0 ? 'barrel' : 'pincushion'}`;
+  };
+  const setLens = (k) => {
+    k = clampLens(k);
+    if (Math.abs(k) < 1e-4) k = 0;
+    if (k === ov.k) return;
+    ov.k = k;
+    renderWarp();
+    layoutOverlay();
+    refreshLens();
+  };
+  lensSlider.addEventListener('input', () => { setLens(lensSlider.value); saveAlign(); });
+  document.getElementById('lensreset').addEventListener('click', () => {
+    setLens(0);
+    saveAlign();
+    canvas.focus();
+  });
   // "fit": the largest scale that keeps the whole photo inside the viewport —
   // the old object-fit: contain behaviour, now just a preset
   const fitOverlay = () => {
@@ -991,7 +1189,9 @@
     // natural size, and revealing it before that flashes the image at full
     // resolution across the viewport
     overlayImg.onload = () => {
-      if (!keepPlacement) fitOverlay();
+      if (!keepPlacement) { fitOverlay(); ov.k = 0; } // a new photo, a new lens
+      renderWarp();
+      refreshLens();
       layoutOverlay();
       document.body.classList.add('overlay');
       applyOverlayBlend();
@@ -1009,6 +1209,9 @@
   // without it. the panel's "clear pairs" is the narrower one
   const clearOverlay = () => {
     document.body.classList.remove('overlay');
+    document.body.classList.remove('distorted');
+    ov.k = 0;
+    refreshLens();
     overlayImg.removeAttribute('src');
     if (overlayUrl) { URL.revokeObjectURL(overlayUrl); overlayUrl = null; }
     idbDel('ref-image', 'app');
@@ -1420,7 +1623,7 @@
     pitch += e.movementY * 0.003;
   });
   // scroll on the 3d view zooms by narrowing/widening the fov, like the
-  // native app (which uses fov *= 0.9^wheel; setFov clamps to 1..100 deg)
+  // native app (which uses fov *= 0.9^wheel; setFov clamps to 1..150 deg)
   canvas.addEventListener('wheel', (e) => {
     e.preventDefault();
     // shift+wheel resizes the reference photo rather than the view, the
@@ -2497,7 +2700,7 @@
   // either lights up both
   let hovPair = -1;
   let refImageKey = null; // name:size of the stored photo, to spot a re-drop
-  const freeFlags = { pos: true, aim: true, fov: true, roll: false };
+  const freeFlags = { pos: true, aim: true, fov: true, roll: false, dist: false };
   const listEl = document.getElementById('aplist');
   const statusEl = document.getElementById('apstatus');
   const warnEl = document.getElementById('apwarn');
@@ -2558,6 +2761,10 @@
     document.getElementById('apfreeaim').checked = freeFlags.aim;
     document.getElementById('apfreefov').checked = freeFlags.fov;
     document.getElementById('apfreeroll').checked = freeFlags.roll;
+    document.getElementById('apfreedist').checked = freeFlags.dist;
+    // the lens panel is also up while the solver is asked to fit it: that is
+    // when you want to set it by eye and see whether the pairs agree
+    document.body.classList.toggle('lenswanted', freeFlags.dist && on);
     buildMarkers();
     renderList();
   }
@@ -2636,7 +2843,8 @@
       if (!pr) return;
       if (which === 'photo') {
         const p = viewToPhoto(x, y);
-        if (p) { pr.u = p.u; pr.v = p.v; }
+        const q = p && distortUV(p.u, p.v, ov.k); // back onto the photo as shot
+        if (q) { pr.u = q.u; pr.v = q.v; }
       } else {
         const hit = view.pickNdc((x / r.width) * 2 - 1, 1 - (y / r.height) * 2);
         if (hit) { pr.lat = hit.lat; pr.lon = hit.lon; pr.alt = hit.alt; }
@@ -2657,7 +2865,7 @@
     let sum = 0, n = 0;
     lastErrs = pairs.map((pr, i) => {
       const m = markerEls[i];
-      const tgt = photoToView(pr.u, pr.v);
+      const tgt = photoToViewK(pr.u, pr.v, ov.k);
       const cur = basis ? projectWith(basis, p.fov, ecefOf(pr), W, H) : null;
       if (!m) return null;
       // an end that isn't on screen takes its hit shape down with it, or the
@@ -2762,7 +2970,7 @@
         ? `under-determined: ${need} pairs would pin all ${k} down` : '';
   }
   const dofCount = () => (freeFlags.pos ? 3 : 0) + (freeFlags.aim ? 2 : 0)
-    + (freeFlags.fov ? 1 : 0) + (freeFlags.roll ? 1 : 0);
+    + (freeFlags.fov ? 1 : 0) + (freeFlags.roll ? 1 : 0) + (freeFlags.dist ? 1 : 0);
 
   // --- capturing a new pair ---
   // two clicks: first the point in the photo, then the same feature on the
@@ -2796,7 +3004,10 @@
   }
   const captureClick = (x, y, ndcX, ndcY) => {
     if (capture.stage === 'photo') {
-      const p = viewToPhoto(x, y);
+      // the click is on the photo as displayed (undistorted); the pair is
+      // stored on the photo as shot, and 'inside' means inside that
+      const shown = viewToPhoto(x, y);
+      const p = shown && distortUV(shown.u, shown.v, ov.k);
       if (!p || p.u < 0 || p.u > 1 || p.v < 0 || p.v > 1) {
         setBanner('that is outside the photo — click inside it');
         return;
@@ -2842,15 +3053,21 @@
     // solution the rest of the way. tick it when the horizon in the picture
     // isn't level
     if (freeFlags.roll) s.push('r');
+    // off by default for the same reason, and one more: it is the twin of
+    // fov (a barrel lens looks like a wider field at the edges), and pairs
+    // near the centre of the picture say nothing about it at all. tick it
+    // when the pairs at the edges won't settle while the middle has
+    if (freeFlags.dist) s.push('k');
     return s;
   };
   const stepFor = (spec, base) => (spec === 'e' || spec === 'n' || spec === 'u')
     ? Math.max(0.02, Math.abs(base.alt) * 1e-4) // metres
+    : spec === 'k' ? 2e-3 // lens, dimensionless
     : 1e-3; // degrees
   const applyDelta = (base, specs, d) => {
     const p = { lat: base.lat, lon: base.lon, alt: base.alt,
       heading: base.heading, tilt: base.tilt, fov: base.fov,
-      roll: base.roll || 0 };
+      roll: base.roll || 0, k: base.k || 0 };
     const mPerDeg = (planetR + Math.max(0, base.alt)) * D2R;
     specs.forEach((s, i) => {
       const x = d[i];
@@ -2861,13 +3078,15 @@
       else if (s === 't') p.tilt += x;
       else if (s === 'f') p.fov += x;
       else if (s === 'r') p.roll += x;
+      else if (s === 'k') p.k += x;
     });
+    p.k = clampLens(p.k); // see lensLimits
     // the same limits the engine enforces, so an accepted step survives
     // being handed to setPose/setFov unchanged
     p.lat = Math.max(-89.9, Math.min(89.9, p.lat));
     p.alt = Math.max(1, p.alt);
     p.tilt = Math.max(-89.5, Math.min(89.5, p.tilt));
-    p.fov = Math.max(1, Math.min(100, p.fov));
+    p.fov = Math.max(1, Math.min(150, p.fov));
     return p;
   };
   // residual vector: signed pixel offsets, mesh point minus photo point.
@@ -2879,7 +3098,7 @@
     const out = [];
     for (const pr of pairs) {
       const s = projectWith(b, p.fov, ecefOf(pr), W, H);
-      const t = photoToView(pr.u, pr.v);
+      const t = photoToViewK(pr.u, pr.v, p.k == null ? ov.k : p.k);
       if (!s || !t) return null;
       out.push(s.x - t.x, s.y - t.y);
     }
@@ -2917,6 +3136,7 @@
     if (!k) return true;
     const W = rightEl.clientWidth, H = rightEl.clientHeight;
     const base = view.getPose();
+    base.k = ov.k || 0; // the lens is the photo's, not the camera's
     const r0 = residuals(base, W, H);
     if (!r0) return true; // nothing usable to fit from here
     const cost0 = costOf(r0);
@@ -2965,6 +3185,7 @@
           // setPose carries the old roll over, so this only has to run when
           // roll is one of the parameters being fitted
           if (freeFlags.roll) view.setRoll(cand.roll);
+          if (freeFlags.dist) setLens(cand.k); // redraws the warp: only on an accepted step
           following = true; // the map should come along
           lambda = Math.max(1e-9, lambda / 3);
           const rel = (cost0 - cost) / Math.max(cost0, 1e-12);
@@ -3023,7 +3244,8 @@
     clearOverlay();
   });
   for (const [id, key] of [['apfreepos', 'pos'], ['apfreeaim', 'aim'],
-                          ['apfreefov', 'fov'], ['apfreeroll', 'roll']]) {
+                          ['apfreefov', 'fov'], ['apfreeroll', 'roll'],
+                          ['apfreedist', 'dist']]) {
     document.getElementById(id).addEventListener('change', (e) => {
       freeFlags[key] = e.target.checked;
       renderList();
@@ -3053,6 +3275,7 @@
     try { saved = JSON.parse(localStorage.getItem('earth-align')); } catch (e) {}
     if (saved) {
       if (saved.ov) ov = { ...ov, ...saved.ov };
+      if (!Number.isFinite(ov.k)) ov.k = 0;
       if (saved.free) Object.assign(freeFlags, saved.free);
       if (Number.isFinite(saved.opacity)) {
         overlayBlend.value = saved.opacity;
