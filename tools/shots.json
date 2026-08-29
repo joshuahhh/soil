@@ -93,5 +93,17 @@
     "fov": 65.58,
     "tunnel": 1267.7,
     "hug": true
+  },
+  {
+    "name": "tunnel-wide",
+    "note": "a 20 km tunnel (r 3.2 km) low over north seattle, looking down and ahead: the case where the tube's coverage floor starved the tiles in front of the camera. lod is by distance through the roll here, nothing else",
+    "lat": 47.669835,
+    "lon": -122.325614,
+    "alt": 279.2,
+    "heading": -77.1,
+    "tilt": -26.7,
+    "fov": 65.58,
+    "tunnel": 20000,
+    "hug": true
   }
 ]

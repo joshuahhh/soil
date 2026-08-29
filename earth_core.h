@@ -1068,7 +1068,12 @@ struct earth_core_t {
 					// finish at all, and that is worth being able to feel
 					if (lod_scale <= 0) lod_scale = getenv("EARTH_LOD_SCALE")
 						? atof(getenv("EARTH_LOD_SCALE")) : 1.0;
-					auto tube_floor = tube_on
+					// not for the tunnel: it has no lock to cover, and its rect
+					// can be hundreds of km² — at 20 km around the floor alone
+					// was more tiles than the cap allows, and the fine tiles in
+					// front of the camera were what got trimmed. distance
+					// through the roll decides all of it there
+					auto tube_floor = tube_on && !tunnel_on
 						&& node->meters_per_texel > tube_lock_mpt * 0.5;
 					auto tube_want = 1e30; // floor/column: never shed
 					if (!in_column && !tube_floor) {
