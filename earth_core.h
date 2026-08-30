@@ -79,6 +79,12 @@ struct earth_core_t {
 	// frame, so the lock is a continuous measurement rather than a one-off
 	double tunnel_ground_radius = 0;
 	bool tunnel_ground_measured = false;
+	// the heading the tube follows, low-passed: turn the camera and at
+	// first you fly through the old tube, which then swings round to line
+	// up with where you are going. the time constant in ms; 0 is immediate
+	double tunnel_lag_ms = 0;
+	Vector3d tunnel_heading = Vector3d::UnitX();
+	bool tunnel_heading_set = false;
 
 	// the tunnel's frame from the camera: up at the eye; the axis sideways
 	// (heading x up, so the rect's across direction — the one that wraps —
@@ -90,9 +96,19 @@ struct earth_core_t {
 		auto R_p = planetoid && planetoid->downloaded ? (double)planetoid->radius : 6371010.0;
 		Vector3d up = cam.eye.normalized();
 		Vector3d h = cam.direction - up * cam.direction.dot(up);
-		if (h.norm() < 1e-6) h = tunnel_across ? up.cross(tube_axis) : tube_axis - up * tube_axis.dot(up); // straight down: keep the old heading
+		if (h.norm() < 1e-6 && tunnel_heading_set) h = tunnel_heading - up * tunnel_heading.dot(up); // straight down: keep the old heading
 		if (h.norm() < 1e-6) h = up.cross(Vector3d::UnitZ());
 		h.normalize();
+		// the low-pass: ease the followed heading toward the camera's,
+		// keeping it in the tangent plane. a 180° turn passes through
+		// zero length, so a vanished vector snaps to the new heading
+		if (tunnel_heading_set && tunnel_lag_ms > 0) {
+			Vector3d hd = tunnel_heading - up * tunnel_heading.dot(up);
+			hd += (h - hd) * (1.0 - exp(-dt_ms / tunnel_lag_ms));
+			h = hd.norm() > 1e-6 ? hd.normalized() : h;
+		}
+		tunnel_heading = h;
+		tunnel_heading_set = true;
 		auto C = fmax(50.0, tunnel_circumference);
 		// the ground: straight down against the drawn meshes (stored
 		// unrolled, so the ray is the same as flat mode's). hold the last

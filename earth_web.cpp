@@ -143,7 +143,7 @@ struct EarthView {
 	// and the rect-driven node selection are the tube's
 	void setTunnel(bool on, double circumference) {
 		earth.tunnel_circumference = fmax(50.0, circumference);
-		if (on && !earth.tunnel_on) earth.tunnel_ground_measured = false;
+		if (on && !earth.tunnel_on) { earth.tunnel_ground_measured = false; earth.tunnel_heading_set = false; }
 		earth.tunnel_on = on;
 		earth.tube_on = on;
 		earth.tube_ground_locked = on;
@@ -160,11 +160,16 @@ struct EarthView {
 		earth.tunnel_across = across;
 		if (earth.tunnel_on) earth.tunnelUpdate(camera, 0);
 	}
+	// how slowly the tube's heading follows the camera's (ms; 0 at once)
+	void setTunnelLag(double ms) {
+		earth.tunnel_lag_ms = fmax(0.0, ms);
+	}
 	val getTunnelInfo() {
 		val o = val::object();
 		o.set("on", earth.tunnel_on);
 		o.set("circumference", earth.tunnel_circumference);
 		o.set("across", earth.tunnel_across);
+		o.set("lagMs", earth.tunnel_lag_ms);
 		o.set("radius", earth.tunnel_circumference / (2.0 * M_PI));
 		o.set("groundAlt", earth.tunnel_ground_radius - planetRadius());
 		o.set("groundMeasured", earth.tunnel_ground_measured);
@@ -721,6 +726,7 @@ EMSCRIPTEN_BINDINGS(earth) {
 		.function("setTunnel", &EarthView::setTunnel)
 		.function("setTunnelCircumference", &EarthView::setTunnelCircumference)
 		.function("setTunnelAcross", &EarthView::setTunnelAcross)
+		.function("setTunnelLag", &EarthView::setTunnelLag)
 		.function("getTunnelInfo", &EarthView::getTunnelInfo)
 		.function("getTubeInfo", &EarthView::getTubeInfo)
 		.function("setPath", &EarthView::setPath)
