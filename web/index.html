@@ -224,10 +224,13 @@
   #hint:empty, #hug:empty { display: none; }
   /* the key reference: a ? in the view's bottom-right corner, and the table
      it opens. the hint line above only says what mode the view is in */
-  #keysbtn { position: fixed; right: 8px; bottom: 24px; z-index: 10; width: 26px; height: 26px;
-             border: 0; border-radius: 13px; cursor: pointer; color: #fff; font: bold 14px sans-serif;
-             background: #1c1c1c; }
-  #keysbtn:hover, body.keys #keysbtn { background: #ff7f0e; color: #000; }
+  #keysbtn, #shotbtn { position: fixed; right: 8px; bottom: 24px; z-index: 10; width: 26px;
+             height: 26px; padding: 0; border: 0; border-radius: 13px; cursor: pointer;
+             color: #fff; font: bold 14px sans-serif; background: #1c1c1c; }
+  #keysbtn:hover, body.keys #keysbtn, #shotbtn:hover { background: #ff7f0e; color: #000; }
+  /* the screenshot camera, beside the ? */
+  #shotbtn { right: 40px; }
+  #shotbtn svg { display: block; margin: auto; }
   #keys { display: none; position: fixed; right: 8px; bottom: 56px; z-index: 25; color: #fff;
           background: #1c1c1c; border-radius: 5px; padding: 10px 12px; font: 12px sans-serif;
           /* over the hud (z 12), and edged so it reads as its own sheet where
@@ -375,6 +378,12 @@
   </div>
 </div>
 <div id="axisbtn"></div>
+<button id="shotbtn" title="screenshot of the 3d view">
+  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+       stroke-width="2.2" stroke-linejoin="round">
+    <path d="M4 8h3l2-3h6l2 3h3v11H4z"/><circle cx="12" cy="13" r="3.5"/>
+  </svg>
+</button>
 <button id="keysbtn" title="keyboard and mouse (?)">?</button>
 <div id="keys"></div>
 <script>
@@ -3514,17 +3523,20 @@
   // ⌘S writes the same bundle to a file — for keeping a session around, or
   // moving it somewhere a clipboard doesn't reach. dropping it back on the
   // page is the other half
-  const saveState = async () => {
-    const text = await collectState();
-    const stamp = new Date().toISOString().slice(0, 19).replace(/[T:]/g, '-');
-    const url = URL.createObjectURL(new Blob([text], { type: 'application/json' }));
+  const fileStamp = () => new Date().toISOString().slice(0, 19).replace(/[T:]/g, '-');
+  const saveFile = (blob, name) => {
+    const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `soil-session-${stamp}.json`;
+    a.download = name;
     document.body.appendChild(a);
     a.click();
     a.remove();
     setTimeout(() => URL.revokeObjectURL(url), 1000);
+  };
+  const saveState = async () => {
+    const text = await collectState();
+    saveFile(new Blob([text], { type: 'application/json' }), `soil-session-${fileStamp()}.json`);
     toast(`session saved (${(text.length / 1e6).toFixed(1)} MB) — drop the file on the page to restore it`);
   };
   addEventListener('keydown', (e) => {
@@ -3641,7 +3653,7 @@
   let saveTimer = 0;
   let last = performance.now();
   let frameCount = 0;
-  let pendingShot = null; // resolver for an in-flight __test.shot()
+  let pendingShot = null; // runs at the end of the next frame, once (shots)
   const tick = (now) => {
     const dt = TEST ? TEST.dt : Math.min(100, now - last);
     last = now;
@@ -3840,13 +3852,80 @@
     // context is created without preserveDrawingBuffer, so the backbuffer is
     // undefined once the browser composites the frame
     if (pendingShot) {
-      const resolve = pendingShot;
+      const f = pendingShot;
       pendingShot = null;
-      resolve(canvas.toDataURL('image/png'));
+      f();
     }
     requestAnimationFrame(tick);
   };
   requestAnimationFrame(tick);
+
+  // --- screenshot ------------------------------------------------------------
+  // the 3d view as it is on screen, at the canvas's own pixel size: the render,
+  // then whatever is drawn over it and showing — the photo (plain, or through
+  // the lens), the pair markers, the reticle — at its place and opacity.
+  // panels and readouts are left out. the gl canvas is copied inside the frame
+  // that drew it; the rest is composited afterwards
+  const shotLayers = () => [overlayImg, warpEl, svgEl, document.getElementById('cross')];
+  // an svg from the page as a bitmap. its look comes from the stylesheet,
+  // which an <img> of it can't see, so the copy carries each element's
+  // computed style inline
+  const SVG_PROPS = ['display', 'visibility', 'opacity', 'fill', 'stroke', 'stroke-width',
+    'stroke-dasharray', 'stroke-linecap', 'font-size', 'font-weight', 'font-family'];
+  const rasterSvg = (el, w, h) => new Promise((resolve, reject) => {
+    const copy = el.cloneNode(true);
+    const src = el.querySelectorAll('*'), dst = copy.querySelectorAll('*');
+    for (let i = 0; i < src.length; i++) {
+      const cs = getComputedStyle(src[i]);
+      for (const p of SVG_PROPS) dst[i].style.setProperty(p, cs.getPropertyValue(p));
+    }
+    copy.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
+    copy.setAttribute('width', w);
+    copy.setAttribute('height', h);
+    const img = new Image();
+    img.onload = () => resolve(img);
+    img.onerror = reject;
+    img.src = 'data:image/svg+xml;charset=utf-8,'
+      + encodeURIComponent(new XMLSerializer().serializeToString(copy));
+  });
+  const takeShot = () => {
+    pendingShot = async () => {
+      const out = document.createElement('canvas');
+      out.width = canvas.width;
+      out.height = canvas.height;
+      const ctx = out.getContext('2d');
+      // jpeg has no alpha: what's clear on the canvas shows the page behind
+      ctx.fillStyle = '#fff';
+      ctx.fillRect(0, 0, out.width, out.height);
+      ctx.drawImage(canvas, 0, 0);
+      const base = rightEl.getBoundingClientRect();
+      const s = canvas.width / canvas.clientWidth; // css px -> canvas px
+      for (const el of shotLayers()) {
+        const cs = getComputedStyle(el);
+        if (cs.display === 'none' || cs.visibility === 'hidden' || !+cs.opacity) continue;
+        if (el instanceof HTMLImageElement && !el.naturalWidth) continue;
+        const r = el.getBoundingClientRect();
+        let src = el;
+        if (el instanceof SVGSVGElement) {
+          try { src = await rasterSvg(el, r.width, r.height); } catch (e) {
+            console.warn('screenshot: svg layer skipped', el.id, e);
+            continue;
+          }
+        }
+        ctx.globalAlpha = +cs.opacity;
+        ctx.drawImage(src, (r.left - base.left) * s, (r.top - base.top) * s, r.width * s, r.height * s);
+      }
+      ctx.globalAlpha = 1;
+      out.toBlob((blob) => {
+        saveFile(blob, `soil-shot-${fileStamp()}.jpg`);
+        toast(`screenshot saved (${out.width}×${out.height})`);
+      }, 'image/jpeg', 0.92);
+    };
+  };
+  document.getElementById('shotbtn').addEventListener('click', () => {
+    takeShot();
+    canvas.focus();
+  });
 
   // --- headless capture api -------------------------------------------------
   // the driver (tools/capture.mjs) talks to the page through this. kept out of
@@ -3864,7 +3943,9 @@
       view.setPose(p.lat, p.lon, p.alt, p.heading + deg, p.tilt);
     },
     // resolves with a png data url, captured at the end of the next frame
-    shot: () => new Promise((resolve) => { pendingShot = resolve; }),
+    shot: () => new Promise((resolve) => {
+      pendingShot = () => resolve(canvas.toDataURL('image/png'));
+    }),
     // for tools/shimmer.mjs: flip texture filtering, and move the camera by a
     // fixed amount so the churn a small motion causes can be scored
     setMipmaps: (on) => { mipmaps = on; view.setMipmaps(on); updateHint(); },
