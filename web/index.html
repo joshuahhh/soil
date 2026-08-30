@@ -887,7 +887,7 @@
         roll: p.roll, fov: p.fov, zoom: map.getZoom(), gain, ortho, hug, miniature, full3d,
         nearCut: view.getNearCut(),
         tube: tubeRect ? { rect: tubeRect, on: tubeOn, ewAxis: tubeAxisEw } : null,
-        tunnel: { on: tunnelOn, c: tunnelC, across: tunnelAcross, lag: tunnelLag },
+        tunnel: { on: tunnelOn && !tunnelClosing, c: tunnelC, across: tunnelAcross, lag: tunnelLag },
       }));
     } catch (e) {}
   };
@@ -1582,7 +1582,10 @@
     if (e.code === 'Escape' && tunnelOn) { setTunnel(false); return; }
     // T is the tunnel — unless a rect is drawn on the map, when it rolls
     // that instead (esc clears the rect)
-    if (e.code === 'KeyT' && !e.repeat && !followOn && (tunnelOn || !tubeRect)) { setTunnel(!tunnelOn); return; }
+    if (e.code === 'KeyT' && !e.repeat && !followOn && (tunnelOn || !tubeRect)) {
+      setTunnel(!tunnelOn || tunnelClosing);
+      return;
+    }
     if (e.code === 'Escape' && tubeRect) {
       tubeRect = null;
       tubeOn = false;
@@ -1821,22 +1824,47 @@
     saveView();
     canvas.focus();
   });
-  const setTunnel = (on) => {
-    if (on === tunnelOn) return;
-    tunnelOn = on;
+  // going in, the ground rolls up around you from flat; going out it
+  // unrolls back to flat first (tunnelClosing, the tick eases curl to 0)
+  // and the machinery goes off once it's there. animate: false skips both —
+  // a reload lands straight in the tunnel it left
+  let tunnelClosing = false;
+  const endTunnel = () => {
+    tunnelOn = false;
+    tunnelClosing = false;
+    curlTarget = 1;
+    view.setTunnel(false, tunnelC);
+    view.setTubeEnabled(false);
+    updateHint();
+  };
+  const setTunnel = (on, animate = true) => {
     if (on) {
-      // the rect tube and the tunnel are the same machinery; only one
-      if (tubeOn) { tubeOn = false; tubePending = null; view.setAirplane(false); }
-      if (ortho) { ortho = false; view.setOrtho(false); }
-      view.setTunnelAcross(tunnelAcross);
-      view.setTunnelLag(tunnelLag * 1000);
-      view.setTunnel(true, tunnelC);
-      curl = 0; // rolls up around you from flat
-      view.setTubeCurl(0);
-      following = true;
+      if (tunnelOn && !tunnelClosing) return;
+      if (tunnelClosing) {
+        // caught on the way out: back up from wherever it got to
+        tunnelClosing = false;
+        curlTarget = 1;
+      } else {
+        tunnelOn = true;
+        // the rect tube and the tunnel are the same machinery; only one
+        if (tubeOn) { tubeOn = false; tubePending = null; view.setAirplane(false); }
+        if (ortho) { ortho = false; view.setOrtho(false); }
+        view.setTunnelAcross(tunnelAcross);
+        view.setTunnelLag(tunnelLag * 1000);
+        view.setTunnel(true, tunnelC);
+        curl = animate ? 0 : 1;
+        curlTarget = 1;
+        view.setTubeCurl(curl);
+        following = true;
+      }
     } else {
-      view.setTunnel(false, tunnelC);
-      view.setTubeEnabled(false);
+      if (!tunnelOn || tunnelClosing) return;
+      if (animate) {
+        tunnelClosing = true;
+        curlTarget = 0;
+      } else {
+        endTunnel();
+      }
     }
     document.body.classList.toggle('tunnel', on);
     refreshTunnel();
@@ -1866,7 +1894,7 @@
   let tubeRect = null; // [latMin, lonMin, latMax, lonMax] degrees
   let tubeOn = false;
   let curl = 0;
-  const curlTarget = 1;
+  let curlTarget = 1; // 0 only while the tunnel unrolls on its way out
   // staged pipeline: the sheet stays flat while the rect's tiles load at
   // full res; once the scene is complete the engine measures ground level
   // off the mesh, and only then does the roll (and camera fly-in) happen.
@@ -3660,12 +3688,12 @@
       if (START.tunnel && START.tunnel.across === false) tunnelAcross = false;
       if (START.tunnel && Number.isFinite(START.tunnel.lag)) tunnelLag = Math.max(0, START.tunnel.lag);
       refreshTunnel();
-      if (START.tunnel && START.tunnel.on && !(START.tube && START.tube.on)) setTunnel(true);
+      if (START.tunnel && START.tunnel.on && !(START.tube && START.tube.on)) setTunnel(true, false);
       // ?tunnel=<circumference m> (test mode): straight into the tunnel at
       // the given pose, for the render tests
       if (TEST && QS.has('tunnel')) {
         const c = parseFloat(QS.get('tunnel'));
-        if (Number.isFinite(c) && c > 0) { tunnelC = c; refreshTunnel(); setTunnel(true); }
+        if (Number.isFinite(c) && c > 0) { tunnelC = c; refreshTunnel(); setTunnel(true, false); }
       }
       // a track dropped (or restored) before the planet metadata arrived is
       // still sitting in js: its ecef points need the planetoid radius, and
@@ -3760,12 +3788,18 @@
       } else {
         tubeInfoEl.style.display = 'none';
       }
-      // ease the roll toward closed; ~.7s time constant reads as the
-      // ground curling up rather than snapping
+      // ease the roll toward closed: the time constant reads as the ground
+      // curling up rather than snapping, ~.7s for the rect tube, ~.3s for
+      // the tunnel. the tunnel's way out is brisker still and cut short:
+      // the flatter the sheet, the more of the rect's edge (and the nothing
+      // past it) is in view, so it goes straight to the ground in ~half a
+      // second rather than easing all the way
       if ((tubeOn && !tubePending || tunnelOn) && curl !== curlTarget) {
-        curl += (curlTarget - curl) * (1 - Math.exp(-dt / 700));
+        const tau = tunnelClosing ? 150 : tunnelOn ? 300 : 700;
+        curl += (curlTarget - curl) * (1 - Math.exp(-dt / tau));
         if (Math.abs(curlTarget - curl) < 0.001) curl = curlTarget;
         view.setTubeCurl(curl);
+        if (tunnelClosing && curl < 0.03) endTunnel();
       }
       const p = view.getPose();
       // in tube mode the marker shows the camera in unrolled tube
