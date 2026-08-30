@@ -244,8 +244,14 @@
   #keys td:first-child { padding-right: 10px; white-space: nowrap; }
   #keys kbd { font: 11px monospace; background: rgba(255,255,255,.15); padding: 0 4px;
               border-radius: 3px; }
-  /* geolocate button and search box side by side in the map's top-left */
-  .maplibregl-ctrl-top-left { display: flex; align-items: flex-start; }
+  /* geolocate button and search box side by side in the window's top-left
+     (the map's corner in split view). the slot is lifted out of #map after the
+     controls are added, so they stay when the map collapses; fixed so it's
+     pinned there either way, above the divider (20) */
+  .maplibregl-ctrl-top-left { display: flex; align-items: flex-start;
+                              position: fixed; z-index: 25; }
+  /* the divider is at the left edge now: keep the same gap from the pane */
+  body.full3d .maplibregl-ctrl-top-left { left: 8px; }
   /* tube axis switch, over the map's bottom-left corner */
   /* a passing word about something that just happened — the session copy/paste
      below is the only thing that talks this way, and it needs an answer */
@@ -1748,6 +1754,10 @@
   }, { maplibregl, marker: false, showResultMarkers: false, flyTo: false,
     showResultsWhileTyping: false });
   map.addControl(geocoder, 'top-left');
+  // both live in maplibre's top-left slot inside #map, which is display: none
+  // once the 3d view has the whole window. move the slot to the body: the
+  // controls only hold the map object, not their place in its dom
+  document.body.appendChild(map.getContainer().querySelector('.maplibregl-ctrl-top-left'));
   geocoder.on('result', ({ result }) => {
     if (!view.ready()) return;
     const p = view.getPose();
