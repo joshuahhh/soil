@@ -394,6 +394,7 @@
     ortho: 'orthographic',
     follow: 'following the path',
     tube: 'in the tube',
+    body: 'on the body',
     tunnel: '', // its panel says so
   };
   document.getElementById('hint').textContent = HINTS.persp;
@@ -895,7 +896,7 @@
         lat: p.lat, lon: p.lon, alt: p.alt, heading: p.heading, tilt: p.tilt,
         roll: p.roll, fov: p.fov, zoom: map.getZoom(), gain, ortho, hug, miniature, full3d,
         nearCut: view.getNearCut(),
-        tube: tubeRect ? { rect: tubeRect, on: tubeOn, ewAxis: tubeAxisEw } : null,
+        tube: tubeRect ? { rect: tubeRect, on: tubeOn, ewAxis: tubeAxisEw, body: tubeBody } : null,
         tunnel: { on: tunnelOn && !tunnelClosing, c: tunnelC, across: tunnelAcross, lag: tunnelLag },
       }));
     } catch (e) {}
@@ -1292,7 +1293,7 @@
   // updateHint on every mode switch
   const K = (t) => t.split(' ').map((k) => `<kbd>${k}</kbd>`).join(' ');
   const keysFor = () => {
-    const mode = followOn ? 'follow' : tunnelOn ? 'tunnel' : tubeOn ? 'tube' : ortho ? 'ortho' : 'persp';
+    const mode = followOn ? 'follow' : tunnelOn ? 'tunnel' : tubeOn ? (tubeBody ? 'body' : 'tube') : ortho ? 'ortho' : 'persp';
     const g = [];
     if (mode === 'tunnel') g.push(['flying the tunnel', [
       [K('W A S D'), 'move'], [K('R F'), 'up / down'],
@@ -1316,13 +1317,18 @@
       [K('←↑↓→') + ' drag', 'pitch + yaw'], [K('Q E'), 'roll'], [K('Z X') + ' wheel', 'zoom'],
       [K('- ='), 'speed'], [K('shift') + ' +', 'slow'],
       [K('G'), hug ? 'stop hugging the wall' : 'hug the wall'], [K('0'), 'reset view'],
-      [K('T'), 'unroll the tube'], [K('esc'), 'clear the tube']]]);
+      [K('T'), 'unroll the tube'], [K('B'), 'wrap it on the body instead'], [K('esc'), 'clear the tube']]]);
+    if (mode === 'body') g.push(['flying around the body', [
+      [K('W S'), 'thrust'], [K('A D'), 'strafe'], [K('R F'), 'up / down'],
+      [K('←↑↓→') + ' drag', 'pitch + yaw'], [K('Q E'), 'roll'], [K('Z X') + ' wheel', 'zoom'],
+      [K('- ='), 'speed'], [K('shift') + ' +', 'slow'], [K('0'), 'reset view'],
+      [K('B'), 'unwrap'], [K('T'), 'roll it into a tube instead'], [K('esc'), 'clear the rect']]]);
     if (mode === 'follow') g.push(['following the path', [
       [K('W S'), 'run along it'], [K('←↑↓→'), 'swing the view around it'],
       [K('R F'), ortho ? 'zoom' : 'standoff'], [K('Z X'), 'zoom'], [K('shift') + ' +', 'slow'],
       [K('V') + ' ' + K('esc'), 'stop following']]]);
     const viewRows = [];
-    if (mode !== 'tube' && mode !== 'tunnel') viewRows.push([K('O'), ortho ? 'perspective' : 'orthographic']);
+    if (mode !== 'tube' && mode !== 'body' && mode !== 'tunnel') viewRows.push([K('O'), ortho ? 'perspective' : 'orthographic']);
     if (mode === 'persp' && !tubeRect) viewRows.push([K('T'), 'tunnel']);
     viewRows.push([K('N'), miniature ? 'miniature off' : 'miniature (tilt-shift)']);
     if (!ortho) viewRows.push([K('H'), 'near cut']);
@@ -1337,13 +1343,15 @@
     }
     const mapRows = [['click', 'teleport there'],
       [K('shift') + ' drag', tubeRect ? 'draw a new tube rect' : 'draw a tube rect']];
-    if (mode !== 'tube' && tubeRect) mapRows.push([K('T'), 'roll the tube up'], [K('esc'), 'clear the tube']);
-    if (mode !== 'follow' && mode !== 'tube' && document.body.classList.contains('path'))
+    if (mode !== 'tube' && tubeRect) mapRows.push([K('T'), 'roll the tube up']);
+    if (mode !== 'body' && tubeRect) mapRows.push([K('B'), 'wrap it on a body']);
+    if (mode !== 'tube' && mode !== 'body' && tubeRect) mapRows.push([K('esc'), 'clear the rect']);
+    if (mode !== 'follow' && mode !== 'tube' && mode !== 'body' && document.body.classList.contains('path'))
       mapRows.push([K('V'), 'follow the path']);
     g.push(['map', mapRows]);
     g.push(['session', [[K('⌘C ⌘V'), 'copy / paste the whole session'],
       [K('⌘S'), 'save it as a file'],
-      ['drop a file', 'image → photo · .gpx → path · session .json → restore'], [K('?'), 'this']]]);
+      ['drop a file', 'image → photo · .gpx → path · .obj → body · session .json → restore'], [K('?'), 'this']]]);
     return g;
   };
   // the table is a pure function of the view's state, and that state changes
@@ -1440,6 +1448,16 @@
       loadGpxFile(gpx);
       return;
     }
+    // a mesh replaces the figure the body mode wraps the rect onto
+    const obj = dropped.find((f) => /\.obj$/i.test(f.name));
+    if (obj) {
+      e.preventDefault();
+      obj.text().then((text) => {
+        if (setBodyMesh(text)) toast(`body: ${obj.name}`);
+        else toast('that .obj has no faces');
+      });
+      return;
+    }
     // a session file (the thing ⌘S writes) is the drop-shaped twin of ⌘V
     const json = dropped.find((f) => /\.json$/i.test(f.name) || f.type.includes('json'));
     if (json) {
@@ -1481,7 +1499,7 @@
   const typingIn = (t) => !!t && (t.tagName === 'TEXTAREA' || t.isContentEditable
     || t.tagName === 'SELECT'
     || (t.tagName === 'INPUT' && !['range', 'checkbox', 'color', 'button', 'radio'].includes(t.type)));
-  const handled = new Set(['KeyW','KeyA','KeyS','KeyD','KeyQ','KeyE','KeyR','KeyF','KeyZ','KeyX','KeyG','KeyO','KeyC','KeyK','KeyL','KeyM','KeyT','KeyP','KeyV','KeyN',
+  const handled = new Set(['KeyW','KeyA','KeyS','KeyD','KeyQ','KeyE','KeyR','KeyF','KeyZ','KeyX','KeyG','KeyO','KeyC','KeyK','KeyL','KeyM','KeyT','KeyP','KeyV','KeyN','KeyB',
     'Space','ArrowLeft','ArrowRight','ArrowUp','ArrowDown','Minus','Equal','Digit0','Numpad0','Home','KeyH']);
   let gain = 1; // re-initialized from the saved view once it loads
   let ortho = false;
@@ -1507,11 +1525,11 @@
   let speedAt = 0;
   const updateHint = () => {
     document.getElementById('hint').textContent = [
-      HINTS[followOn ? 'follow' : tunnelOn ? 'tunnel' : tubeOn ? 'tube' : ortho ? 'ortho' : 'persp'],
+      HINTS[followOn ? 'follow' : tunnelOn ? 'tunnel' : tubeOn ? (tubeBody ? 'body' : 'tube') : ortho ? 'ortho' : 'persp'],
       mipmaps ? '' : 'mipmaps off',
       miniature ? 'miniature' : '',
-      // T only does anything once a rect exists
-      !tubeOn && tubeRect ? 'tube rect drawn (T rolls it up)' : '',
+      // T and B only do anything once a rect exists
+      !tubeOn && tubeRect ? 'rect drawn (T rolls it into a tube, B wraps it on a body)' : '',
     ].filter(Boolean).join(' · ');
     updateSpeed();
     // point-pair alignment is perspective-only, so every mode switch has to
@@ -1551,7 +1569,7 @@
     if (e.code === 'KeyO' && !e.repeat && !tubeOn && !tunnelOn) { ortho = !ortho; view.setOrtho(ortho); updateHint(); }
     // terrain hug: cruise at a fixed height above the mesh — over the
     // sphere normally, radially above the wall inside the tube
-    if (e.code === 'KeyG' && !e.repeat && !followOn) {
+    if (e.code === 'KeyG' && !e.repeat && !followOn && !(tubeOn && tubeBody)) {
       hug = !hug;
       view.setTerrainFollow(hug);
       if (hug) stopSolve(); // the two fight over altitude — see startSolve
@@ -1597,28 +1615,25 @@
     }
     if (e.code === 'Escape' && tubeRect) {
       tubeRect = null;
-      tubeOn = false;
-      tubePending = null;
-      view.setTubeEnabled(false);
-      view.setAirplane(false);
+      tubeBody = false;
+      unrollTube();
       setRectData(null);
       updateHint();
     }
+    // T rolls the rect into a tube, B wraps it onto the body; each key
+    // undoes its own shape and switches from the other's
     if (e.code === 'KeyT' && !e.repeat && tubeRect && !tunnelOn) {
-      tubeOn = !tubeOn;
-      view.setTubeEnabled(tubeOn);
-      view.setAirplane(tubeOn); // tube flying is airplane-frame
-      if (tubeOn) {
-        if (ortho) { ortho = false; view.setOrtho(false); } // tube is perspective-only
-        curl = 0;
-        view.setTubeCurl(0);
-        tubePending = 'fly'; // rolls (and flies in) once the rect is loaded
-        tubePendingSince = performance.now();
-      } else {
-        tubePending = null;
-      }
+      if (tubeOn && !tubeBody) unrollTube();
+      else { tubeBody = false; applyTube(tubeRect, true); }
       updateHint();
     }
+    if (e.code === 'KeyB' && !e.repeat && tubeRect && !tunnelOn && !followOn) {
+      if (tubeOn && tubeBody) unrollTube();
+      else { tubeBody = true; applyTube(tubeRect, true); }
+      updateHint();
+    }
+    if (e.code === 'KeyB' && !e.repeat && !tubeRect && !tunnelOn && !followOn)
+      toast('shift-drag a rect on the map first, then B wraps it on the body');
   });
   // the two clicks that mark a pair (photo point, then mesh point); the
   // pointer handlers above keep the camera still while this is armed
@@ -1857,6 +1872,7 @@
         tunnelOn = true;
         // the rect tube and the tunnel are the same machinery; only one
         if (tubeOn) { tubeOn = false; tubePending = null; view.setAirplane(false); }
+        view.setTubeBody(false); // the tunnel is always the cylinder
         if (ortho) { ortho = false; view.setOrtho(false); }
         view.setTunnelAcross(tunnelAcross);
         view.setTunnelLag(tunnelLag * 1000);
@@ -2010,12 +2026,46 @@
       alt, ew ? 90 : 0, -5);
     following = true;
   };
+  // the figure stands on the rect's centre, as tall as the rect is long,
+  // facing across it (up × axis: north for an E–W axis, west for N–S).
+  // spawn out in front of it at chest height, looking back level, far
+  // enough that the whole figure fits the default fov
+  const flyOntoBody = (r) => {
+    const latc = (r[0] + r[2]) / 2, lonc = (r[1] + r[3]) / 2;
+    const info = view.getTubeInfo();
+    const S = 2 * info.halfLen; // the figure's height, m
+    const D = 1.4 * S;
+    const R = 6371010;
+    const dlat = (D / R) * 180 / Math.PI;
+    const dlon = (D / (R * Math.cos(latc * Math.PI / 180))) * 180 / Math.PI;
+    if (tubeAxisEw) view.setPose(latc + dlat, lonc, info.groundAlt + 0.55 * S, 180, 0);
+    else view.setPose(latc, lonc - dlon, info.groundAlt + 0.55 * S, 90, 0);
+    following = true;
+  };
+  // back to flat flight over the rect, which stays drawn
+  const unrollTube = () => {
+    tubeOn = false;
+    tubePending = null;
+    view.setTubeEnabled(false);
+    view.setAirplane(false);
+  };
   const applyTube = (r, teleport) => {
+    // the body's figure is fetched and baked on first use; the roll waits
+    // for it (a cylinder standing in meanwhile would be the wrong picture)
+    if (tubeBody && !view.bodyReady()) {
+      ensureBody().then((ok) => {
+        if (!ok) { tubeBody = false; toast('the body mesh failed to load'); }
+        if (tubeRect === r) applyTube(r, teleport);
+      });
+      return;
+    }
+    view.setTubeBody(tubeBody);
     view.setTubeRect(r[0], r[1], r[2], r[3], tubeAxisEw);
     tubeOn = true;
     view.setTubeEnabled(true);
     view.setAirplane(true); // tube flying is airplane-frame
     if (ortho) { ortho = false; view.setOrtho(false); } // tube is perspective-only
+    if (hug && tubeBody) { hug = false; view.setTerrainFollow(false); } // the wall hug is the cylinder's
     curl = 0; // flat while the rect loads; the tick rolls it when ready
     view.setTubeCurl(0);
     tubePending = teleport ? 'fly' : 'roll';
@@ -2042,6 +2092,331 @@
     setRectData(r);
     if (view.ready()) applyTube(r, true);
   });
+
+  // --- body mode ------------------------------------------------------------
+  // B wraps the rect onto a figure instead of rolling it into a tube: the
+  // same rect, the same load-then-lock-then-roll pipeline, a different warp
+  // (earth_core.h tube_body). the figure is web/body.obj — makehuman's base
+  // mesh, CC0, see tools/bodymesh.mjs — fetched the first time it's wanted
+  // and baked here into the geometry image the engine samples: a grid over
+  // (u around the figure, v feet to head) of skin positions and normals.
+  // each texel is a ray cast outward at that height and angle from the
+  // centre of the figure's cross-section there (not one fixed spine: the
+  // head and neck lean forward of the hips, and a ray from the wrong
+  // centre grazes the skin instead of crossing it), and the outermost hit
+  // is the skin. one loop per height would web the legs into a gown and
+  // stretch a wing from torso to fingertip, so the rows are banded (see
+  // bakeBody): below the crotch the rect's width is split between the
+  // two legs, and where the arms hang free its outer fifths wrap the
+  // arms, each part with rays from its own centre. rays that still miss
+  // are bridged by interpolating the radius across the gap within the
+  // loop. the shader keeps its samples and the terrain's triangles
+  // within one loop, so the parts don't smear into each other.
+  // dropping an .obj (y up, any scale, any size) swaps the figure
+  let tubeBody = false;
+  let bodyPromise = null;
+  const parseObj = (text) => {
+    const v = [], f = [];
+    for (const line of text.split('\n')) {
+      if (line.charCodeAt(0) === 118 && line.charCodeAt(1) === 32) { // 'v '
+        const p = line.slice(2).trim().split(/\s+/);
+        v.push(+p[0], +p[1], +p[2]);
+      } else if (line.charCodeAt(0) === 102 && line.charCodeAt(1) === 32) { // 'f '
+        // v, v/vt, v//vn, v/vt/vn: parseInt stops at the slash. negative
+        // (relative) indices are rare and not handled
+        const idx = line.slice(2).trim().split(/\s+/).map((t) => parseInt(t, 10) - 1);
+        for (let i = 1; i + 1 < idx.length; i++) f.push(idx[0], idx[i], idx[i + 1]);
+      }
+    }
+    return { v: Float32Array.from(v), f: Uint32Array.from(f) };
+  };
+  const bakeBody = (mesh, W = 256, H = 256) => {
+    const { v, f } = mesh;
+    const n = v.length / 3;
+    // body units: feet at 0, height 1, the vertex mean at x = z = 0 (a
+    // rough centring; the rays below find their own origin per row)
+    let ymin = Infinity, ymax = -Infinity, sx = 0, sz = 0;
+    for (let i = 0; i < n; i++) {
+      const y = v[3 * i + 1];
+      if (y < ymin) ymin = y;
+      if (y > ymax) ymax = y;
+      sx += v[3 * i];
+      sz += v[3 * i + 2];
+    }
+    const cx = sx / n, cz = sz / n, s = 1 / (ymax - ymin);
+    const P = new Float32Array(n * 3);
+    for (let i = 0; i < n; i++) {
+      P[3 * i] = (v[3 * i] - cx) * s;
+      P[3 * i + 1] = (v[3 * i + 1] - ymin) * s;
+      P[3 * i + 2] = (v[3 * i + 2] - cz) * s;
+    }
+    // triangles by the rows (heights) they span
+    const nt = f.length / 3;
+    const rows = Array.from({ length: H }, () => []);
+    for (let t = 0; t < nt; t++) {
+      const y0 = P[3 * f[3 * t] + 1], y1 = P[3 * f[3 * t + 1] + 1], y2 = P[3 * f[3 * t + 2] + 1];
+      const lo = Math.max(0, Math.floor(Math.min(y0, y1, y2) * H - 0.5));
+      const hi = Math.min(H - 1, Math.ceil(Math.max(y0, y1, y2) * H - 0.5));
+      for (let j = lo; j <= hi; j++) rows[j].push(t);
+    }
+    // the mesh's cross-section at each row's height: one segment per
+    // triangle the plane cuts, in (x, z); and each segment's class, by
+    // the closed loop it belongs to (segments sharing an endpoint): the
+    // longest loop is the torso (0), any other loop off to a side is an
+    // arm (+1 toward +x, -1 toward -x), anything else stray (2). a fixed
+    // width cutoff can't tell the underside of an arm at the armpit from
+    // the torso's own side, and taking it as torso put a ledge there
+    const secs = [], classes = [];
+    for (let j = 0; j < H; j++) {
+      const y = (j + 0.5) / H;
+      const seg = [];
+      for (const t of rows[j]) {
+        let k = 0;
+        const pts = [0, 0, 0, 0];
+        for (let e = 0; e < 3 && k < 4; e++) {
+          const a = f[3 * t + e], b = f[3 * t + (e + 1) % 3];
+          const ya = P[3 * a + 1], yb = P[3 * b + 1];
+          if ((ya <= y) === (yb <= y)) continue;
+          const w = (y - ya) / (yb - ya);
+          pts[k++] = P[3 * a] + (P[3 * b] - P[3 * a]) * w;
+          pts[k++] = P[3 * a + 2] + (P[3 * b + 2] - P[3 * a + 2]) * w;
+        }
+        if (k !== 4) continue;
+        seg.push(pts[0], pts[1], pts[2], pts[3]);
+      }
+      secs.push(seg);
+      const ns = seg.length / 4;
+      const parent = Int32Array.from({ length: ns }, (_, i) => i);
+      const find = (i) => { while (parent[i] !== i) { parent[i] = parent[parent[i]]; i = parent[i]; } return i; };
+      const byPt = new Map();
+      for (let k = 0; k < ns; k++) {
+        for (const e of [0, 2]) {
+          // shared mesh edges give the same cut point from either
+          // triangle up to rounding; key on a coarse grid
+          const key = Math.round(seg[4 * k + e] * 1e3) + ',' + Math.round(seg[4 * k + e + 1] * 1e3);
+          const other = byPt.get(key);
+          if (other === undefined) byPt.set(key, k);
+          else parent[find(k)] = find(other);
+        }
+      }
+      const comp = new Map(); // root -> [length, sum x*length]
+      for (let k = 0; k < ns; k++) {
+        const r = find(k);
+        const len = Math.hypot(seg[4 * k + 2] - seg[4 * k], seg[4 * k + 3] - seg[4 * k + 1]);
+        const c = comp.get(r) || [0, 0];
+        c[0] += len;
+        c[1] += len * (seg[4 * k] + seg[4 * k + 2]) / 2;
+        comp.set(r, c);
+      }
+      let torso = -1, longest = 0;
+      for (const [r, c] of comp) if (c[0] > longest) { longest = c[0]; torso = r; }
+      const cls = new Int8Array(ns);
+      for (let k = 0; k < ns; k++) {
+        const r = find(k);
+        if (r === torso) { cls[k] = 0; continue; }
+        const cx = comp.get(r)[1] / comp.get(r)[0];
+        cls[k] = cx > 0.1 ? 1 : cx < -0.1 ? -1 : 2;
+      }
+      classes.push(cls);
+    }
+    // the length-weighted centre of a section's pieces passing a filter on
+    // their midpoint x and class, the origin its rays are cast from
+    const centre = (j, filt) => {
+      const seg = secs[j], cls = classes[j];
+      let wsum = 0, mx = 0, mz = 0;
+      for (let k = 0; k < seg.length; k += 4) {
+        const midx = (seg[k] + seg[k + 2]) / 2;
+        if (!filt(midx, cls[k / 4])) continue;
+        const len = Math.hypot(seg[k + 2] - seg[k], seg[k + 3] - seg[k + 1]);
+        wsum += len;
+        mx += len * midx;
+        mz += len * (seg[k + 1] + seg[k + 3]) / 2;
+      }
+      return wsum > 0 ? [mx / wsum, mz / wsum] : null;
+    };
+    // the outermost hit of the ray from (ox, oz) in direction (dx, dz)
+    // among the pieces passing the filter; 0 if none
+    const cast = (j, ox, oz, dx, dz, filt) => {
+      const seg = secs[j], cls = classes[j];
+      let best = 0;
+      for (let k = 0; k < seg.length; k += 4) {
+        if (!filt((seg[k] + seg[k + 2]) / 2, cls[k / 4])) continue;
+        const ax = seg[k] - ox, az = seg[k + 1] - oz, ex = seg[k + 2] - seg[k], ez = seg[k + 3] - seg[k + 1];
+        const den = ex * dz - ez * dx;
+        if (Math.abs(den) < 1e-12) continue;
+        const u = (dx * az - dz * ax) / den;
+        if (u < 0 || u > 1) continue;
+        const t = (ex * az - ez * ax) / den;
+        if (t > best) best = t;
+      }
+      return best;
+    };
+    const ALL = () => true;
+    const TORSO = (x, c) => c === 0;
+    const ARM = (side) => (x, c) => c === side;
+    // one loop per height can't make two legs: a rectangle with its long
+    // edges glued is a cylinder, and rays cast from between the legs miss
+    // front and back and web the two into a gown. so the rows are in
+    // bands, and a band's loops split the rect's width between the
+    // parts of the figure at that height, each part with rays from its own
+    // centre:
+    //   torso  (band 0): one loop, u = 0 at the back, the seam down the spine
+    //   legs   (band 1): below the crotch; the u < 0.5 half wraps the +x leg
+    //          (the one beneath the torso's u < 0.5 side), the rest the other
+    //   arms   (band 2): where the arms hang free of the torso; the outer
+    //          fifths of the width wrap the arms, the middle the torso
+    // the crotch is the highest row below the hips where rays straight
+    // forward and back from the section's centre both miss — the gap
+    // between the legs. the arm rows are those above it where both arms
+    // are loops of their own (the base mesh stands in an a-pose, so that
+    // is from the fingertips to the armpits), taken as one contiguous range
+    let crotch = -1;
+    for (let j = Math.floor(0.6 * H); j >= 0; j--) {
+      const c = centre(j, ALL);
+      if (!c) continue;
+      if (!cast(j, c[0], c[1], 0, 1, ALL) && !cast(j, c[0], c[1], 0, -1, ALL)) { crotch = j; break; }
+    }
+    let armLo = -1, armHi = -2;
+    for (let j = crotch + 1; j < H; j++) {
+      if (!centre(j, ARM(1)) || !centre(j, ARM(-1)) || !centre(j, TORSO)) continue;
+      if (armLo < 0) armLo = j;
+      armHi = j;
+    }
+    const aW = Math.round(0.2 * W);
+    const bandOf = (j) => j <= crotch ? 1 : j >= armLo && j <= armHi ? 2 : 0;
+    // a loop: its texel range, which pieces of the section it sees, and
+    // its ray direction by angle. the legs and arms start at the inner
+    // side (facing the torso) and go inner -> front -> outer -> back,
+    // mirror images of each other
+    const mirror = (side) => (th) => [-side * Math.cos(th), Math.sin(th)];
+    const around = (th) => [Math.sin(th), -Math.cos(th)];
+    const LOOPS = [
+      [{ i0: 0, i1: W, filt: TORSO, dir: around }],
+      [{ i0: 0, i1: W / 2, filt: (x) => x > 0, dir: mirror(1) },
+        { i0: W / 2, i1: W, filt: (x) => x < 0, dir: mirror(-1) }],
+      [{ i0: 0, i1: aW, filt: ARM(1), dir: mirror(1) },
+        { i0: aW, i1: W - aW, filt: TORSO, dir: around },
+        { i0: W - aW, i1: W, filt: ARM(-1), dir: mirror(-1) }],
+    ];
+    const loopAt = (i, j) => { const ls = LOOPS[bandOf(j)]; for (const l of ls) if (i < l.i1) return l; return ls[ls.length - 1]; };
+    // per-row ray origins (one per loop), smoothed over a few rows within
+    // the band so the origin slides up the figure rather than jumping
+    const ox = new Float32Array(3 * H), oz = new Float32Array(3 * H);
+    for (let j = 0; j < H; j++) {
+      LOOPS[bandOf(j)].forEach((l, k) => {
+        const c = centre(j, l.filt);
+        if (c) { ox[3 * j + k] = c[0]; oz[3 * j + k] = c[1]; }
+        else if (j > 0 && bandOf(j - 1) === bandOf(j)) { ox[3 * j + k] = ox[3 * (j - 1) + k]; oz[3 * j + k] = oz[3 * (j - 1) + k]; }
+      });
+    }
+    const sox = new Float32Array(3 * H), soz = new Float32Array(3 * H);
+    for (let j = 0; j < H; j++) {
+      let lo = j, hi = j;
+      while (lo > 0 && j - lo < 4 && bandOf(lo - 1) === bandOf(j)) lo--;
+      while (hi < H - 1 && hi - j < 4 && bandOf(hi + 1) === bandOf(j)) hi++;
+      for (let k = 0; k < 3; k++) {
+        let x = 0, z = 0;
+        for (let m = lo; m <= hi; m++) { x += ox[3 * m + k]; z += oz[3 * m + k]; }
+        sox[3 * j + k] = x / (hi - lo + 1);
+        soz[3 * j + k] = z / (hi - lo + 1);
+      }
+    }
+    const pos = new Float32Array(W * H * 4);
+    const cen = new Float32Array(W * H * 2); // each texel's ray origin, for the normals
+    const rad = new Float32Array(W), hit = new Uint8Array(W);
+    for (let j = 0; j < H; j++) {
+      const y = (j + 0.5) / H;
+      hit.fill(0);
+      LOOPS[bandOf(j)].forEach((l, k) => {
+        const L = l.i1 - l.i0;
+        const cxj = sox[3 * j + k], czj = soz[3 * j + k];
+        for (let i = l.i0; i < l.i1; i++) {
+          const [dx, dz] = l.dir(2 * Math.PI * (i - l.i0 + 0.5) / L);
+          const best = cast(j, cxj, czj, dx, dz, l.filt);
+          if (best > 0) { rad[i] = best; hit[i] = 1; }
+        }
+        // bridge the misses, linear in radius across each gap, wrapping
+        // within the loop
+        let nh = 0;
+        for (let i = l.i0; i < l.i1; i++) nh += hit[i];
+        if (nh === 0) for (let i = l.i0; i < l.i1; i++) rad[i] = 0.002;
+        else if (nh < L) {
+          for (let i = l.i0; i < l.i1; i++) {
+            if (hit[i]) continue;
+            let a = i, b = i, da = 0, db = 0;
+            while (!hit[a]) { a = l.i0 + (a - l.i0 + L - 1) % L; da++; }
+            while (!hit[b]) { b = l.i0 + (b - l.i0 + 1) % L; db++; }
+            rad[i] = (rad[a] * db + rad[b] * da) / (da + db);
+          }
+        }
+        for (let i = l.i0; i < l.i1; i++) {
+          const [dx, dz] = l.dir(2 * Math.PI * (i - l.i0 + 0.5) / L);
+          const q = 4 * (j * W + i);
+          pos[q] = cxj + rad[i] * dx;
+          pos[q + 1] = y;
+          pos[q + 2] = czj + rad[i] * dz;
+          pos[q + 3] = hit[i];
+          cen[2 * (j * W + i)] = cxj;
+          cen[2 * (j * W + i) + 1] = czj;
+        }
+      });
+    }
+    // normals from the image itself: central differences, u wrapping
+    // within the texel's own loop, v one-sided at a band's edge (the rows
+    // either side belong to different loops and a difference across them
+    // is a stretch, not a tangent); outward, checked against the radial
+    // from the ray origin, since a webbed gap can fold either way
+    const nrm = new Float32Array(W * H * 4);
+    const at = (i, j) => 4 * (j * W + i);
+    const uN = (i, j, d) => { const l = loopAt(i, j); const L = l.i1 - l.i0; return l.i0 + (i - l.i0 + d + L) % L; };
+    for (let j = 0; j < H; j++) {
+      const jp = j === H - 1 || bandOf(j + 1) !== bandOf(j) ? j : j + 1;
+      const jm = j === 0 || bandOf(j - 1) !== bandOf(j) ? j : j - 1;
+      for (let i = 0; i < W; i++) {
+        const a = at(uN(i, j, 1), j), b = at(uN(i, j, -1), j), c = at(i, jp), d = at(i, jm);
+        const ux = pos[a] - pos[b], uy = pos[a + 1] - pos[b + 1], uz = pos[a + 2] - pos[b + 2];
+        const vx = pos[c] - pos[d], vy = pos[c + 1] - pos[d + 1], vz = pos[c + 2] - pos[d + 2];
+        let nx = vy * uz - vz * uy, ny = vz * ux - vx * uz, nz = vx * uy - vy * ux;
+        const k = at(i, j);
+        const rx = pos[k] - cen[2 * (j * W + i)], rz = pos[k + 2] - cen[2 * (j * W + i) + 1];
+        const len = Math.hypot(nx, ny, nz);
+        if (len < 1e-9) { const rl = Math.hypot(rx, rz) || 1; nx = rx / rl; ny = 0; nz = rz / rl; }
+        else { nx /= len; ny /= len; nz /= len; }
+        if (nx * rx + nz * rz < 0) { nx = -nx; ny = -ny; nz = -nz; }
+        nrm[k] = nx; nrm[k + 1] = ny; nrm[k + 2] = nz; nrm[k + 3] = 0;
+      }
+    }
+    // the band edges in (u, v), for the shader to keep its samples and the
+    // terrain's triangles within one loop: v below which the rows are
+    // legs, the v range of the arm rows, and the arms' share of u
+    const bands = [(crotch + 1) / H, armLo >= 0 ? armLo / H : 0, armLo >= 0 ? (armHi + 1) / H : 0, aW / W];
+    return { w: W, h: H, pos, nrm, bands };
+  };
+  // parse, bake, and hand the image to the engine; false for a mesh with
+  // nothing in it. takes effect on the next frame, mid-flight included
+  const setBodyMesh = (text) => {
+    const mesh = parseObj(text);
+    if (!mesh.f.length || mesh.v.length < 9) return false;
+    const img = bakeBody(mesh);
+    const buf = view.bodyBuffer(img.w, img.h);
+    buf.pos.set(img.pos);
+    buf.nrm.set(img.nrm);
+    view.bodyCommit(img.bands[0], img.bands[1], img.bands[2], img.bands[3]);
+    return true;
+  };
+  const ensureBody = () => {
+    if (view.bodyReady()) return Promise.resolve(true);
+    if (!bodyPromise) {
+      bodyPromise = fetch('body.obj').then((r) => {
+        if (!r.ok) throw new Error(r.statusText);
+        return r.text();
+      }).then((text) => setBodyMesh(text)).catch((err) => {
+        console.warn('body mesh:', err);
+        return false;
+      }).finally(() => { bodyPromise = null; });
+    }
+    return bodyPromise;
+  };
 
   // --- dropped track (gpx) --------------------------------------------------
   // drop a .gpx on the window and the track is drawn twice: as a line on the
@@ -3619,7 +3994,8 @@
   // for devtools poking and automated testing
   window.__demo = { view, map, marker, isFollowing: () => following,
     lod: (v) => { if (v != null) view.setLodScale(v); return view.getLodScale(); },
-    tube: () => ({ rect: tubeRect, on: tubeOn, curl }),
+    tube: () => ({ rect: tubeRect, on: tubeOn, body: tubeBody, curl }),
+    body: (text) => text ? setBodyMesh(text) : view.bodyReady(),
     tunnel: (c) => { if (c != null) { tunnelC = c; view.setTunnelCircumference(c); refreshTunnel(); } return view.getTunnelInfo(); },
     path: () => path, loadGpx: (text) => setPath(parseGpx(text), true),
     clearTiles,
@@ -3687,6 +4063,7 @@
       if (START.tube && START.tube.rect) {
         tubeRect = START.tube.rect;
         tubeAxisEw = START.tube.ewAxis !== false;
+        tubeBody = !!START.tube.body;
         updateAxisBtn();
         setRectData(tubeRect);
         if (START.tube.on) {
@@ -3782,21 +4159,24 @@
             ti = view.getTubeInfo();
           }
           if (ti.groundLocked) {
-            if (tubePending === 'fly') flyIntoTube(tubeRect);
+            if (tubePending === 'fly') (tubeBody ? flyOntoBody : flyIntoTube)(tubeRect);
             tubePending = null;
           }
         }
         const parts = [];
         if (tubePending || ti.nodesLoaded < ti.nodesWanted)
           parts.push(`loading ${ti.nodesLoaded}/${ti.nodesWanted} tiles`);
-        if (!tubePending && curl !== curlTarget) parts.push('rolling…');
+        if (!tubePending && curl !== curlTarget) parts.push(tubeBody ? 'wrapping…' : 'rolling…');
         tubeInfoEl.style.display = parts.length ? '' : 'none';
-        if (parts.length) tubeInfoEl.textContent = 'tube: ' + parts.join(' · ');
+        if (parts.length) tubeInfoEl.textContent = (tubeBody ? 'body: ' : 'tube: ') + parts.join(' · ');
       } else if (tunnelOn) {
         const ti = view.getTunnelInfo();
         const loading = ti.nodesLoaded < ti.nodesWanted;
         tubeInfoEl.style.display = loading ? '' : 'none';
         if (loading) tubeInfoEl.textContent = `tunnel: loading ${ti.nodesLoaded}/${ti.nodesWanted} tiles`;
+      } else if (bodyPromise) {
+        tubeInfoEl.style.display = '';
+        tubeInfoEl.textContent = 'body: loading the figure…';
       } else {
         tubeInfoEl.style.display = 'none';
       }

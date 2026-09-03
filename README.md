@@ -215,6 +215,82 @@ lines is the float. The aim height comes from
 NaN where it hasn't, so the camera rides the terrain rather than the track's
 GPS altitudes, easing between the two as the measurements land.
 
+#### Body mode
+
+Draw a rect on the map (shift-drag) and **B** wraps it onto a human figure
+standing on the rect's centre, the way **T** rolls it into a tube. It is the
+tube pipeline with a different warp: the same rect-driven tile selection, the
+same ground lock before anything moves, the same curl animation — here a
+morph from the flat sheet to the skin — and the same airplane-frame flight
+once it's up. The camera spawns out in front of the figure at chest height,
+far enough back to see all of it. B again unwraps; T switches to the tube; esc
+clears the rect. Only one of the two shapes is ever up.
+
+Unlike the tube, the land around the figure stays: it is drawn flat, and the
+rect itself, the ground whose skin is now up on the figure, is painted
+near-black — a facet normal from the screen-space slope, catching a little
+of a fixed light so the relief still reads. Without the surroundings there
+was nothing on screen but the figure, and turning the camera was
+indistinguishable from sliding the figure across the view. The walk keeps a
+tile if it is in view (drawn flat) or touches the rect (drawn wrapped); a tile
+straddling the edge is drawn both ways, the wrapped pass discarding what lies
+outside the rect.
+
+The figure is [web/body.obj](./web/body.obj), the skin of MakeHuman's base
+mesh (explicitly CC0, per its own header;
+[tools/bodymesh.mjs](./tools/bodymesh.mjs) extracts it from the upstream
+file). It is fetched the first time B is pressed and baked in the page into a
+**geometry image**: a 256×256 grid over (angle around the figure, height from
+feet to head) holding a skin position and outward normal per cell. Each cell
+is a ray cast outward at that height and angle from the centre of the mesh's
+cross-section there, and the outermost hit is the skin. The centre is
+per-row and smoothed, not a single spine: the head and neck lean well forward
+of the hips, and a ray from the wrong centre grazes the skin instead of
+crossing it.
+
+One loop per height can't make limbs. A rectangle with its long edges glued
+is a cylinder; rays cast from between the legs miss front and back, and
+bridging those misses webbed the two legs into a gown, while at an arm's
+height the outermost hit is the hand and the sheet stretched from torso to
+fingertip in a flat wing. So the rows are in **bands**, and a band's loops
+split the rect's width between the parts of the figure at that height, each
+part with rays from its own centre. Below the crotch (the highest row where
+rays straight forward and back both miss) the left half of the width wraps
+the leg beneath the torso's left side and the right half the other. Where the
+arms hang free of the torso the outer fifth of the width on each side wraps
+that arm and the middle the torso. Which piece of a cross-section is torso and
+which is arm goes by connected loop, not by a width cutoff: the longest closed
+loop is the torso, any other loop off to a side is an arm. A cutoff couldn't
+tell the underside of an arm at the armpit from the torso's own side, and
+taking it as torso put a ledge there that the terrain stretched across. Everywhere else it is one loop with the
+seam down the spine. Each limb's loop starts at its inner side, so the joins
+sit against the body.
+
+The joins are where the terrain would smear: a tile triangle whose vertices
+land on different legs spans the gap between them. So the shader knows the
+bands too. It clamps its samples to the texel's own loop, and every vertex
+carries the loop's id as a varying, which interpolates to a fraction inside
+any triangle that spans two loops, and the fragment shader drops those. The
+figure therefore has tears at the crotch, the shoulders and the armpits, one
+triangle wide, and no webs. Rays that still miss inside a loop are bridged
+across the gap within it.
+
+The vertex shader then maps a rect-local point the obvious way — its
+along-axis coordinate to height, its across coordinate to angle, its terrain
+height pushed out along the normal at true scale — sampling the two images
+bilinearly by hand (float textures don't filter in WebGL2). The figure is as
+tall as the rect is long, so a rect about 1.7× longer than it is wide wraps
+with the least stretch; anything else pulls the imagery around the waist or up
+the body. The crown and the soles are where the parameterisation collapses,
+and the far ends of the rect crumple there. The seam runs down the back.
+`earth_core::bodyWarp` is the CPU twin the lod walk measures distances
+through, and the map marker is placed by the nearest skin cell to the camera,
+unwrapped to its spot on the rect.
+
+Drop any `.obj` (y up, any scale) on the window and it replaces the figure,
+mid-flight included. G (the tube's wall hug) is off here: the walker is the
+cylinder's.
+
 #### Render tests
 
 [tools/](./tools/) captures the 3d view headlessly and builds a side-by-side

@@ -138,6 +138,38 @@ struct EarthView {
 	void lockTubeGround() { earth.tubeLockGround(false); }
 	void setTubeCurl(double c) { earth.tube_curl = fmax(0.0, fmin(c, 1.0)); }
 
+	// body mode (see earth_core.h): the rect wrapped onto a figure rather
+	// than rolled into a cylinder. the host bakes the figure's geometry
+	// image and hands it over through these: bodyBuffer allocates a w×h
+	// image and returns views onto both planes (positions, normals; four
+	// floats a texel, row j = v, column i = u) for the host to fill in
+	// place — the views die on the next memory growth, so fill and commit
+	// straight away — and bodyCommit marks it for upload at the next draw
+	val bodyBuffer(int w, int h) {
+		w = std::max(2, std::min(w, 4096));
+		h = std::max(2, std::min(h, 4096));
+		earth.body_w = w;
+		earth.body_h = h;
+		earth.body_pos.assign((size_t)w * h * 4, 0.0f);
+		earth.body_nrm.assign((size_t)w * h * 4, 0.0f);
+		val o = val::object();
+		o.set("pos", val(emscripten::typed_memory_view(earth.body_pos.size(), earth.body_pos.data())));
+		o.set("nrm", val(emscripten::typed_memory_view(earth.body_nrm.size(), earth.body_nrm.data())));
+		return o;
+	}
+	// the loop bands, see earth_core body_bands: legs below v = split, arm
+	// rows v in [arm_lo, arm_hi), the arms' share of u
+	void bodyCommit(double split, double arm_lo, double arm_hi, double arm_u) {
+		earth.body_bands[0] = split;
+		earth.body_bands[1] = arm_lo;
+		earth.body_bands[2] = arm_hi;
+		earth.body_bands[3] = arm_u;
+		earth.body_dirty = true;
+	}
+	bool bodyReady() { return earth.body_w > 1 && earth.body_h > 1; }
+	// which shape the rect's roll goes to; takes effect with the next frame
+	void setTubeBody(bool on) { earth.tube_body = on; follow_height = NAN; }
+
 	// tunnel mode (see earth_core tunnelUpdate): the tube that follows the
 	// camera. flight is the ordinary ground-frame kind; the shader's roll
 	// and the rect-driven node selection are the tube's
@@ -182,8 +214,10 @@ struct EarthView {
 	// null outside tube mode — hosts fall back to getPose for the marker
 	val getTubePose() {
 		double lat, lon, heading;
-		if (!earth.tubePose(camera.eye, camera.direction, lat, lon, heading))
-			return val::null();
+		auto ok = earth.tube_body
+			? earth.bodyPose(camera.eye, camera.direction, lat, lon, heading)
+			: earth.tubePose(camera.eye, camera.direction, lat, lon, heading);
+		if (!ok) return val::null();
 		val o = val::object();
 		o.set("lat", lat * 180.0 / M_PI);
 		o.set("lon", lon * 180.0 / M_PI);
@@ -201,6 +235,7 @@ struct EarthView {
 		// only meaningful once groundLocked (measured off the loaded mesh)
 		o.set("groundAlt", earth.tube_ground_radius - planetRadius());
 		o.set("groundLocked", earth.tube_ground_locked);
+		o.set("body", earth.tube_body);
 		// last walk's want/have node counts — in tube mode that's exactly
 		// the rect's download progress
 		o.set("nodesWanted", earth.stat_nodes_wanted);
@@ -571,7 +606,7 @@ struct EarthView {
 		// branch only turns the head. the tunnel is not this: it flies
 		// ground-frame, and its hug is the ordinary one over the unrolled
 		// ground, which the roll leaves in place at the tube's bottom
-		auto tube_hugging = terrain_follow && earth.tube_on && camera.airplane;
+		auto tube_hugging = terrain_follow && earth.tube_on && !earth.tube_body && camera.airplane;
 		// until the gap locks (wall below measurable), tube G flies as a
 		// plain airplane — never strand the camera unable to move
 		auto tube_locked = tube_hugging && !isnan(follow_height);
@@ -723,6 +758,10 @@ EMSCRIPTEN_BINDINGS(earth) {
 		.function("setTubeEnabled", &EarthView::setTubeEnabled)
 		.function("lockTubeGround", &EarthView::lockTubeGround)
 		.function("setTubeCurl", &EarthView::setTubeCurl)
+		.function("bodyBuffer", &EarthView::bodyBuffer)
+		.function("bodyCommit", &EarthView::bodyCommit)
+		.function("bodyReady", &EarthView::bodyReady)
+		.function("setTubeBody", &EarthView::setTubeBody)
 		.function("setTunnel", &EarthView::setTunnel)
 		.function("setTunnelCircumference", &EarthView::setTunnelCircumference)
 		.function("setTunnelAcross", &EarthView::setTunnelAcross)

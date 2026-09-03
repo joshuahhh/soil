@@ -49,6 +49,15 @@ struct gl_ctx_t {
 	GLint tube_mesh_to_local_loc;
 	GLint tube_local_to_clip_loc;
 	GLint tube_params_loc;
+	GLint tube_pass_loc;
+	GLint body_on_loc;
+	GLint body_curl_loc;
+	GLint body_bands_loc;
+	GLint body_size_loc;
+	GLint body_pos_loc;
+	GLint body_nrm_loc;
+	GLuint body_tex[2] = {0, 0}; // the figure's geometry image: positions, normals
+	int body_w = 0, body_h = 0;
 	GLint uv_offset_loc;
 	GLint uv_scale_loc;
 	GLint octant_mask_loc;
@@ -259,6 +268,7 @@ void renderSetTransform(render_ctx_t &ctx, const float *m16) {
 void renderSetTube(render_ctx_t &ctx, bool on, const float *local_to_clip16,
 		float r_eff, float half_len, float half_wid, float wid_offset) {
 	glUniform1i(ctx.tube_on_loc, on);
+	glDisable(GL_POLYGON_OFFSET_FILL); // body mode's flat pass turns it on per node
 	// draw both faces in tube mode: the camera legitimately sees walls from
 	// either side (approaching the tube from outside, or geometry the roll
 	// has folded over), and culling them reads as holes in the mesh
@@ -266,11 +276,65 @@ void renderSetTube(render_ctx_t &ctx, bool on, const float *local_to_clip16,
 	if (!on) return;
 	glUniformMatrix4fv(ctx.tube_local_to_clip_loc, 1, GL_FALSE, local_to_clip16);
 	glUniform4f(ctx.tube_params_loc, r_eff, half_len, half_wid, wid_offset);
+	glUniform1i(ctx.tube_pass_loc, 1);
+}
+
+// which side of the rect a tube-mode draw keeps: 1 warps the mesh and
+// discards fragments outside the rect (the tube; the figure); 2 leaves it
+// flat and discards the inside — the land around the figure, with the
+// hole where the sheet lifted off
+// the flat pass sits a hair further away: at curl 0 the sheet lies
+// exactly on this ground and the two would fight for the depth buffer.
+// polygon offset, in window depth units, not a clip-space nudge — with a
+// perspective projection nearly all of the ground is already within a
+// fraction of a thousandth of the far plane in ndc, and a constant added
+// there pushes it past the plane and clips it away entirely
+void renderSetTubePass(render_ctx_t &ctx, int pass) {
+	glUniform1i(ctx.tube_pass_loc, pass);
+	if (pass == 2) {
+		glEnable(GL_POLYGON_OFFSET_FILL);
+		glPolygonOffset(1.0f, 4.0f);
+	} else {
+		glDisable(GL_POLYGON_OFFSET_FILL);
+	}
 }
 
 // per-node mesh-to-local-frame matrix (tube mode only)
 void renderSetTubeNode(render_ctx_t &ctx, const float *m16) {
 	glUniformMatrix4fv(ctx.tube_mesh_to_local_loc, 1, GL_FALSE, m16);
+}
+
+// body mode (see earth_core.h): the figure's geometry image, two w×h float
+// textures of positions and unit normals in body units. unfiltered float
+// textures are core webgl2; linear filtering of them is not, so the shader
+// fetches texels and interpolates by hand. units 5 and 6, clear of the
+// terrain texture on 0 and the dof pass's pair on 0/1
+void renderBodyUpload(render_ctx_t &ctx, int w, int h, const float *pos, const float *nrm) {
+	if (!ctx.body_tex[0]) glGenTextures(2, ctx.body_tex);
+	const float *data[2] = {pos, nrm};
+	for (auto k = 0; k < 2; k++) {
+		glActiveTexture(GL_TEXTURE5 + k);
+		glBindTexture(GL_TEXTURE_2D, ctx.body_tex[k]);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+		glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F, w, h, 0, GL_RGBA, GL_FLOAT, data[k]);
+	}
+	glActiveTexture(GL_TEXTURE0);
+	ctx.body_w = w;
+	ctx.body_h = h;
+	glUniform1i(ctx.body_pos_loc, 5);
+	glUniform1i(ctx.body_nrm_loc, 6);
+	glUniform2f(ctx.body_size_loc, (float)w, (float)h);
+}
+
+// per frame: whether the tube warp is the figure rather than the cylinder,
+// and how far along the sheet is from flat (0) to wrapped (1)
+void renderSetBody(render_ctx_t &ctx, bool on, float curl, const float *bands4) {
+	glUniform1i(ctx.body_on_loc, on && ctx.body_tex[0]);
+	glUniform1f(ctx.body_curl_loc, curl);
+	glUniform4fv(ctx.body_bands_loc, 1, bands4);
 }
 
 // resolve the miniature pass onto the canvas (see dof_gl_t). the terrain
@@ -642,6 +706,25 @@ void renderInit(render_ctx_t &ctx, void *) {
 		"uniform mat4 tube_mesh_to_local;"
 		"uniform mat4 tube_local_to_clip;"
 		"uniform vec4 tube_params;" // (r_eff, half_len, half_wid, wid_offset)
+		// mediump in both stages: a uniform shared by the two must agree on
+		// precision, and int defaults differ (highp here, mediump there)
+		"uniform mediump int tube_pass;" // 1 warped, 2 flat with the rect cut out
+		// body mode: the rect goes onto a figure instead of a cylinder. its
+		// skin is a geometry image — positions and unit normals over
+		// (u around, v feet to head), body units with height 1, x across
+		// the figure, y up, z out of its front — sampled bilinearly by hand
+		// (u wraps, v clamps; float textures don't filter in webgl2) and
+		// scaled so the rect's length is the figure's height. the terrain
+		// height rides out along the normal, and body_curl eases the sheet
+		// from flat to wrapped. the cpu twin is earth_core's bodyWarp
+		"uniform bool body_on;"
+		"uniform float body_curl;"
+		"uniform vec4 body_bands;" // (legs below v, arm rows v lo, v hi, arms' share of u)
+		"uniform vec2 body_size;"
+		// highp: a vertex-shader sampler defaults to lowp, and the
+		// precision qualifier applies to what the fetch returns
+		"uniform highp sampler2D body_pos;"
+		"uniform highp sampler2D body_nrm;"
 		"uniform vec2 uv_offset;"
 		"uniform vec2 uv_scale;"
 		"uniform bool octant_mask[8];"
@@ -653,6 +736,42 @@ void renderInit(render_ctx_t &ctx, void *) {
 		"out float v_stale;"
 		"out float v_mask;"
 		"out vec2 v_rect;"
+		"out float v_loop;"
+		"out vec3 v_local;"
+		// the image is several loops (legs, arms, torso — see body_bands):
+		// the loop a texel belongs to, as its (u, v) box and an id. samples
+		// are clamped to the box, so the interpolation never crosses from
+		// one part to another, and a terrain triangle whose vertices land
+		// in different loops is dropped by the fragment shader: it would
+		// stretch across the gap between them
+		"vec4 bodyLoop(vec2 uv, out float id) {"
+		"	if (uv.y < body_bands.x) {"
+		"		if (uv.x < 0.5) { id = 1.0; return vec4(0.0, 0.0, 0.5, body_bands.x); }"
+		"		id = 2.0; return vec4(0.5, 0.0, 1.0, body_bands.x);"
+		"	}"
+		"	if (uv.y >= body_bands.y && uv.y < body_bands.z) {"
+		"		float a = body_bands.w;"
+		"		if (uv.x < a) { id = 4.0; return vec4(0.0, body_bands.y, a, body_bands.z); }"
+		"		if (uv.x < 1.0 - a) { id = 3.0; return vec4(a, body_bands.y, 1.0 - a, body_bands.z); }"
+		"		id = 5.0; return vec4(1.0 - a, body_bands.y, 1.0, body_bands.z);"
+		"	}"
+		"	if (uv.y < body_bands.y) { id = 0.0; return vec4(0.0, body_bands.x, 1.0, body_bands.y); }"
+		"	id = 6.0; return vec4(0.0, max(body_bands.x, body_bands.z), 1.0, 1.0);"
+		"}"
+		"vec3 bodyFetch(sampler2D t, vec2 uv, vec4 box) {"
+		"	vec2 f = uv * body_size - 0.5;"
+		"	vec2 fl = floor(f);"
+		"	vec2 fr = f - fl;"
+		"	ivec2 lo = ivec2(box.xy * body_size + 0.5);"
+		"	ivec2 hi = ivec2(box.zw * body_size + 0.5) - 1;"
+		"	int x0 = clamp(int(fl.x), lo.x, hi.x);"
+		"	int x1 = clamp(int(fl.x) + 1, lo.x, hi.x);"
+		"	int y0 = clamp(int(fl.y), lo.y, hi.y);"
+		"	int y1 = clamp(int(fl.y) + 1, lo.y, hi.y);"
+		"	vec3 a = mix(texelFetch(t, ivec2(x0, y0), 0).xyz, texelFetch(t, ivec2(x1, y0), 0).xyz, fr.x);"
+		"	vec3 b = mix(texelFetch(t, ivec2(x0, y1), 0).xyz, texelFetch(t, ivec2(x1, y1), 0).xyz, fr.x);"
+		"	return mix(a, b, fr.y);"
+		"}"
 		"void main() {"
 		// masking: a triangle is dropped only when ALL its vertices are in
 		// masked octants (v_mask interpolates to 0 -> fragment discard).
@@ -665,10 +784,29 @@ void renderInit(render_ctx_t &ctx, void *) {
 		"	v_mask = mask;"
 		"	v_stale = stale_mask[int(octant)] ? 1.0 : 0.0;"
 		"	v_texcoords = (texcoords + uv_offset) * uv_scale;"
+		"	v_loop = 0.0;"
+		"	v_local = vec3(0.0);"
 		"	vec4 p;"
 		"	if (tube_on) {"
 		"		vec3 l = (tube_mesh_to_local * vec4(position, 1.0)).xyz;"
 		"		v_rect = vec2(l.x / tube_params.y, (l.y - tube_params.w) / tube_params.z);"
+		"		v_local = l;"
+		"		if (tube_pass == 2) {"
+		"			p = transform * vec4(position, 1.0);"
+		"		} else if (body_on) {"
+		"			vec2 uv = vec2(v_rect.y, v_rect.x) * 0.5 + 0.5;"
+		"			float S = 2.0 * tube_params.y;"
+		"			vec4 box = bodyLoop(uv, v_loop);"
+		// ids a thousand apart: the fragment test is an absolute tolerance,
+		// and the sliver of a spanning triangle that passes it next to a
+		// vertex shrinks with the gap between ids — at 1 it was a visible
+		// string of dots along the band edges
+		"			v_loop *= 1000.0;"
+		"			vec3 b = bodyFetch(body_pos, uv, box);"
+		"			vec3 n = normalize(bodyFetch(body_nrm, uv, box));"
+		"			vec3 w = vec3(S * b.x, S * b.z, S * b.y) + vec3(n.x, n.z, n.y) * l.z;"
+		"			p = tube_local_to_clip * vec4(mix(l, w, body_curl), 1.0);"
+		"		} else {"
 		"		float R = tube_params.x;"
 		"		float th = l.y / R;"
 		// radial distance from the tube axis; the floor keeps terrain taller
@@ -682,6 +820,7 @@ void renderInit(render_ctx_t &ctx, void *) {
 		"		float hs = sin(0.5 * th);"
 		"		vec3 w = vec3(l.x, rho * sin(th), 2.0 * R * hs * hs + ze * cos(th));"
 		"		p = tube_local_to_clip * vec4(w, 1.0);"
+		"		}"
 		"	} else {"
 		"		v_rect = vec2(0.0);"
 		"		p = transform * vec4(position, 1.0);"
@@ -700,7 +839,11 @@ void renderInit(render_ctx_t &ctx, void *) {
 		"uniform sampler2D tex;"
 		"uniform bool debug_lod;"
 		"uniform bool tube_on;"
+		"uniform mediump int tube_pass;"
+		"uniform bool body_on;"
 		"in vec2 v_texcoords;"
+		"in float v_loop;"
+		"in vec3 v_local;"
 		"in float v_stale;"
 		"in float v_mask;"
 		"in vec2 v_rect;"
@@ -708,8 +851,24 @@ void renderInit(render_ctx_t &ctx, void *) {
 		"void main() {"
 		"	if (v_mask < 0.004) discard;"
 		// tube mode: clip the slab to the drawn rectangle, so tiles straddling
-		// the edge (and geometry rolled past the seam) end cleanly
-		"	if (tube_on && (abs(v_rect.x) > 1.0 || abs(v_rect.y) > 1.0)) discard;"
+		// the edge (and geometry rolled past the seam) end cleanly. the flat
+		// pass keeps the other side, the land around; and the rect itself,
+		// the ground the sheet lifted off, it paints near-black — a facet
+		// normal from the screen-space slope of the rect-local position,
+		// catching a little of a fixed light so the relief still reads
+		"	if (tube_on) {"
+		"		bool inside = abs(v_rect.x) <= 1.0 && abs(v_rect.y) <= 1.0;"
+		"		if (tube_pass == 2 && inside) {"
+		"			vec3 n = normalize(cross(dFdx(v_local), dFdy(v_local)));"
+		"			float lit = abs(dot(n, normalize(vec3(0.4, 0.3, 1.0))));"
+		"			frag_color = vec4(vec3(0.012) + 0.05 * lit, 1.0);"
+		"			return;"
+		"		}"
+		"		if (tube_pass != 2 && !inside) discard;"
+		// a triangle spanning two of the figure's loops: its loop id
+		// interpolates to a fraction somewhere inside it
+		"		if (body_on && tube_pass == 1 && abs(v_loop - 1000.0 * floor(v_loop / 1000.0 + 0.5)) > 0.5) discard;"
+		"	}"
 		"	vec3 c = texture(tex, v_texcoords).rgb;"
 		"	if (debug_lod) c = mix(c, vec3(1.0, 0.0, 0.0), v_stale * 0.5);"
 		"	frag_color = vec4(c, 1.0);"
@@ -721,6 +880,13 @@ void renderInit(render_ctx_t &ctx, void *) {
 	ctx.tube_mesh_to_local_loc = glGetUniformLocation(ctx.program, "tube_mesh_to_local");
 	ctx.tube_local_to_clip_loc = glGetUniformLocation(ctx.program, "tube_local_to_clip");
 	ctx.tube_params_loc = glGetUniformLocation(ctx.program, "tube_params");
+	ctx.tube_pass_loc = glGetUniformLocation(ctx.program, "tube_pass");
+	ctx.body_on_loc = glGetUniformLocation(ctx.program, "body_on");
+	ctx.body_curl_loc = glGetUniformLocation(ctx.program, "body_curl");
+	ctx.body_bands_loc = glGetUniformLocation(ctx.program, "body_bands");
+	ctx.body_size_loc = glGetUniformLocation(ctx.program, "body_size");
+	ctx.body_pos_loc = glGetUniformLocation(ctx.program, "body_pos");
+	ctx.body_nrm_loc = glGetUniformLocation(ctx.program, "body_nrm");
 	ctx.uv_offset_loc = glGetUniformLocation(ctx.program, "uv_offset");
 	ctx.uv_scale_loc = glGetUniformLocation(ctx.program, "uv_scale");
 	ctx.octant_mask_loc = glGetUniformLocation(ctx.program, "octant_mask");
