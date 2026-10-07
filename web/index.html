@@ -464,7 +464,14 @@
       };
     } catch (e) { settled = true; console.warn('idb: open threw', e); res(null); }
   });
+  // ?idb=0: run without the tile cache at all (profiling — what the cache
+  // itself costs against the network)
+  const IDB_OFF = new URLSearchParams(location.search).get('idb') === '0';
+  // ?idb=ro: look tiles up but never write them (profiling — how much of the
+  // cache's cost is the writes queueing in front of the reads)
+  const IDB_RO = new URLSearchParams(location.search).get('idb') === 'ro';
   const idbGet = (key, store = 'tiles') => new Promise((res) => {
+    if (IDB_OFF) { res(undefined); return; }
     try {
       const t = db.transaction(store).objectStore(store).get(key);
       t.onsuccess = () => res(t.result);
@@ -622,7 +629,8 @@
       tileMeta.set(path, { n, t: now, w: now });
       tileBytes += n;
     }
-    idbPut(path, { n, t: now }, 'tilemeta');
+    metaQueue.set(path, { n, t: now });
+    scheduleFlush();
   };
 
   // delete the tiles the bookkeeping doesn't know about — everything written
@@ -681,14 +689,43 @@
     sizeTileBudget();
   };
 
-  // the tile write, with the accounting and the quota escape hatch attached
-  const putTile = (path, bytes) => {
-    if (!db) return;
+  // --- batched tile i/o -----------------------------------------------------
+  // indexeddb runs transactions on a store in the order they were created,
+  // and a lookup can't start while a write ahead of it holds the store. one
+  // readwrite transaction per downloaded tile (and another for its meta
+  // record) put thousands of them in front of the lookups a settling view
+  // issues, and the queue grew faster than it drained: lookups that took
+  // 100 ms at the start took two seconds a minute in, and every one of the
+  // engine's download slots was spent waiting in it. measured on the toronto
+  // horizon view (tools/loadprof.mjs): 60–90 s to settle with the cache,
+  // 8 s without it. so writes are collected and committed a few hundred ms
+  // at a time in one transaction, with relaxed durability (no fsync per
+  // commit — a lost tile re-downloads), and the lookups a frame issues go
+  // out together in one readonly transaction
+  const FLUSH_MS = 300;
+  let tileQueue = new Map(), metaQueue = new Map(), flushTimer = null;
+  const scheduleFlush = () => {
+    if (!flushTimer) flushTimer = setTimeout(flushWrites, FLUSH_MS);
+  };
+  const flushWrites = () => {
+    flushTimer = null;
+    if (!tileQueue.size && !metaQueue.size) return;
+    if (!db) {
+      // no connection yet (or none at all): keep the metas, they're small,
+      // but don't let the tiles pile up forever
+      if (tileQueue.size > 256) tileQueue.clear();
+      scheduleFlush();
+      return;
+    }
+    const tiles = tileQueue, metas = metaQueue;
+    tileQueue = new Map(); metaQueue = new Map();
     try {
-      const tx = db.transaction('tiles', 'readwrite');
-      tx.objectStore('tiles').put(bytes, path);
+      const tx = db.transaction(['tiles', 'tilemeta'], 'readwrite', { durability: 'relaxed' });
+      const ts = tx.objectStore('tiles'), ms = tx.objectStore('tilemeta');
+      for (const [path, bytes] of tiles) ts.put(bytes, path);
+      for (const [path, rec] of metas) ms.put(rec, path);
       tx.oncomplete = () => {
-        noteTileUse(path, bytes.length);
+        for (const [path, bytes] of tiles) noteTileUse(path, bytes.length);
         if (tileBytes > tileBudget) evictTiles(false);
       };
       tx.onabort = () => {
@@ -702,6 +739,35 @@
         if (!purging) evictTiles(true);
       };
     } catch (e) {}
+  };
+  // the tile write, with the accounting and the quota escape hatch attached
+  const putTile = (path, bytes) => {
+    if (IDB_OFF || IDB_RO) return;
+    tileQueue.set(path, bytes);
+    scheduleFlush();
+  };
+  // every lookup issued in the same task — the engine schedules a frame's
+  // downloads in one go — is answered from one readonly transaction
+  let readQueue = [];
+  const getTile = (path) => new Promise((res) => {
+    if (IDB_OFF) { res(undefined); return; }
+    // downloaded but not yet committed: no need to ask the store
+    const queued = tileQueue.get(path);
+    if (queued) { res(queued); return; }
+    if (!readQueue.length) queueMicrotask(flushReads);
+    readQueue.push({ path, res });
+  });
+  const flushReads = () => {
+    const batch = readQueue;
+    readQueue = [];
+    try {
+      const st = db.transaction('tiles').objectStore('tiles');
+      for (const r of batch) {
+        const rq = st.get(r.path);
+        rq.onsuccess = () => r.res(rq.result);
+        rq.onerror = () => r.res(undefined);
+      }
+    } catch (e) { for (const r of batch) r.res(undefined); }
   };
 
   const clearTiles = () => new Promise((res) => {
@@ -758,6 +824,9 @@
     // nodes separately and a bulk gates a whole subtree, so when a deep zoom
     // is slow the question is which of these two queues a bulk is sitting in
     kinds: {},
+    // ?fetchtrace: one record per request — when it was issued, when the
+    // cache answered, when the network did, when it was handed to the engine
+    trace: new URLSearchParams(location.search).has('fetchtrace') ? [] : null,
   };
   // 'B' bulk metadata, 'N' node data, 'P' the planetoid header
   const statKind = (path) => {
@@ -772,9 +841,12 @@
     const k = statKind(path);
     k.n++;
     k.inflight++;
+    const tr = stats.trace ? { p: path, t0, idb: 0, net: 0, done: 0, n: 0 } : null;
+    if (tr) stats.trace.push(tr);
     try {
-      let bytes = path[0] !== 'P' ? await idbGet(path) : undefined;
+      let bytes = path[0] !== 'P' ? await getTile(path) : undefined;
       k.idbMs += performance.now() - t0;
+      if (tr) tr.idb = performance.now();
       // a hit is a use: it moves the tile to the young end of the lru, and
       // re-registers one whose bookkeeping went missing (a meta write that
       // failed, or a store carried over from before the budget existed)
@@ -785,11 +857,13 @@
         if (!resp.ok) throw new Error('http ' + resp.status);
         bytes = new Uint8Array(await resp.arrayBuffer());
         k.netMs += performance.now() - t1;
+        if (tr) tr.net = performance.now();
         stats.netHits++;
         k.net++;
         if (path[0] !== 'P') putTile(path, bytes);
       }
       stats.delivered++;
+      if (tr) { tr.n = bytes.length; tr.done = performance.now(); }
       Module.deliverFetch(id, true, bytes);
     } catch (e) {
       stats.failed++;
@@ -4031,7 +4105,9 @@
   let last = performance.now();
   let frameCount = 0;
   let pendingShot = null; // runs at the end of the next frame, once (shots)
+  const frameTiming = { engineMs: 0, tickMs: 0, gapMs: 0, lastTick: 0 };
   const tick = (now) => {
+    const tTick0 = performance.now();
     const dt = TEST ? TEST.dt : Math.min(100, now - last);
     last = now;
     refreshKeys(now);
@@ -4143,7 +4219,13 @@
       slow, !!keys.Space, gain, dt);
     yaw = 0;
     pitch = 0;
+    // wall-clock accounting for the load profiler (tools/loadprof.mjs):
+    // time inside the engine's frame, the whole tick, and the gap since the
+    // last one. the engine's own section timer can't see a stalled main
+    // thread; this can
+    const tFrame0 = performance.now();
     view.frame(dt);
+    frameTiming.engineMs += performance.now() - tFrame0;
 
     if (view.ready() && posed) {
       // stage 2+3 of the tube pipeline: the engine locks ground level as
@@ -4229,6 +4311,9 @@
     }
     refreshRoll();
     frameCount++;
+    frameTiming.tickMs += performance.now() - tTick0;
+    if (frameTiming.lastTick) frameTiming.gapMs += tTick0 - frameTiming.lastTick;
+    frameTiming.lastTick = tTick0;
     // a capture has to read the canvas in the same task that drew it: the
     // context is created without preserveDrawingBuffer, so the backbuffer is
     // undefined once the browser composites the frame
@@ -4400,6 +4485,16 @@
   window.__test = {
     stats: () => view.ready() ? view.getStats() : null,
     drawnNodes: () => view.ready() ? view.getDrawnNodes() : [],
+    pendingNodes: () => view.ready() ? view.getPendingNodes() : [],
+    // wall-clock ms accumulated by the tick loop since the last call: inside
+    // view.frame, in the whole tick, and between ticks
+    frameTiming: () => {
+      const r = { engineMs: frameTiming.engineMs, tickMs: frameTiming.tickMs, gapMs: frameTiming.gapMs, frames: frameCount };
+      frameTiming.engineMs = frameTiming.tickMs = frameTiming.gapMs = 0;
+      return r;
+    },
+    // the page's own fetch counters (window.__stats), for the load profiler
+    fetchStats: () => JSON.parse(JSON.stringify(window.__stats)),
     frameCount: () => frameCount,
     // shimmer measurement (tools/shimmer.mjs) drives these: toggle the texture
     // filtering, then move the camera a fixed sub-degree amount and see how

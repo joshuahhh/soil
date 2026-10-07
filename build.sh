@@ -26,7 +26,11 @@ mkdir -p web
 cp coi-serviceworker.js web/
 # em++, not emcc: from emscripten 6 emcc no longer links libc++ just because
 # the input is a .cpp, and the link fails on ostream/locale symbols
+# EARTH_PROFILE=1 keeps function names in the wasm, so a browser cpu profile
+# (tools/loadprof.mjs --cpuprofile) names the engine's functions instead of
+# showing wasm-function[1234]. a little bigger, so not the default
 em++ earth_web.cpp -O2 -std=c++17 -Wno-deprecated-declarations -I. -Ideps/eigen \
+	${EARTH_PROFILE:+--profiling-funcs} \
 	-I$EMSCRIPTEN_PROTOBUF_SRC $EMSCRIPTEN_PROTOBUF_LIB crn/crn.o \
 	-DEARTH_WEBLIB \
 	-s MALLOC=mimalloc -Wno-pthreads-mem-growth \

@@ -313,7 +313,42 @@ struct EarthView {
 		o.set("nodesLoaded", earth.stat_nodes_loaded);
 		o.set("nodesDrawn", (int)earth.drawn_nodes.size());
 		o.set("sceneComplete", earth.scene_complete);
+		// the rest of the download picture (the 2s "tiles:" console line)
+		o.set("nodesStub", earth.stat_nodes_stub);
+		o.set("nodesInflight", (int)earth.nodes_in_flight);
+		o.set("nodesStuck", earth.stat_nodes_stuck);
+		o.set("nodesFailed", earth.stat_nodes_failed);
+		o.set("maxLevel", earth.stat_max_level);
+		o.set("bulksBlocked", earth.stat_bulk_blocked);
+		o.set("bulksInflight", (int)earth.bulks_in_flight);
+		o.set("bulksStarted", earth.stat_bulks_started);
+		// per-frame averages since the last call (see frame)
+		o.set("frameMs", acc_frames ? acc_frame_ms / acc_frames : 0.0);
+		o.set("beginMs", acc_frames ? acc_begin_ms / acc_frames : 0.0);
+		acc_begin_ms = acc_frame_ms = 0; acc_frames = 0;
 		return o;
+	}
+
+	// what the last walk wanted and does not have: path, download state
+	// (1 stub, 2 downloading), failures so far, distance from the eye (m),
+	// resolution, and how long it has been wanted (ms). the load profiler
+	// (tools/loadprof.mjs) reads this to say what a slow view is waiting on
+	val getPendingNodes() {
+		auto now = earth_core_t::ticksMs();
+		val arr = val::array();
+		int i = 0;
+		for (auto &p : earth.pending_nodes) {
+			val o = val::object();
+			o.set("path", p.path);
+			o.set("level", (int)p.path.size());
+			o.set("state", p.state);
+			o.set("fails", p.fails);
+			o.set("dist", p.dist);
+			o.set("mpt", (double)p.mpt);
+			o.set("waitMs", now - p.wanted_ms);
+			arr.set(i++, o);
+		}
+		return arr;
 	}
 
 	// the set of nodes the last walk actually drew, with the octant mask each
@@ -323,17 +358,36 @@ struct EarthView {
 	// is immune to gpu-dependent dxt decoding. sorted by path so the list is
 	// stable across runs (drawn_nodes' order follows hash-map iteration)
 	val getDrawnNodes() {
-		std::vector<std::pair<std::string, uint8_t>> rows;
+		struct row_t { std::string path; uint8_t mask; double dist, min_alt, max_alt; };
+		std::vector<row_t> rows;
 		rows.reserve(earth.drawn_nodes.size());
-		for (auto &kv : earth.drawn_nodes)
-			rows.push_back({ kv.first->request.node_key().path(), kv.second });
-		std::sort(rows.begin(), rows.end());
+		for (auto &kv : earth.drawn_nodes) {
+			auto &obb = kv.first->obb;
+			// the obb's corners against the wgs84 ellipsoid: how far below
+			// and above it the tile's geometry reaches (the horizon cull's
+			// safety margin is measured from this)
+			double lo = INFINITY, hi = -INFINITY;
+			for (auto i = 0; i < 8; i++) {
+				Vector3d s(i & 1 ? obb.extents.x() : -obb.extents.x(),
+					i & 2 ? obb.extents.y() : -obb.extents.y(),
+					i & 4 ? obb.extents.z() : -obb.extents.z());
+				Vector3d c = obb.center + obb.orientation * s;
+				auto h = c.norm() - earth_core_t::ellipsoidRadiusAt(c);
+				lo = fmin(lo, h); hi = fmax(hi, h);
+			}
+			rows.push_back({ kv.first->request.node_key().path(), kv.second,
+				(obb.center - camera.eye).norm(), lo, hi });
+		}
+		std::sort(rows.begin(), rows.end(), [](const row_t &a, const row_t &b) { return a.path < b.path; });
 		val arr = val::array();
 		for (size_t i = 0; i < rows.size(); i++) {
 			val o = val::object();
-			o.set("path", rows[i].first);
-			o.set("level", (int)rows[i].first.size());
-			o.set("mask", (int)rows[i].second);
+			o.set("path", rows[i].path);
+			o.set("level", (int)rows[i].path.size());
+			o.set("mask", (int)rows[i].mask);
+			o.set("dist", rows[i].dist);
+			o.set("minAlt", rows[i].min_alt);
+			o.set("maxAlt", rows[i].max_alt);
 			arr.set((int)i, o);
 		}
 		return arr;
@@ -353,10 +407,19 @@ struct EarthView {
 		// when the view frustum culls them (see earth_core ground column)
 		earth.ground_column_on = terrain_follow && !camera.ortho && !camera.airplane;
 		earth.ground_column_point = camera.eye;
+		// the whole frame and its gl prologue, wall-clock: the engine's own
+		// sections cover the walk, scheduling, eviction and draw submission,
+		// and anything outside them (a clear that waits on the previous
+		// frame's swap, say) is what this is for
+		auto t0 = earth_core_t::ticksMs();
 		renderFrameBegin(ctx, nullptr, w, h, sky_color);
+		auto t1 = earth_core_t::ticksMs();
 		earth.updateAndDraw(ctx, camera, w, h, dt_ms);
 		renderFrameEnd(ctx);
+		auto t2 = earth_core_t::ticksMs();
+		acc_begin_ms += t1 - t0; acc_frame_ms += t2 - t0; acc_frames++;
 	}
+	double acc_begin_ms = 0, acc_frame_ms = 0; int acc_frames = 0;
 
 	// pose in degrees/meters, the vocabulary of 2d maps. roll is the
 	// airplane-frame bank angle (0 outside airplane mode) — not part of the
@@ -782,6 +845,7 @@ EMSCRIPTEN_BINDINGS(earth) {
 		.function("setMipmaps", &EarthView::setMipmaps)
 		.function("getStats", &EarthView::getStats)
 		.function("getDrawnNodes", &EarthView::getDrawnNodes)
+		.function("getPendingNodes", &EarthView::getPendingNodes)
 		.function("fly", &EarthView::fly);
 	emscripten::function("createView", &createView, emscripten::allow_raw_pointers());
 	emscripten::function("deliverFetch", &deliverFetch);

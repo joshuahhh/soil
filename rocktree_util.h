@@ -247,6 +247,8 @@ void getNode(NodeDataRequest req, rocktree_t::node_t *n, std::function<void(std:
 			cb(NULL);
 		} else {			
 			auto vec = std::vector<uint8_t>(data, data+len);
+			if (g_log_timing)
+				printf("timing: queued node %s at=%u\n", n->request.node_key().path().c_str(), timing_ms());
 
 			auto result = pool.enqueue([](auto n, auto cb, auto vec) {
 				auto t0 = timing_ms();

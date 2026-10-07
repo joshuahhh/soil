@@ -52,6 +52,22 @@ before last rather than as an error. That is a miserable thing to diagnose,
 which is why those two writes are now checked and report failure (console,
 plus `NOT SAVED` in the path panel).
 
+**Writes are batched, and that is load-bearing.** Indexeddb runs the
+transactions on a store in the order they were created, and a lookup cannot
+start while a write ahead of it holds the store. One readwrite transaction per
+downloaded tile (plus one for its meta record) put thousands of them in front
+of the lookups a settling view issues, and the queue grew faster than it
+drained: a lookup that took 100 ms at the start of a load took two seconds a
+minute in, every download slot was spent waiting in it, and a long session
+read as tiles that never arrive. Measured on a 7° horizon view over toronto
+(`tools/loadprof.mjs`, ~1850 tiles): 60–90 s to settle with the cache, 8 s
+with it bypassed. So downloaded tiles are collected and committed a few
+hundred ms at a time in one transaction with relaxed durability (no fsync per
+commit — a lost tile re-downloads), and the lookups a frame issues go out
+together in one readonly transaction. Same view, cache on: under 10 s cold,
+and a warm load serves every tile from the store. `?idb=0` bypasses the cache
+and `?idb=ro` looks up but never writes, for measuring it.
+
 Sizes can't be read back from indexeddb without reading the values, which is
 the thing being avoided, so each tile gets a small `tilemeta` record holding
 its size and last use. That's held in memory for the session and mirrored to
@@ -463,6 +479,72 @@ timing would need `EXT_disjoint_timer_query_webgl2`, which is WebGL2-only.
 
 `capture.mjs` records these into each shot's sidecar json, so the report shows
 them as reference→current alongside the images.
+
+#### Load profiler
+
+`node tools/loadprof.mjs` answers *"why is this view slow to finish?"* — a
+question a settled screenshot can't. It drives one pose headlessly and prints
+a timeline, twice a second, of what the engine wants, has, and has in flight,
+what the page's fetch layer is waiting on (cache lookup vs network, per kind),
+and the frame's wall-clock cost split by section; then, complete or timed out,
+the list of what the walk still wanted and didn't have, grouped by level and
+state with how long each had been waiting.
+
+```
+node tools/loadprof.mjs --session ~/path/to/session.json   # a ⌘C session blob's pose
+node tools/loadprof.mjs seattle-skyline                    # a shots.json entry
+node tools/loadprof.mjs --lat .. --lon .. --alt .. --heading .. --tilt .. --fov ..
+```
+
+`--noidb` bypasses the tile cache, `--roidb` looks up but never writes,
+`--warm` keeps a persistent browser profile (and a fixed port — the cache is
+keyed by origin) so the store carries over between runs, `--trace` records a
+per-tile timeline (issue → cache → network → engine → decode), and
+`--cpuprofile` samples the main thread with the devtools profiler and prints
+the functions with the most self time; build with `EARTH_PROFILE=1 ./build.sh`
+to see the engine's function names in it rather than `wasm-function[1234]`.
+`--q k=v` passes any page query parameter through.
+
+It runs in **full chrome in headless mode** (playwright's `channel:
+'chromium'`), not the headless shell the capture harness uses, and that is not
+a detail: the shell rasterises on the cpu with swiftshader, where a big
+multisampled frame blocks the main thread for hundreds of ms, and a blocked
+main thread starves the very fetch and indexeddb callbacks being measured. The
+first profile of the toronto view, taken on the shell, showed tiles arriving in
+bursts of 48 every fifteen seconds; the same page on the gpu, in the same
+process, showed the real problem (the cache's write queue, above). Full chrome
+drives the real gpu — Apple M-series Metal here — with no window.
+
+What the load of a view costs, measured with it:
+
+- the **cache's write backlog** was the whole story (above). Everything below
+  is second order next to it.
+- a horizon view at a narrow fov is **inherently big**: the 7° toronto pose
+  wants ~1850 tiles, 110 MB, because lod is by distance and every tile out to
+  the horizon is seen edge-on, drawn hundreds of texels tall into a pixel.
+  That's the standard rule and the one that keeps the horizontal resolution
+  right; it's just what the view asks for. On this connection it's bandwidth
+  bound at ~7 s.
+- **horizon culling** was letting through everything within 450 km *past* the
+  horizon: the occluder sphere sat 16 km under the datum. The meshes sit on the
+  datum sphere (not the ellipsoid — their altitudes against wgs84 track the
+  sphere's offset by latitude, +4.4 km at seattle) and no fine tile's box
+  reaches more than ~300 m under it, so it now sits 1.5 km under. The slack
+  still counts twice (the eye's horizon on the smaller sphere, then the depth
+  behind it), so terrain out to ~290 km still passes; a third of this view's
+  wanted tiles were beyond the horizon before, 7% fewer are wanted now, and
+  the drawn-node sets on the reference shots lose only far nodes with no
+  pixel change.
+- with the cache fixed the **main thread** is what's left: at 1300 drawn nodes
+  the walk was 4–10 ms a frame and draw submission 10+ ms, and a saturated
+  main thread starves fetch callbacks just as the cache did. The walk's
+  result is now kept between frames and reused while the camera, viewport and
+  tree are unchanged (`g_tree_epoch`), which takes it to zero for a camera
+  that sits still waiting for tiles. The per-node draw sequence went from 15
+  webgl calls to 11 (a vao per mesh, the octant masks as one int each, the
+  sampler unit set once, the mipmap filter re-sent only when the M key flips
+  it); what remains is dominated by the uniform uploads and the draw calls
+  themselves, which only batching across nodes would remove.
 
 #### Deploy
 

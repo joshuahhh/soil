@@ -21,7 +21,10 @@ const TYPES = {
   '.css': 'text/css', '.map': 'application/json',
 };
 
-export async function serveWeb() {
+// port 0 (the default) is an ephemeral one, which means a different origin —
+// and a different indexeddb — every run; a caller that wants the tile cache
+// to carry over between runs passes a fixed one
+export async function serveWeb({ port = 0 } = {}) {
   const server = http.createServer(async (req, res) => {
     const rel = decodeURIComponent(new URL(req.url, 'http://x').pathname);
     const file = path.join(WEB, rel === '/' ? 'index.html' : rel);
@@ -41,6 +44,6 @@ export async function serveWeb() {
       res.writeHead(404).end('not found');
     }
   });
-  await new Promise((r) => server.listen(0, '127.0.0.1', r));
+  await new Promise((r) => server.listen(port, '127.0.0.1', r));
   return { base: `http://127.0.0.1:${server.address().port}`, close: () => server.close() };
 }

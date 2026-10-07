@@ -95,8 +95,15 @@ void meshTexImage2d(const rocktree_t::node_t::mesh_t &mesh) {
 	}	
 }
 
-void bufferMesh(rocktree_t::node_t::mesh_t &mesh) {
+void bufferMesh(rocktree_t::node_t::mesh_t &mesh, const gl_ctx_t &ctx) {
 	if (mesh.buffered) fprintf(stderr, "mesh already buffered\n"), abort();
+
+	// this runs mid-draw, with the last drawn mesh's vao still bound, and
+	// the element buffer binding is vao state: uploading the index buffers
+	// below with that vao bound rewrote *its* binding, so that tile drew one
+	// frame with this tile's indices — a flash of sky through the terrain
+	// every time a tile arrived
+	glBindVertexArray(0);
 
 	glGenBuffers(1, &mesh.vertex_buffer);
 	glBindBuffer(GL_ARRAY_BUFFER, mesh.vertex_buffer);
@@ -107,6 +114,27 @@ void bufferMesh(rocktree_t::node_t::mesh_t &mesh) {
 	glGenBuffers(1, &mesh.boundary_index_buffer);
 	glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, mesh.boundary_index_buffer);
 	glBufferData(GL_ELEMENT_ARRAY_BUFFER, mesh.boundary_indices.size() * sizeof(unsigned short), mesh.boundary_indices.data(), GL_STATIC_DRAW);
+
+	// the vertex setup, recorded once here rather than re-issued per draw:
+	// a settled horizon view draws well over a thousand nodes a frame, and
+	// at that count the per-node bind sequence is what the frame costs on
+	// the main thread (webgl calls are not cheap, and a busy main thread is
+	// what starves the tile fetches). a vao holds the attribute pointers
+	// and the element buffer binding, so a draw is one bind and one call.
+	// (a second vao for the crack-fill lines, over the same vertices, drew
+	// garbage — streaks across the sky — so the lines swap the element
+	// buffer in this one instead; see bindAndDrawMesh)
+	glGenVertexArrays(1, &mesh.vao);
+	glBindVertexArray(mesh.vao);
+	glBindBuffer(GL_ARRAY_BUFFER, mesh.vertex_buffer);
+	glEnableVertexAttribArray(ctx.position_loc);
+	glEnableVertexAttribArray(ctx.octant_loc);
+	glEnableVertexAttribArray(ctx.texcoords_loc);
+	glVertexAttribPointer(ctx.position_loc, 3, GL_UNSIGNED_BYTE, GL_FALSE, 8, (void*)0);
+	glVertexAttribPointer(ctx.octant_loc, 1, GL_UNSIGNED_BYTE, GL_FALSE, 8, (void*)3);
+	glVertexAttribPointer(ctx.texcoords_loc, 2, GL_UNSIGNED_SHORT, GL_FALSE, 8, (void*)4);
+	glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, mesh.index_buffer);
+	glBindVertexArray(0);
 
 	glGenTextures(1, &mesh.texture_buffer);
 	glBindTexture(GL_TEXTURE_2D, mesh.texture_buffer);
@@ -132,7 +160,9 @@ void bufferMesh(rocktree_t::node_t::mesh_t &mesh) {
 	// 200/200 tiles jpeg, rainier 137/250, seattle 111/250, manhattan 24/100
 	if (mesh.texture_format == rocktree_t::texture_format_rgb) {
 		glGenerateMipmap(GL_TEXTURE_2D);
-		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER,
+			texture_mipmaps_on ? GL_LINEAR_MIPMAP_LINEAR : GL_LINEAR);
+		mesh.mips_on = texture_mipmaps_on;
 		// trilinear alone picks its level from the *worst* axis, so it fixes
 		// the aliasing by blurring the other one; anisotropy is what keeps a
 		// grazing-angle tile sharp along its uncompressed axis
@@ -145,34 +175,23 @@ void bufferMesh(rocktree_t::node_t::mesh_t &mesh) {
 	mesh.buffered = true;
 }
 
-void bindAndDrawMesh(const rocktree_t::node_t::mesh_t &mesh, uint8_t octant_mask, uint8_t stale_mask, const gl_ctx_t &ctx) {
+void bindAndDrawMesh(rocktree_t::node_t::mesh_t &mesh, uint8_t octant_mask, uint8_t stale_mask, const gl_ctx_t &ctx) {
 	glUniform2fv(ctx.uv_offset_loc, 1, mesh.uv_offset.data());
 	glUniform2fv(ctx.uv_scale_loc, 1, mesh.uv_scale.data());
-	int v[8] = {
-		(octant_mask >> 0) & 1, (octant_mask >> 1) & 1, (octant_mask >> 2) & 1, (octant_mask >> 3) & 1,
-		(octant_mask >> 4) & 1, (octant_mask >> 5) & 1, (octant_mask >> 6) & 1, (octant_mask >> 7) & 1
-	};
-	glUniform1iv(ctx.octant_mask_loc, 8, v);
-	int s[8] = {
-		(stale_mask >> 0) & 1, (stale_mask >> 1) & 1, (stale_mask >> 2) & 1, (stale_mask >> 3) & 1,
-		(stale_mask >> 4) & 1, (stale_mask >> 5) & 1, (stale_mask >> 6) & 1, (stale_mask >> 7) & 1
-	};
-	glUniform1iv(ctx.stale_mask_loc, 8, s);
-	glUniform1i(ctx.texture_loc, 0);
+	// the masks go up as the bytes they are; the shader picks the bit
+	glUniform1i(ctx.octant_mask_loc, octant_mask);
+	glUniform1i(ctx.stale_mask_loc, stale_mask);
 	glBindTexture(GL_TEXTURE_2D, mesh.texture_buffer);
-	// per-draw rather than at upload so the M key can A/B it on a live scene:
-	// the temporal difference (shimmer as the camera moves) is the whole point
-	// and a still frame barely shows it
-	if (mesh.texture_format == rocktree_t::texture_format_rgb)
+	// the M key flips texture_mipmaps_on live so it can be A/B'd on a scene
+	// (the temporal difference, shimmer as the camera moves, is the whole
+	// point and a still frame barely shows it); the parameter follows it on
+	// the next draw of each tile, and is otherwise left alone
+	if (mesh.texture_format == rocktree_t::texture_format_rgb && mesh.mips_on != texture_mipmaps_on) {
 		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER,
 			texture_mipmaps_on ? GL_LINEAR_MIPMAP_LINEAR : GL_LINEAR);
-	glBindBuffer(GL_ARRAY_BUFFER, mesh.vertex_buffer);
-	
-	glVertexAttribPointer(ctx.position_loc, 3, GL_UNSIGNED_BYTE, GL_FALSE, 8, (void*)0);
-	glVertexAttribPointer(ctx.octant_loc, 1, GL_UNSIGNED_BYTE, GL_FALSE, 8, (void*)3);
-	glVertexAttribPointer(ctx.texcoords_loc, 2, GL_UNSIGNED_SHORT, GL_FALSE, 8, (void*)4);
-	
-	glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, mesh.index_buffer);
+		mesh.mips_on = texture_mipmaps_on;
+	}
+	glBindVertexArray(mesh.vao);
 	glDrawElements(GL_TRIANGLE_STRIP, mesh.indices.size(), GL_UNSIGNED_SHORT, NULL);
 
 	// crack fill: re-draw the mesh's boundary edges as lines. in the slit
@@ -180,8 +199,10 @@ void bindAndDrawMesh(const rocktree_t::node_t::mesh_t &mesh, uint8_t octant_mask
 	// depth test there and nowhere else
 	static const bool no_lines_debug = getenv("EARTH_NO_LINES") != nullptr;
 	if (!no_lines_debug && mesh.boundary_indices.size()) {
+		// the vao's element binding, swapped for the lines and put back
 		glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, mesh.boundary_index_buffer);
 		glDrawElements(GL_LINES, mesh.boundary_indices.size(), GL_UNSIGNED_SHORT, NULL);
+		glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, mesh.index_buffer);
 	}
 }
 
@@ -190,6 +211,7 @@ void unbufferMesh(rocktree_t::node_t::mesh_t &mesh) {
 
 	mesh.buffered = false;
 	
+	glDeleteVertexArrays(1, &mesh.vao);
 	glDeleteTextures(1, &mesh.texture_buffer); // auto: glBindTexture(GL_TEXTURE_2D, 0);
 	glDeleteBuffers(1, &mesh.index_buffer); // auto: glBindBuffer(GL_ARRAY_BUFFER, 0);
 	glDeleteBuffers(1, &mesh.boundary_index_buffer);
@@ -727,8 +749,9 @@ void renderInit(render_ctx_t &ctx, void *) {
 		"uniform highp sampler2D body_nrm;"
 		"uniform vec2 uv_offset;"
 		"uniform vec2 uv_scale;"
-		"uniform bool octant_mask[8];"
-		"uniform bool stale_mask[8];"
+		// one bit per octant, in the byte the engine keeps them in
+		"uniform int octant_mask;"
+		"uniform int stale_mask;"
 		"in vec3 position;"
 		"in float octant;"
 		"in vec2 texcoords;"
@@ -780,9 +803,9 @@ void renderInit(render_ctx_t &ctx, void *) {
 		// and opening hairline cracks the finer tile never covers; instead
 		// they are drawn, with masked vertices pushed slightly away in depth
 		// so the finer tile wins wherever they overlap it
-		"	float mask = octant_mask[int(octant)] ? 0.0 : 1.0;"
+		"	float mask = ((octant_mask >> int(octant)) & 1) != 0 ? 0.0 : 1.0;"
 		"	v_mask = mask;"
-		"	v_stale = stale_mask[int(octant)] ? 1.0 : 0.0;"
+		"	v_stale = ((stale_mask >> int(octant)) & 1) != 0 ? 1.0 : 0.0;"
 		"	v_texcoords = (texcoords + uv_offset) * uv_scale;"
 		"	v_loop = 0.0;"
 		"	v_local = vec3(0.0);"
@@ -897,11 +920,10 @@ void renderInit(render_ctx_t &ctx, void *) {
 	ctx.octant_loc = glGetAttribLocation(ctx.program, "octant");
 	ctx.texcoords_loc = glGetAttribLocation(ctx.program, "texcoords");
 
-	glEnableVertexAttribArray(ctx.position_loc);
-	glEnableVertexAttribArray(ctx.octant_loc);
-	glEnableVertexAttribArray(ctx.texcoords_loc);
+	// (the attribute arrays are enabled per mesh, in its vao — bufferMesh)
 
 	renderPathInit(ctx);
 	renderDofInit(ctx);
 	glUseProgram(ctx.program); // the overlay inits left their own programs current
+	glUniform1i(ctx.texture_loc, 0); // the terrain textures live on unit 0, always
 }

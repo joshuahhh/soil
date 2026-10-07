@@ -446,6 +446,43 @@ struct earth_core_t {
 	// updateAndDraw (shells are single-threaded around the frame loop)
 	std::vector<std::pair<rocktree_t::node_t*, uint8_t>> drawn_nodes;
 
+	// the nodes the last walk wanted and does not have, with why: for the
+	// load profiler (tools/loadprof.mjs, EarthView::getPendingNodes) to say
+	// what a view that won't finish is actually waiting on
+	struct pending_t { std::string path; int state; int fails; double dist; float mpt; double wanted_ms; };
+	std::vector<pending_t> pending_nodes;
+	double last_walk_ms = 0;
+
+	// the walk's results, kept between frames. the walk is a few ms a frame
+	// in a heavy view and its inputs rarely change: a camera waiting for
+	// tiles sits still, and the tree only changes shape when a bulk lands.
+	// so the result is reused until something it depends on moves — the
+	// view, the viewport, the lod scale, or the tree (g_tree_epoch) — and a
+	// reused frame only re-stamps what it wants, so eviction and the bulk
+	// purge still see it. not in tube or tunnel mode, whose selection has
+	// inputs of its own (the rect, the curl, the ground lock) that move
+	// every frame anyway
+	// potential_nodes is in bfs level order, so iterating it backwards
+	// visits children before parents (the order the draw loop's octant
+	// masking needs)
+	std::vector<std::pair<std::string, rocktree_t::node_t *>> potential_nodes;
+	// tube mode only: per-entry keep priority, parallel to potential_nodes
+	// — how far past its lod target a node was requested (r over the
+	// required texels-per-meter). the floor and ground-column nodes carry
+	// effectively-infinite want. used by the node-budget backstop to shed
+	// the least-wanted additions first
+	std::vector<double> potential_want;
+	struct bulk_candidate_t { double priority; size_t level; rocktree_t::bulk_t *bulk; };
+	std::vector<bulk_candidate_t> to_download_bulks; // the stub bulks the walk ran into
+	std::vector<rocktree_t::bulk_t *> walk_bulks; // every bulk the walk stamped as wanted
+	int walk_bulk_count = 0, walk_bulk_blocked = 0;
+	bool walk_cache_valid = false;
+	Matrix4d walk_key_vp = Matrix4d::Zero();
+	Vector3d walk_key_eye = Vector3d::Zero();
+	int walk_key_w = 0, walk_key_h = 0, walk_key_epoch = -1;
+	double walk_key_lod = 0;
+	bool walk_key_column = false;
+
 	// per-section frame timing and bfs work counters, reported every 2s
 	double sec_bfs = 0, sec_dl = 0, sec_evict = 0, sec_draw = 0;
 	long cnt_oct = 0, cnt_cull = 0, cnt_lod = 0;
@@ -488,6 +525,17 @@ struct earth_core_t {
 
 	// --- picking --------------------------------------------------------
 
+	// the wgs84 ellipsoid's geocentric radius in the direction of p (the
+	// meshes are ecef on wgs84; the planetoid's single radius is a sphere
+	// that runs 7 km above it at the equator and 14 km below it at the poles)
+	static double ellipsoidRadiusAt(const Vector3d &p) {
+		const double a = 6378137.0, b = 6356752.314245;
+		auto r2 = p.squaredNorm();
+		if (r2 < 1e-12) return a;
+		auto sin2 = p.z() * p.z() / r2, cos2 = 1.0 - sin2;
+		return sqrt((a * a * a * a * cos2 + b * b * b * b * sin2) / (a * a * cos2 + b * b * sin2));
+	}
+
 	// horizon culling: is p hidden from eye behind the occluder sphere of
 	// radius r_occ (centered on the planet)? true when the segment eye->p
 	// dips inside the sphere, or p itself is under it
@@ -505,11 +553,19 @@ struct earth_core_t {
 	// coarse far-side meshes are simplified so crudely that they bulge tens
 	// of km out of their true surface and would otherwise poke through the
 	// near side's fine terrain and win the depth test (mostly-ocean quarter
-	// -planet blobs painting sea over europe). conservative: the occluder
-	// sits ~16km under the sphere datum, below the ellipsoid plus any
-	// terrain, so nothing actually visible can be culled
+	// -planet blobs painting sea over europe). it is also what bounds a
+	// horizon view: the frustum reaches 400 km (everest's horizon past the
+	// viewer's own), and everything in it that is below the horizon is
+	// wanted, fetched and drawn for nothing unless this says otherwise.
+	// the meshes sit on the datum sphere (not the ellipsoid: measured
+	// against wgs84 their altitudes track the sphere's offset by latitude,
+	// +4.4 km at seattle, +3.2 km at toronto), and no fine tile's box
+	// reaches more than ~300 m under it (the dead sea is -430 m), so the
+	// occluder sits 1.5 km under the datum. it used to sit 16 km under,
+	// which let through everything within 450 km *past* the horizon: on the
+	// toronto view, a third of the wanted tiles
 	static bool obbOccluded(const Vector3d &eye, const OrientedBoundingBox &obb, double planet_radius) {
-		auto r_occ = planet_radius - 16000.0;
+		auto r_occ = planet_radius - 1500.0;
 		auto r_occ2 = r_occ * r_occ;
 		for (auto i = 0; i < 8; i++) {
 			Vector3d s(i & 1 ? obb.extents.x() : -obb.extents.x(),
@@ -1055,31 +1111,42 @@ struct earth_core_t {
 		const std::string octs[] = { "0", "1", "2", "3", "4", "5", "6", "7" };
 		std::vector<std::pair<std::string, rocktree_t::bulk_t *>> valid = { std::make_pair("", current_bulk) };
 		decltype(valid) next_valid;
-		// filled in bfs level order, so iterating it backwards visits children
-		// before parents (the order the draw loop's octant masking needs)
-		std::vector<std::pair<std::string, rocktree_t::node_t *>> potential_nodes;
-		// tube mode only: per-entry keep priority, parallel to potential_nodes
-		// and next_valid — how far past its lod target a node was requested
-		// (r over the required texels-per-meter). the floor and ground-column
-		// nodes carry effectively-infinite want. used by the node-budget
-		// backstop to shed the least-wanted additions first
-		std::vector<double> potential_want, next_want;
+		std::vector<double> next_want; // tube mode: potential_want's counterpart for next_valid
 
 		// downloaded nodes and bulk metadata are both lru caches with byte
 		// quotas (see the eviction sweep below); nothing is ever dropped on
 		// a clock
 		auto now_ms = ticksMs();
+		auto prev_walk_ms = last_walk_ms;
+		last_walk_ms = now_ms;
 
 		// wanted bulks/nodes are marked by stamping last_wanted_ms with this
 		// frame's time during the walk; membership tests elsewhere (eviction,
 		// bulk purge) compare against the stamp instead of consulting a map
 		auto potential_bulk_count = 0;
+		bool all_loaded = true;
+
+		// is last frame's walk still the answer? (see the members)
+		auto epoch = g_tree_epoch.load();
+		auto cacheable = !tube_on && !tunnel_on;
+		auto reuse = cacheable && walk_cache_valid && walk_key_epoch == epoch
+			&& walk_key_w == width && walk_key_h == height && walk_key_lod == lod_scale
+			&& walk_key_column == ground_column_on && walk_key_eye == eye
+			&& walk_key_vp == viewprojection;
+		if (reuse) {
+			for (auto &kv : potential_nodes) kv.second->last_wanted_ms = now_ms;
+			for (auto b : walk_bulks) b->last_wanted_ms = now_ms;
+			potential_bulk_count = walk_bulk_count;
+			stat_bulk_blocked = walk_bulk_blocked;
+			if (walk_bulk_blocked) all_loaded = false;
+		} else {
+		potential_nodes.clear();
+		potential_want.clear();
+		to_download_bulks.clear();
+		walk_bulks.clear();
 		stat_bulk_blocked = 0; // counted over this frame's walk only
-		struct bulk_candidate_t { double priority; size_t level; rocktree_t::bulk_t *bulk; };
-		std::vector<bulk_candidate_t> to_download_bulks;
 
 		// node culling and level of detail using breadth-first search
-		bool all_loaded = true;
 		for (;;) {
 			auto level_pot_start = potential_nodes.size();
 			for(auto cur2 : valid) {
@@ -1093,6 +1160,7 @@ struct earth_core_t {
 					if (!has_bulk) continue;
 					auto b = bulk_kv->second.get();
 					b->last_wanted_ms = now_ms;
+					walk_bulks.push_back(b);
 					if (b->dl_state == dl_state_stub) {
 						// ranked and issued after the walk, like nodes. the
 						// yardstick is the node this bulk hangs under — the
@@ -1120,6 +1188,7 @@ struct earth_core_t {
 					bulk = b;
 				}
 				bulk->last_wanted_ms = now_ms;
+				walk_bulks.push_back(bulk);
 				potential_bulk_count++;
 
 				for(auto o : octs) {
@@ -1265,6 +1334,7 @@ struct earth_core_t {
 					if (tube_on) next_want.push_back(tube_want);
 
 					if (node->can_have_data) {
+						if (node->last_wanted_ms != prev_walk_ms) node->first_wanted_ms = now_ms;
 						node->last_wanted_ms = now_ms;
 						potential_nodes.emplace_back(std::move(nxt), node);
 						if (tube_on) potential_want.push_back(tube_want);
@@ -1318,6 +1388,14 @@ struct earth_core_t {
 			next_valid.clear();
 			next_want.clear();
 		}
+		walk_bulk_count = potential_bulk_count;
+		walk_bulk_blocked = stat_bulk_blocked;
+		walk_cache_valid = cacheable;
+		walk_key_epoch = epoch;
+		walk_key_w = width; walk_key_h = height; walk_key_lod = lod_scale;
+		walk_key_column = ground_column_on; walk_key_eye = eye;
+		walk_key_vp = viewprojection;
+		} // end of the walk
 		auto t1 = ticksMs();
 		sec_bfs += t1 - t0;
 
@@ -1356,6 +1434,8 @@ struct earth_core_t {
 			stat_bulks_started = 0;
 			for (auto &c : to_download_bulks) {
 				if (bulks_in_flight >= max_bulks_in_flight) break;
+				// (a reused walk's candidates include ones already requested)
+				if (c.bulk->dl_state != dl_state_stub) continue;
 				if (!retry_ready(c.bulk)) continue;
 				bulks_in_flight++;
 				stat_bulks_started++;
@@ -1369,10 +1449,15 @@ struct earth_core_t {
 			stat_nodes_wanted = (int)potential_nodes.size();
 			stat_nodes_loaded = stat_nodes_stub = stat_nodes_stuck = 0;
 			stat_nodes_failed = stat_max_level = 0;
+			pending_nodes.clear();
 			for (auto &kv : potential_nodes) {
 				auto node = kv.second;
 				if ((int)kv.first.size() > stat_max_level) stat_max_level = (int)kv.first.size();
-				if (node->dl_state != dl_state_downloaded) all_loaded = false;
+				if (node->dl_state != dl_state_downloaded) {
+					all_loaded = false;
+					pending_nodes.push_back({ kv.first, (int)node->dl_state.load(), node->dl_fails,
+						(node->obb.center - eye).norm(), node->meters_per_texel, node->first_wanted_ms });
+				}
 				else stat_nodes_loaded++;
 				if (node->dl_state == dl_state_stub) stat_nodes_stub++;
 				else if (node->dl_state == dl_state_downloading) stat_nodes_stuck++;
@@ -1641,14 +1726,14 @@ struct earth_core_t {
 					node->obb.center.x(), node->obb.center.y(), node->obb.center.z(), 1.0)).head<3>();
 				renderSetTubePass(ctx, 2);
 				for (auto &mesh : node->meshes) {
-					if (!mesh.buffered) bufferMesh(mesh);
+					if (!mesh.buffered) bufferMesh(mesh, ctx);
 					bindAndDrawMesh(mesh, self_mask, stale_mask, ctx);
 				}
 				if (!tubeRectTouches(margin, c)) continue;
 				renderSetTubePass(ctx, 1);
 			}
 			for (auto &mesh : node->meshes) {
-				if (!mesh.buffered) bufferMesh(mesh);
+				if (!mesh.buffered) bufferMesh(mesh, ctx);
 				bindAndDrawMesh(mesh, self_mask, stale_mask, ctx);
 			}
 		}

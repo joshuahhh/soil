@@ -13,6 +13,11 @@ enum dl_state : int {
 	dl_state_downloaded = 4,	
 };
 
+// bumped whenever the octree's shape changes under the walk — a bulk
+// arrives, fails back to a stub, or is purged — so a cached walk result
+// (earth_core.h) knows it is stale
+static std::atomic<int> g_tree_epoch{0};
+
 struct rocktree_t {
 	enum texture_format : int {
 		texture_format_rgb = 1,
@@ -50,6 +55,8 @@ struct rocktree_t {
 		}
 
 		double last_wanted_ms = 0; // last time this node was in the potential set (render thread only)
+		// when the current unbroken run of being wanted began (profiling)
+		double first_wanted_ms = 0;
 		// a request that failed comes back to stub so it can be asked for
 		// again, but a url that is failing for a reason won't start working
 		// this frame: the scheduler holds off until dl_next_try_ms, which it
@@ -81,6 +88,12 @@ struct rocktree_t {
 			render_handle_t index_buffer;
 			render_handle_t boundary_index_buffer;
 			render_handle_t texture_buffer;
+			// the vertex setup for a draw, in one bind (see bufferMesh)
+			render_handle_t vao;
+			// the min filter the texture was last given (the M key flips
+			// texture_mipmaps_on live; the parameter is re-sent only when it
+			// no longer matches, not on every draw)
+			bool mips_on;
 			bool buffered;
 		};
 		std::vector<mesh_t> meshes;
@@ -102,17 +115,20 @@ struct rocktree_t {
 
 		void setFinishedDownloading() {
 			dl_state = dl_state_downloaded;
+			g_tree_epoch++;
 		}
 
 		void setFailedDownloading() {
 			dl_fails++;
 			dl_state = dl_state_stub;
 			if (parent) parent->busy_ctr--;
+			g_tree_epoch++;
 		}
 
 		void setDeleted() {
 			dl_state = dl_state_stub;
 			if (parent) parent->busy_ctr--;
+			g_tree_epoch++;
 		}
 
 		double last_wanted_ms = 0; // last time this bulk was in the potential set (render thread only)
