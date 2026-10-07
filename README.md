@@ -68,6 +68,18 @@ together in one readonly transaction. Same view, cache on: under 10 s cold,
 and a warm load serves every tile from the store. `?idb=0` bypasses the cache
 and `?idb=ro` looks up but never writes, for measuring it.
 
+Lookups have a deadline, too. A lookup that fails falls through to the
+network, but one that simply doesn't answer used to hold the engine's request
+for as long as it took — and the first one of a session took a minute in
+firefox, which initialises a multi-gigabyte origin (everything stored under
+`localhost`, not just this page) before the first transaction runs. The root
+bulk was in that lookup, and nothing draws without it. A batch that hasn't
+answered in three seconds is given up on (its tiles come from the network, a
+late answer is dropped) and the cache is bypassed until it does answer. And
+nothing is evicted until the budget has actually been read: a session used to
+begin by evicting a hundred megabytes against the provisional floor, a slow
+readwrite transaction that every lookup then queued behind.
+
 Sizes can't be read back from indexeddb without reading the values, which is
 the thing being avoided, so each tile gets a small `tilemeta` record holding
 its size and last use. That's held in memory for the session and mirrored to

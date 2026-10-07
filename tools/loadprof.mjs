@@ -7,6 +7,7 @@
 //   node tools/loadprof.mjs --session ~/.prusik/uploads/x.json   # pose from a ⌘C session blob
 //   node tools/loadprof.mjs seattle-skyline                       # a shots.json entry
 //   node tools/loadprof.mjs --lat .. --lon .. --alt .. --heading .. --tilt .. --fov ..
+//   --firefox   playwright's firefox (headless) instead of chrome
 //   --swiftshader   the headless shell's cpu rasteriser; default is the new
 //               headless chrome, which drives the real gpu (no window)
 //   --trace     record a per-tile timeline (fetch trace + decode timing)
@@ -24,7 +25,7 @@
 //   --name      label for the output json (tools/out/loadprof-<name>.json)
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { chromium } from 'playwright';
+import { chromium, firefox } from 'playwright';
 import { serveWeb } from './serve.mjs';
 import { OUT, readShots, shotQuery } from './lib.mjs';
 
@@ -38,7 +39,9 @@ const warm = has('warm');
 // stalls the main thread and starves the fetch callbacks — a different
 // problem from the one being measured. full chrome in headless mode drives
 // the real gpu with no window
-const launch = has('swiftshader') ? { headless: true } : { headless: true, channel: 'chromium' };
+// --firefox: playwright's firefox instead (npx playwright install firefox)
+const engine = has('firefox') ? firefox : chromium;
+const launch = has('swiftshader') || has('firefox') ? { headless: true } : { headless: true, channel: 'chromium' };
 
 let shot;
 if (flag('session')) {
@@ -72,8 +75,8 @@ await fs.mkdir(OUT, { recursive: true });
 const { base, close } = await serveWeb({ port: warm ? 8765 : 0 });
 const vp = { viewport: { width, height }, deviceScaleFactor: 1 };
 const ctx = warm
-  ? await chromium.launchPersistentContext(path.join(OUT, 'profile'), { ...launch, ...vp })
-  : await (await chromium.launch(launch)).newContext(vp);
+  ? await engine.launchPersistentContext(path.join(OUT, 'profile'), { ...launch, ...vp })
+  : await (await engine.launch(launch)).newContext(vp);
 const page = await ctx.newPage();
 const consoleLines = [];
 page.on('console', (m) => consoleLines.push(`${(performance.now() / 1000).toFixed(1)} ${m.type()} ${m.text()}`));

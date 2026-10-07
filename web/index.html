@@ -431,6 +431,7 @@
           `idb: origin is using ${Math.round((e.usage || 0) / 1e6)} MB`
           + ` of ${Math.round((e.quota || 0) / 1e6)} MB`));
     }, 8000);
+    const tOpen = performance.now();
     try {
       const r = indexedDB.open('earth-cache', 3);
       r.onupgradeneeded = (e) => {
@@ -452,6 +453,7 @@
       r.onsuccess = () => {
         settled = true;
         const d = r.result;
+        console.log(`idb: open took ${Math.round(performance.now() - tOpen)} ms`);
         // and be the tab that lets go, next time it is someone else's upgrade
         d.onversionchange = () => { db = null; d.close(); };
         db = d;
@@ -538,6 +540,11 @@
   const TILE_BUDGET_MIN = 512 * 1024 * 1024;
   const TILE_BUDGET_MAX = 4 * 1024 * 1024 * 1024;
   let tileBudget = TILE_BUDGET_MIN; // until the estimate comes back
+  // no eviction against the provisional floor: a session used to start by
+  // evicting a hundred mb because the store held more than the floor and
+  // the real budget (five times it) hadn't been read yet — a slow readwrite
+  // transaction that every lookup then queued behind
+  let budgetKnown = false;
   const TILE_LOW_WATER = 0.85;   // an eviction pass clears down to this much
   const TILE_TOUCH_MS = 300000;  // rewrite a tile's last-use at most this often
   const tileMeta = new Map();    // path -> { n: bytes, t: last use, w: last written }
@@ -583,7 +590,7 @@
   // `hard` is the quota-error path: the accounting says there is room but the
   // browser disagrees, and the browser is the one that counts
   const evictTiles = async (hard) => {
-    if (evicting || !db) return;
+    if (evicting || !db || (!hard && !budgetKnown)) return;
     evicting = true;
     try {
       let target = tileBudget * TILE_LOW_WATER;
@@ -747,10 +754,22 @@
     scheduleFlush();
   };
   // every lookup issued in the same task — the engine schedules a frame's
-  // downloads in one go — is answered from one readonly transaction
-  let readQueue = [];
+  // downloads in one go — is answered from one readonly transaction.
+  //
+  // with a deadline. a lookup that fails falls through to the network, but
+  // one that simply doesn't answer used to hold the engine's request for as
+  // long as it took — and the first one of a session took a minute in
+  // firefox, which initialises a multi-gigabyte origin before the first
+  // transaction runs. the root bulk was in that lookup, and nothing draws
+  // without it. so a batch that hasn't answered in LOOKUP_MS is given up on
+  // (its tiles come from the network; a late answer is dropped) and the
+  // cache is bypassed until that batch does answer. the deadline is loose
+  // on purpose: firefox lookups of a few seconds happen while a write batch
+  // commits, and giving up on those re-downloads tiles that are in the store
+  const LOOKUP_MS = 3000;
+  let readQueue = [], stalled = 0;
   const getTile = (path) => new Promise((res) => {
-    if (IDB_OFF) { res(undefined); return; }
+    if (IDB_OFF || stalled) { res(undefined); return; }
     // downloaded but not yet committed: no need to ask the store
     const queued = tileQueue.get(path);
     if (queued) { res(queued); return; }
@@ -760,14 +779,28 @@
   const flushReads = () => {
     const batch = readQueue;
     readQueue = [];
+    let open = batch.length;
+    const timer = setTimeout(() => {
+      if (!open) return;
+      stalled++;
+      console.warn(`tile cache: a lookup of ${batch.length} tiles has taken`
+        + ` ${LOOKUP_MS} ms; going to the network until the cache answers`);
+      for (const r of batch) if (r.res) { r.res(undefined); r.res = null; }
+    }, LOOKUP_MS);
+    const settle = (r, v) => {
+      if (r.res) { r.res(v); r.res = null; }
+      if (--open) return;
+      clearTimeout(timer);
+      if (stalled && r.late) { stalled--; console.log('tile cache: the cache answered; back on it'); }
+    };
     try {
       const st = db.transaction('tiles').objectStore('tiles');
       for (const r of batch) {
         const rq = st.get(r.path);
-        rq.onsuccess = () => r.res(rq.result);
-        rq.onerror = () => r.res(undefined);
+        rq.onsuccess = () => { r.late = !r.res; settle(r, rq.result); };
+        rq.onerror = () => { r.late = !r.res; settle(r, undefined); };
       }
-    } catch (e) { for (const r of batch) r.res(undefined); }
+    } catch (e) { clearTimeout(timer); for (const r of batch) settle(r, undefined); }
   };
 
   const clearTiles = () => new Promise((res) => {
@@ -800,6 +833,7 @@
       if (!e.quota) return;
       tileBudget = Math.min(TILE_BUDGET_MAX,
         Math.max(TILE_BUDGET_MIN, e.quota * TILE_BUDGET_SHARE));
+      budgetKnown = true;
       const mb = (b) => Math.round(b / 1e6) + ' MB';
       console.log(`tile cache: ${mb(tileBytes)} in ${tileMeta.size} tiles,`
         + ` budget ${mb(tileBudget)} of a ${mb(e.quota)} quota`
