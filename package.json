@@ -1,0 +1,7 @@
+{
+  "name": "soil",
+  "private": true,
+  "scripts": {
+    "dev": "python3 -u ./serve.py"
+  }
+}

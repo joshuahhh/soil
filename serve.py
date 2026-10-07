@@ -12,14 +12,22 @@ class NoStoreHandler(http.server.SimpleHTTPRequestHandler):
 
 if __name__ == "__main__":
     os.chdir(os.path.join(os.path.dirname(os.path.abspath(__file__)), "web"))
-    print("serving on http://localhost:8000")
+    # 8000, or the next free port after it (as vite does), so a second
+    # checkout's server doesn't just die
+    for port in range(8000, 8100):
+        try:
+            server = http.server.ThreadingHTTPServer(("", port), NoStoreHandler)
+            break
+        except OSError:
+            pass
+    print(f"serving on http://localhost:{port}")
     try:
         # the LAN address, for phones; a throwaway UDP "connection" (nothing
         # is sent) is the portable way to learn which interface routes out
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         s.connect(("8.8.8.8", 80))
-        print(f"        and http://{s.getsockname()[0]}:8000")
+        print(f"        and http://{s.getsockname()[0]}:{port}")
         s.close()
     except OSError:
         pass
-    http.server.ThreadingHTTPServer(("", 8000), NoStoreHandler).serve_forever()
+    server.serve_forever()
