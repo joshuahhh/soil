@@ -118,6 +118,11 @@
      is off — so it gets a panel whose whole job is to be present when the
      camera is banked, and to level it when dismissed */
   body.rolled #rollpanel { display: flex; }
+  /* the lod overlay's legend (L): a swatch per fetch phase */
+  body.lod #lodpanel { display: flex; }
+  #lodpanel .row { gap: 4px 10px; }
+  #lodpanel .row span { display: flex; align-items: center; gap: 4px; }
+  .swatch { display: inline-block; width: 11px; height: 11px; border-radius: 2px; }
   body.tunnel #tunnelpanel { display: flex; }
   #tunnelamount, #tunnellagamount { font: 11px sans-serif; opacity: .85; white-space: nowrap; min-width: 13ch; }
   /* the range input carries a default 2px margin, which is what put its
@@ -339,6 +344,16 @@
     <div id="rollpanel" class="panel">
       <div class="head"><span>roll</span><button class="x" id="rolllevel" title="level the camera">✕</button></div>
       <div id="rollamount"></div>
+    </div>
+    <div id="lodpanel" class="panel">
+      <div class="head"><span>lod</span><button class="x" id="lodoff" title="turn the overlay off (L)">✕</button></div>
+      <div class="row">
+        <span><i class="swatch" style="background:#e6d000"></i>queued</span>
+        <span><i class="swatch" style="background:#2a7fff"></i>cache</span>
+        <span><i class="swatch" style="background:#ff2020"></i>network</span>
+        <span><i class="swatch" style="background:#20e040"></i>decoding</span>
+        <span><i class="swatch" style="background:#ff30ff"></i>retrying</span>
+      </div>
     </div>
     <div id="tunnelpanel" class="panel">
       <div class="head"><span>tunnel</span><button class="x" id="tunneloff" title="leave the tunnel (T)">✕</button></div>
@@ -878,6 +893,7 @@
     const tr = stats.trace ? { p: path, t0, idb: 0, net: 0, done: 0, n: 0 } : null;
     if (tr) stats.trace.push(tr);
     try {
+      Module.noteFetchPhase(id, 1); // cache lookup
       let bytes = path[0] !== 'P' ? await getTile(path) : undefined;
       k.idbMs += performance.now() - t0;
       if (tr) tr.idb = performance.now();
@@ -887,6 +903,7 @@
       if (bytes) { stats.idbHits++; k.idb++; noteTileUse(path, bytes.length); }
       if (!bytes) {
         const t1 = performance.now();
+        Module.noteFetchPhase(id, 2); // network
         const resp = await fetch('https://kh.google.com/rt/earth/' + path);
         if (!resp.ok) throw new Error('http ' + resp.status);
         bytes = new Uint8Array(await resp.arrayBuffer());
@@ -1005,6 +1022,7 @@
         lat: p.lat, lon: p.lon, alt: p.alt, heading: p.heading, tilt: p.tilt,
         roll: p.roll, fov: p.fov, zoom: map.getZoom(), gain, ortho, hug, miniature, full3d,
         nearCut: view.getNearCut(),
+        lod: debugLod,
         tube: tubeRect ? { rect: tubeRect, on: tubeOn, ewAxis: tubeAxisEw, body: tubeBody } : null,
         tunnel: { on: tunnelOn && !tunnelClosing, c: tunnelC, across: tunnelAcross, lag: tunnelLag },
       }));
@@ -1619,6 +1637,14 @@
   // because updateHint reads it long before the path section is evaluated
   let followOn = false;
   let debugLod = false;
+  // the overlay and its legend panel go together
+  const setDebugLod = (on) => {
+    debugLod = on;
+    view.setDebugLod(on);
+    document.body.classList.toggle('lod', on);
+    saveView(); // part of the view state: a reload comes back with it
+  };
+  document.getElementById('lodoff').addEventListener('click', () => { setDebugLod(false); canvas.focus(); });
   let mipmaps = true;
   // the speed chip, and the hug chip with the height it is holding — which
   // moves with R/F, so the frame loop refreshes this while hugging
@@ -1698,7 +1724,7 @@
     if ((e.code === 'Digit0' || e.code === 'Numpad0' || e.code === 'Home') && !e.repeat) resetView();
     // like the native app's L key: tint octants red where a finer tile is
     // wanted but not yet downloaded
-    if (e.code === 'KeyL' && !e.repeat) { debugLod = !debugLod; view.setDebugLod(debugLod); }
+    if (e.code === 'KeyL' && !e.repeat) setDebugLod(!debugLod);
     // K, its neighbour: draw the smoothed copy of the track the follow camera
     // actually aims down, dashed on the map beside the track it was made from
     if (e.code === 'KeyK' && !e.repeat) setDebugSmooth(!debugSmooth);
@@ -4165,6 +4191,7 @@
       hug = !!START.hug;
       view.setTerrainFollow(hug);
       if (START.miniature) setMiniature(true);
+      if (START.lod) setDebugLod(true);
       // a banked camera comes back banked. inside the tube the bank belongs to
       // the airplane frame and is restored after the roll-up below instead,
       // because that is what creates the frame to bank

@@ -175,12 +175,12 @@ void bufferMesh(rocktree_t::node_t::mesh_t &mesh, const gl_ctx_t &ctx) {
 	mesh.buffered = true;
 }
 
-void bindAndDrawMesh(rocktree_t::node_t::mesh_t &mesh, uint8_t octant_mask, uint8_t stale_mask, const gl_ctx_t &ctx) {
+void bindAndDrawMesh(rocktree_t::node_t::mesh_t &mesh, uint8_t octant_mask, uint32_t stale_mask, const gl_ctx_t &ctx) {
 	glUniform2fv(ctx.uv_offset_loc, 1, mesh.uv_offset.data());
 	glUniform2fv(ctx.uv_scale_loc, 1, mesh.uv_scale.data());
 	// the masks go up as the bytes they are; the shader picks the bit
 	glUniform1i(ctx.octant_mask_loc, octant_mask);
-	glUniform1i(ctx.stale_mask_loc, stale_mask);
+	glUniform1i(ctx.stale_mask_loc, (GLint)stale_mask);
 	glBindTexture(GL_TEXTURE_2D, mesh.texture_buffer);
 	// the M key flips texture_mipmaps_on live so it can be A/B'd on a scene
 	// (the temporal difference, shimmer as the camera moves, is the whole
@@ -749,14 +749,16 @@ void renderInit(render_ctx_t &ctx, void *) {
 		"uniform highp sampler2D body_nrm;"
 		"uniform vec2 uv_offset;"
 		"uniform vec2 uv_scale;"
-		// one bit per octant, in the byte the engine keeps them in
+		// octant_mask: one bit per octant. stale_mask: three bits per
+		// octant, the fetch phase of the finer tile wanted there (0 none;
+		// see earth_core's draw loop for the legend)
 		"uniform int octant_mask;"
 		"uniform int stale_mask;"
 		"in vec3 position;"
 		"in float octant;"
 		"in vec2 texcoords;"
 		"out vec2 v_texcoords;"
-		"out float v_stale;"
+		"flat out float v_stale;"
 		"out float v_mask;"
 		"out vec2 v_rect;"
 		"out float v_loop;"
@@ -805,7 +807,7 @@ void renderInit(render_ctx_t &ctx, void *) {
 		// so the finer tile wins wherever they overlap it
 		"	float mask = ((octant_mask >> int(octant)) & 1) != 0 ? 0.0 : 1.0;"
 		"	v_mask = mask;"
-		"	v_stale = ((stale_mask >> int(octant)) & 1) != 0 ? 1.0 : 0.0;"
+		"	v_stale = float((stale_mask >> (3 * int(octant))) & 7);"
 		"	v_texcoords = (texcoords + uv_offset) * uv_scale;"
 		"	v_loop = 0.0;"
 		"	v_local = vec3(0.0);"
@@ -867,7 +869,7 @@ void renderInit(render_ctx_t &ctx, void *) {
 		"in vec2 v_texcoords;"
 		"in float v_loop;"
 		"in vec3 v_local;"
-		"in float v_stale;"
+		"flat in float v_stale;"
 		"in float v_mask;"
 		"in vec2 v_rect;"
 		"out vec4 frag_color;"
@@ -893,7 +895,17 @@ void renderInit(render_ctx_t &ctx, void *) {
 		"		if (body_on && tube_pass == 1 && abs(v_loop - 1000.0 * floor(v_loop / 1000.0 + 0.5)) > 0.5) discard;"
 		"	}"
 		"	vec3 c = texture(tex, v_texcoords).rgb;"
-		"	if (debug_lod) c = mix(c, vec3(1.0, 0.0, 0.0), v_stale * 0.5);"
+		// the lod overlay: a finer tile is wanted here and isn't drawn yet;
+		// the colour says where its request is. yellow: not yet requested
+		// (queued behind the download slots). blue: being looked up in
+		// the tile cache. red: on the network. green: decoding. magenta:
+		// failed, waiting to retry
+		"	if (debug_lod && v_stale > 0.5) {"
+		"		int ph = int(v_stale + 0.5);"
+		"		vec3 t = ph == 1 ? vec3(1.0, 0.9, 0.0) : ph == 2 ? vec3(0.1, 0.5, 1.0)"
+		"			: ph == 3 ? vec3(1.0, 0.0, 0.0) : ph == 4 ? vec3(0.0, 1.0, 0.2) : vec3(1.0, 0.0, 1.0);"
+		"		c = mix(c, t, 0.5);"
+		"	}"
 		"	frag_color = vec4(c, 1.0);"
 		"}"
 	);

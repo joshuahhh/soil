@@ -1629,9 +1629,9 @@ struct earth_core_t {
 		std::unordered_map<std::string, uint8_t> mask_map;
 
 		// potential-set membership by path, only needed for lod debug tinting
-		std::unordered_set<std::string> potential_set;
+		std::unordered_map<std::string, rocktree_t::node_t *> potential_set;
 		if (debug_lod)
-			for (auto &kv : potential_nodes) potential_set.insert(kv.first);
+			for (auto &kv : potential_nodes) potential_set[kv.first] = kv.second;
 
 		renderSetDebugLod(ctx, debug_lod);
 
@@ -1692,15 +1692,27 @@ struct earth_core_t {
 
 			drawn_nodes.push_back({ node, self_mask });
 
-			// octants where a finer tile is wanted but not drawn (still
-			// downloading). children are drawn before parents here, so mask_map
-			// for this node is already complete
-			uint8_t stale_mask = 0;
+			// octants where a finer tile is wanted but not drawn, and why:
+			// three bits per octant saying where that tile's request is
+			// (the shader's legend — 1 not yet requested, 2 cache lookup,
+			// 3 network, 4 decoding, 5 waiting to retry after a failure).
+			// children are drawn before parents here, so mask_map for this
+			// node is already complete
+			uint32_t stale_mask = 0;
 			if (debug_lod) {
 				for (auto o = 0; o < 8; o++) {
 					if (self_mask & (1 << o)) continue;
-					if (potential_set.count(full_path + octs[o]))
-						stale_mask |= 1 << o;
+					auto it = potential_set.find(full_path + octs[o]);
+					if (it == potential_set.end()) continue;
+					auto child = it->second;
+					uint32_t phase;
+					if (child->dl_state == dl_state_stub) phase = child->dl_fails ? 5 : 1;
+					else switch (child->fetch_phase.load()) {
+						case fetch_phase_cache: phase = 2; break;
+						case fetch_phase_decode: phase = 4; break;
+						default: phase = 3; break;
+					}
+					stale_mask |= phase << (3 * o);
 				}
 			}
 

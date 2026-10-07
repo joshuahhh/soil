@@ -4,8 +4,11 @@
 // swap in their own (e.g. the web library delegates to a js function so the
 // host app controls caching and transport)
 typedef void (*fetch_thunk_t)(int i, int error, uint8_t *d, size_t l);
+// phase: where the request is, for the lod overlay (rocktree_types.h
+// fetch_phase_*). a backend that can tell writes it as it goes; null when
+// nobody is asking (bulks, the planetoid)
 struct fetcher_t {
-	virtual void fetch(const char *path, int i, fetch_thunk_t thunk) = 0;
+	virtual void fetch(const char *path, int i, fetch_thunk_t thunk, std::atomic<int> *phase) = 0;
 	virtual ~fetcher_t() {}
 };
 fetcher_t *earth_fetcher = nullptr; // set below; shells may override
@@ -37,7 +40,8 @@ void downloadFailed(emscripten_fetch_t *fetch) {
 // direct browser fetch of kh.google.com, no cache of our own (the browser's
 // http cache applies)
 struct emscripten_fetcher_t : fetcher_t {
-	void fetch(const char *path, int i, fetch_thunk_t thunk) override {
+	void fetch(const char *path, int i, fetch_thunk_t thunk, std::atomic<int> *phase) override {
+		if (phase) *phase = fetch_phase_net;
 		const char* base_url = "https://kh.google.com/rt/earth/";
 		char* url = (char*)malloc(strlen(base_url) + strlen(path) + 1);
 		strcpy(url, base_url); strcat(url, path);
@@ -74,11 +78,12 @@ void writeFile(const char* file_path, unsigned char* data, size_t len);
 // disk cache in ./cache backed by plain http; runs synchronously on the
 // calling (webpool) thread
 struct http_cache_fetcher_t : fetcher_t {
-	void fetch(const char *path, int i, fetch_thunk_t thunk) override;
+	void fetch(const char *path, int i, fetch_thunk_t thunk, std::atomic<int> *phase) override;
 };
 static http_cache_fetcher_t default_fetcher;
 
-void http_cache_fetcher_t::fetch(const char* path, int i, fetch_thunk_t thunk) {
+void http_cache_fetcher_t::fetch(const char* path, int i, fetch_thunk_t thunk, std::atomic<int> *phase) {
+	if (phase) *phase = fetch_phase_cache;
 
 	std::call_once(cache_init_once_flag, [](){
 		createDir(cache_pfx);
@@ -101,6 +106,7 @@ void http_cache_fetcher_t::fetch(const char* path, int i, fetch_thunk_t thunk) {
 		}
 	}
 
+	if (phase) *phase = fetch_phase_net;
 	const char* base_url = "http://kh.google.com/rt/earth/";
 	char* url = (char*)malloc(strlen(base_url) + strlen(path) + 1);
 	strcpy(url, base_url); strcat(url, path);
@@ -189,7 +195,7 @@ void writeFile(const char* file_path, unsigned char* data, size_t len) {
 #endif
 
 // route requests through the active backend
-void fetchData(const char* path, int i, fetch_thunk_t thunk) {
+void fetchData(const char* path, int i, fetch_thunk_t thunk, std::atomic<int> *phase = nullptr) {
 	if (!earth_fetcher) earth_fetcher = &default_fetcher;
-	earth_fetcher->fetch(path, i, thunk);
+	earth_fetcher->fetch(path, i, thunk, phase);
 }

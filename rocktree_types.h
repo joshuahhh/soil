@@ -13,6 +13,16 @@ enum dl_state : int {
 	dl_state_downloaded = 4,	
 };
 
+// where a downloading node's request is, as far as the fetch backend says
+// (the web page reports cache vs network per request); the lod overlay
+// (L) tints a missing tile by it
+enum fetch_phase : int {
+	fetch_phase_none = 0,   // requested, no word yet
+	fetch_phase_cache = 1,  // being looked up in the tile cache
+	fetch_phase_net = 2,    // on the network
+	fetch_phase_decode = 3, // bytes in hand, in the decode pool
+};
+
 // bumped whenever the octree's shape changes under the walk — a bulk
 // arrives, fails back to a stub, or is purged — so a cached walk result
 // (earth_core.h) knows it is stale
@@ -28,6 +38,7 @@ struct rocktree_t {
 		NodeDataRequest request;
 		bool can_have_data;
 		std::atomic<dl_state> dl_state;
+		std::atomic<int> fetch_phase{fetch_phase_none};
 		bulk_t* parent;
 
 		void setNotDownloadedYet() {

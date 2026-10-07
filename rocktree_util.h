@@ -241,12 +241,14 @@ void getNode(NodeDataRequest req, rocktree_t::node_t *n, std::function<void(std:
 			// the page, and the view could never complete. the scheduler backs
 			// off between attempts (dl_next_try_ms) so a url that keeps failing
 			// costs one request every few seconds, not one every frame
+			n->fetch_phase = fetch_phase_none;
 			n->setFailedDownloading();
 			fprintf(stderr, "could not load node %s (attempt %d)\n",
 				n->request.node_key().path().c_str(), n->dl_fails);
 			cb(NULL);
 		} else {			
 			auto vec = std::vector<uint8_t>(data, data+len);
+			n->fetch_phase = fetch_phase_decode;
 			if (g_log_timing)
 				printf("timing: queued node %s at=%u\n", n->request.node_key().path().c_str(), timing_ms());
 
@@ -288,13 +290,14 @@ void getNode(NodeDataRequest req, rocktree_t::node_t *n, std::function<void(std:
 			std::lock_guard<std::mutex> lockGuard(m);
 			map[i] = std::make_pair(cb, n);
 		}
-		fetchData(url_buf, i, thunk);
+		fetchData(url_buf, i, thunk, &n->fetch_phase);
 		delete [] url_buf;
 	}, url_buf, ++i, thunk, cb, n);
 #else
 	++i;
 	map[i] = std::make_pair(cb, n);
-	fetchData(url_buf, i, thunk);
+	n->fetch_phase = fetch_phase_none;
+	fetchData(url_buf, i, thunk, &n->fetch_phase);
 #endif
 }
 

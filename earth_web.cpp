@@ -52,20 +52,28 @@ using emscripten::val;
 // own and remembers each request's (thunk, id) pair
 struct js_fetcher_t : fetcher_t {
 	val fn = val::undefined();
-	std::map<int, std::pair<fetch_thunk_t, int>> pending;
+	struct pending_t { fetch_thunk_t thunk; int i; std::atomic<int> *phase; };
+	std::map<int, pending_t> pending;
 	int next_token = 0;
 
-	void fetch(const char *path, int i, fetch_thunk_t thunk) override {
+	void fetch(const char *path, int i, fetch_thunk_t thunk, std::atomic<int> *phase) override {
 		auto token = next_token++;
-		pending[token] = { thunk, i };
+		pending[token] = { thunk, i, phase };
 		fn(std::string(path), token);
+	}
+
+	// the page says where a request is (cache lookup, network): the lod
+	// overlay shows it
+	void notePhase(int token, int phase) {
+		auto it = pending.find(token);
+		if (it != pending.end() && it->second.phase) *it->second.phase = phase;
 	}
 
 	void deliver(int token, bool ok, val bytes) {
 		auto it = pending.find(token);
 		if (it == pending.end()) return;
-		auto thunk = it->second.first;
-		auto i = it->second.second;
+		auto thunk = it->second.thunk;
+		auto i = it->second.i;
 		pending.erase(it);
 		if (!ok) {
 			thunk(i, 1, nullptr, 0);
@@ -782,6 +790,12 @@ void deliverFetch(int i, bool ok, val bytes) {
 	js_fetcher.deliver(i, ok, bytes);
 }
 
+// 1 = being looked up in the tile cache, 2 = on the network (see
+// rocktree_types.h fetch_phase)
+void noteFetchPhase(int i, int phase) {
+	js_fetcher.notePhase(i, phase);
+}
+
 // pretend the gpu lacks s3tc (jpg textures); call before createView
 void setAntialias(bool on) { g_antialias = on; }
 // per-tile decode timing to the console (?timing). off by default: it is a
@@ -849,6 +863,7 @@ EMSCRIPTEN_BINDINGS(earth) {
 		.function("fly", &EarthView::fly);
 	emscripten::function("createView", &createView, emscripten::allow_raw_pointers());
 	emscripten::function("deliverFetch", &deliverFetch);
+	emscripten::function("noteFetchPhase", &noteFetchPhase);
 	emscripten::function("forceJpgTextures", &forceJpgTextures);
 	emscripten::function("setAntialias", &setAntialias);
 	emscripten::function("setLogTiming", &setLogTiming);

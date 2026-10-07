@@ -364,6 +364,25 @@ bailout. The driver therefore always has a timeout, and a capture that trips it
 is still written, just labelled `INCOMPLETE` with its tile count, rather than
 silently passing off a half-loaded frame as a golden.
 
+#### The lod overlay
+
+**L** tints every octant where a finer tile is wanted and not yet drawn, and
+the colour says where that tile's request is — which is the question the last
+round of debugging kept having to answer from console logs:
+
+- **yellow** — not yet requested: queued behind the 32 download slots
+- **blue** — being looked up in the tile cache
+- **red** — on the network
+- **green** — bytes in hand, in the decode pool
+- **magenta** — a request failed; waiting out the retry delay
+
+The engine only knows stub / downloading / downloaded, so the page's fetch
+hook reports the cache-vs-network step back per request
+(`Module.noteFetchPhase`), and the engine packs a phase per octant into the
+mask uniform the shader already had. A view that sits blue is the cache being
+slow; one that sits red is the network; a lot of yellow for a long time is
+the slot count or a slow pipeline ahead of it.
+
 `?test=1` on [web/index.html](./web/index.html) is what makes this work: the
 pose comes from the query string instead of localStorage, nothing is saved
 back, the 3d view takes the whole window, and `view.frame()` gets a fixed dt so
