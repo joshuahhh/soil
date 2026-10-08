@@ -200,6 +200,11 @@ struct EarthView {
 		earth.tunnel_across = across;
 		if (earth.tunnel_on) earth.tunnelUpdate(camera, 0);
 	}
+	// how far the pipe runs each way when looking down it, in circumferences
+	void setTunnelLength(double k) {
+		earth.tunnel_length = fmax(1.0, k);
+		if (earth.tunnel_on) earth.tunnelUpdate(camera, 0);
+	}
 	// how slowly the tube's heading follows the camera's (ms; 0 at once)
 	void setTunnelLag(double ms) {
 		earth.tunnel_lag_ms = fmax(0.0, ms);
@@ -210,6 +215,7 @@ struct EarthView {
 		o.set("circumference", earth.tunnel_circumference);
 		o.set("across", earth.tunnel_across);
 		o.set("lagMs", earth.tunnel_lag_ms);
+		o.set("length", earth.tunnel_length);
 		o.set("radius", earth.tunnel_circumference / (2.0 * M_PI));
 		o.set("groundAlt", earth.tunnel_ground_radius - planetRadius());
 		o.set("groundMeasured", earth.tunnel_ground_measured);
@@ -415,12 +421,19 @@ struct EarthView {
 		// when the view frustum culls them (see earth_core ground column)
 		earth.ground_column_on = terrain_follow && !camera.ortho && !camera.airplane;
 		earth.ground_column_point = camera.eye;
+		// the clear colour (the tunnel down the heading dims it to black: see tunnelSkyDark)
+		auto dark = earth.tunnelSkyDark(camera.eye);
+		auto sky = sky_color;
+		if (dark > 0) {
+			auto k = 1.0 - dark;
+			sky = (int)((sky >> 16 & 0xff) * k) << 16 | (int)((sky >> 8 & 0xff) * k) << 8 | (int)((sky & 0xff) * k);
+		}
 		// the whole frame and its gl prologue, wall-clock: the engine's own
 		// sections cover the walk, scheduling, eviction and draw submission,
 		// and anything outside them (a clear that waits on the previous
 		// frame's swap, say) is what this is for
 		auto t0 = earth_core_t::ticksMs();
-		renderFrameBegin(ctx, nullptr, w, h, sky_color);
+		renderFrameBegin(ctx, nullptr, w, h, sky);
 		auto t1 = earth_core_t::ticksMs();
 		earth.updateAndDraw(ctx, camera, w, h, dt_ms);
 		renderFrameEnd(ctx);
@@ -843,6 +856,7 @@ EMSCRIPTEN_BINDINGS(earth) {
 		.function("setTunnelCircumference", &EarthView::setTunnelCircumference)
 		.function("setTunnelAcross", &EarthView::setTunnelAcross)
 		.function("setTunnelLag", &EarthView::setTunnelLag)
+		.function("setTunnelLength", &EarthView::setTunnelLength)
 		.function("getTunnelInfo", &EarthView::getTunnelInfo)
 		.function("getTubeInfo", &EarthView::getTubeInfo)
 		.function("setPath", &EarthView::setPath)

@@ -124,10 +124,10 @@
   #lodpanel .row span { display: flex; align-items: center; gap: 4px; }
   .swatch { display: inline-block; width: 11px; height: 11px; border-radius: 2px; }
   body.tunnel #tunnelpanel { display: flex; }
-  #tunnelamount, #tunnellagamount { font: 11px sans-serif; opacity: .85; white-space: nowrap; min-width: 13ch; }
+  #tunnelamount, #tunnellagamount, #tunnellenamount { font: 11px sans-serif; opacity: .85; white-space: nowrap; min-width: 13ch; }
   /* the range input carries a default 2px margin, which is what put its
      track's left end right of the text on the row below */
-  #tunnelc, #tunnellag { margin: 0; }
+  #tunnelc, #tunnellag, #tunnellen { margin: 0; }
   /* lens distortion, likewise: present when the photo has some, or when the
      solver has been asked to look for it and it wants setting by eye */
   body.overlay.distorted #lenspanel, body.overlay.lenswanted #lenspanel { display: flex; }
@@ -366,6 +366,10 @@
         <span id="tunnellagamount"></span>
       </div>
       <div class="row">rolls up <button id="tunnelaxis" class="tiny" title="which way the ground rolls"></button></div>
+      <div class="row" id="tunnellenrow">
+        <input id="tunnellen" type="range" min="0" max="1" step="0.001" value="0.5" title="how far the pipe runs, in circumferences">
+        <span id="tunnellenamount"></span>
+      </div>
     </div>
     <div id="lenspanel" class="panel">
       <div class="head"><span>lens</span><button class="x" id="lensreset" title="no distortion">✕</button></div>
@@ -1024,7 +1028,7 @@
         nearCut: view.getNearCut(),
         lod: debugLod,
         tube: tubeRect ? { rect: tubeRect, on: tubeOn, ewAxis: tubeAxisEw, body: tubeBody } : null,
-        tunnel: { on: tunnelOn && !tunnelClosing, c: tunnelC, across: tunnelAcross, lag: tunnelLag },
+        tunnel: { on: tunnelOn && !tunnelClosing, c: tunnelC, across: tunnelAcross, lag: tunnelLag, k: tunnelK },
       }));
     } catch (e) {}
   };
@@ -1954,6 +1958,7 @@
   let tunnelC = 2000; // metres around
   let tunnelAcross = true; // the roll runs along the heading (else around it)
   let tunnelLag = 0; // seconds for the tube to swing round after a turn; 0 at once
+  let tunnelK = 10; // looking down the pipe: how far it runs each way, in circumferences
   const tunnelAxisBtn = document.getElementById('tunnelaxis');
   const TUNNEL_MIN = 200, TUNNEL_MAX = 20000;
   const tunnelSlider = document.getElementById('tunnelc');
@@ -1969,12 +1974,23 @@
   const tunnelLagAmountEl = document.getElementById('tunnellagamount');
   const lagFromSlider = (v) => v <= 0 ? 0 : LAG_MIN * Math.pow(LAG_MAX / LAG_MIN, v);
   const lagToSlider = (t) => t <= 0 ? 0 : Math.log(Math.max(LAG_MIN, Math.min(LAG_MAX, t)) / LAG_MIN) / Math.log(LAG_MAX / LAG_MIN);
+  // the length slider: log from 1.5 circumferences (where the other axis
+  // sits) to 60, past the tube's node cap — to feel where it gives out
+  const K_MIN = 1.5, K_MAX = 60;
+  const tunnelLenSlider = document.getElementById('tunnellen');
+  const tunnelLenAmountEl = document.getElementById('tunnellenamount');
+  const tunnelLenRow = document.getElementById('tunnellenrow');
+  const kFromSlider = (v) => K_MIN * Math.pow(K_MAX / K_MIN, v);
+  const kToSlider = (k) => Math.log(Math.max(K_MIN, Math.min(K_MAX, k)) / K_MIN) / Math.log(K_MAX / K_MIN);
   const refreshTunnel = () => {
     tunnelSlider.value = tunnelToSlider(Math.max(TUNNEL_MIN, Math.min(TUNNEL_MAX, tunnelC)));
     tunnelAmountEl.textContent = `${fmtM(tunnelC)} around`;
     tunnelLagSlider.value = lagToSlider(tunnelLag);
     tunnelLagAmountEl.textContent = tunnelLag > 0 ? `${tunnelLag.toFixed(tunnelLag < 1 ? 2 : 1)} s to turn` : 'turns at once';
     tunnelAxisBtn.textContent = tunnelAcross ? 'forward and backward' : 'left to right';
+    tunnelLenSlider.value = kToSlider(tunnelK);
+    tunnelLenAmountEl.textContent = `${fmtM(tunnelK * tunnelC)} ahead · ${tunnelK.toFixed(tunnelK < 10 ? 1 : 0)}×`;
+    tunnelLenRow.style.display = tunnelAcross ? 'none' : '';
   };
   tunnelAxisBtn.addEventListener('click', () => {
     tunnelAcross = !tunnelAcross;
@@ -2011,6 +2027,7 @@
         if (ortho) { ortho = false; view.setOrtho(false); }
         view.setTunnelAcross(tunnelAcross);
         view.setTunnelLag(tunnelLag * 1000);
+        view.setTunnelLength(tunnelK);
         view.setTunnel(true, tunnelC);
         curl = animate ? 0 : 1;
         curlTarget = 1;
@@ -2041,6 +2058,12 @@
   tunnelLagSlider.addEventListener('input', () => {
     tunnelLag = lagFromSlider(+tunnelLagSlider.value);
     view.setTunnelLag(tunnelLag * 1000);
+    refreshTunnel();
+    saveView();
+  });
+  tunnelLenSlider.addEventListener('input', () => {
+    tunnelK = kFromSlider(+tunnelLenSlider.value);
+    view.setTunnelLength(tunnelK);
     refreshTunnel();
     saveView();
   });
@@ -4214,6 +4237,7 @@
       if (START.tunnel && Number.isFinite(START.tunnel.c)) tunnelC = START.tunnel.c;
       if (START.tunnel && START.tunnel.across === false) tunnelAcross = false;
       if (START.tunnel && Number.isFinite(START.tunnel.lag)) tunnelLag = Math.max(0, START.tunnel.lag);
+      if (START.tunnel && Number.isFinite(START.tunnel.k)) tunnelK = Math.max(K_MIN, Math.min(K_MAX, START.tunnel.k));
       refreshTunnel();
       if (START.tunnel && START.tunnel.on && !(START.tube && START.tube.on)) setTunnel(true, false);
       // ?tunnel=<circumference m> (test mode): straight into the tunnel at

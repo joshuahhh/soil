@@ -74,6 +74,8 @@ struct earth_core_t {
 	bool tunnel_on = false;
 	bool tunnel_across = true;
 	double tunnel_circumference = 2000;
+	// looking down the pipe: how far it runs each way, in circumferences
+	double tunnel_length = 10;
 	// the ground under the camera, eased: the rect's zero-point has to be
 	// the terrain surface (see setTubeRect), and here the rect moves every
 	// frame, so the lock is a continuous measurement rather than a one-off
@@ -145,7 +147,11 @@ struct earth_core_t {
 		tube_axis = axis;
 		tube_ew_axis = fabs(axis.z()) < 0.7; // roughly east-west, for the map's arrows
 		tube_half_wid = C / 2;                 // across the axis: what wraps
-		tube_half_len = fmax(500.0, 1.5 * C);  // along it
+		// along it. looking down the pipe its far end is in view, so it
+		// runs a long way (tunnel_length) and fades to black (tunnelFade) —
+		// at 1.5 C the open end was a wide disc of sky a quarter of the way
+		// across the view; at 10 C it is a small dark spot
+		tube_half_len = fmax(500.0, (tunnel_across ? 1.5 : fmax(1.0, tunnel_length)) * C);
 		// across mode: the seam level behind you (theta = -90°), so the
 		// wrapped range runs from a quarter circumference behind to three
 		// quarters ahead. along the axis it stays overhead
@@ -154,6 +160,24 @@ struct earth_core_t {
 		tube_ground_radius = tunnel_ground_radius;
 		tube_ground_locked = true;
 		tubeRebuild();
+	}
+
+	// where the walls start going dark, in rect units from the camera
+	// along the axis (the rect is centred on it): only looking down the
+	// pipe, where its ends are what you see
+	double tunnelFade() const {
+		return tube_on && tunnel_on && !tunnel_across ? 0.15 : 0.0;
+	}
+
+	// how far the sky is dimmed to black, 0..1: inside the closed tunnel
+	// down the heading the only sky in view is through the pipe's two
+	// ends, and blue there undoes the fade. eased in with the curl, and
+	// only while the camera is inside (below the roof, 2R above the floor)
+	double tunnelSkyDark(const Vector3d &eye) const {
+		if (tunnelFade() <= 0) return 0;
+		if (eye.norm() - tube_ground_radius > 2 * tube_radius) return 0;
+		auto c = fmax(0.0, fmin(tube_curl, 1.0));
+		return c * c;
 	}
 
 	void tubeRebuild() {
@@ -1266,6 +1290,18 @@ struct earth_core_t {
 					// through the roll decides all of it there
 					auto tube_floor = tube_on && !tunnel_on && in_rect
 						&& node->meters_per_texel > tube_lock_mpt * 0.5;
+					// the tunnel has a floor of its own, by size: a tile too
+					// coarse to roll isn't drawn (see the draw loop), so where
+					// distance alone stops at one — down the pipe, a few
+					// circumferences out — the walk keeps going until the
+					// tiles are small enough. children are about half their
+					// parent, so wanting every child over 1.25 R is wanting
+					// the children of anything over ~2.5 R, inside the 3 R
+					// the draw allows with a margin for uneven splits. sized
+					// by the radius, it's a few hundred tiles at any
+					// circumference
+					if (tunnel_on && in_rect && node->obb.extents.norm() > 1.25 * tube_radius)
+						tube_floor = true;
 					auto tube_want = 1e30; // floor/column: never shed
 					if (!in_column && !tube_floor) {
 						auto texels_per_meter = 1.0f / node->meters_per_texel;
@@ -1644,7 +1680,8 @@ struct earth_core_t {
 			Matrix4f l2cf = l2c.cast<float>();
 			auto r_eff = tube_radius / fmax(tube_curl, 1e-3);
 			renderSetTube(ctx, true, l2cf.data(),
-				(float)r_eff, (float)tube_half_len, (float)tube_half_wid, (float)tube_wid_offset);
+				(float)r_eff, (float)tube_half_len, (float)tube_half_wid, (float)tube_wid_offset,
+				(float)tunnelFade());
 		} else {
 			renderSetTube(ctx, false, nullptr, 0, 0, 0, 0);
 		}

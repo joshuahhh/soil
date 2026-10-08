@@ -50,6 +50,7 @@ struct gl_ctx_t {
 	GLint tube_local_to_clip_loc;
 	GLint tube_params_loc;
 	GLint tube_pass_loc;
+	GLint tube_fade_loc;
 	GLint body_on_loc;
 	GLint body_curl_loc;
 	GLint body_bands_loc;
@@ -286,9 +287,11 @@ void renderSetTransform(render_ctx_t &ctx, const float *m16) {
 }
 
 // tube mode (see earth_core.h): per-frame local-frame-to-clip matrix and warp
-// parameters (effective roll radius, rect half length/width in meters)
+// parameters (effective roll radius, rect half length/width in meters).
+// fade, in rect units along the axis: where the walls start darkening, to
+// black at the rect's ends; 0 is no fade
 void renderSetTube(render_ctx_t &ctx, bool on, const float *local_to_clip16,
-		float r_eff, float half_len, float half_wid, float wid_offset) {
+		float r_eff, float half_len, float half_wid, float wid_offset, float fade = 0) {
 	glUniform1i(ctx.tube_on_loc, on);
 	glDisable(GL_POLYGON_OFFSET_FILL); // body mode's flat pass turns it on per node
 	// draw both faces in tube mode: the camera legitimately sees walls from
@@ -298,6 +301,7 @@ void renderSetTube(render_ctx_t &ctx, bool on, const float *local_to_clip16,
 	if (!on) return;
 	glUniformMatrix4fv(ctx.tube_local_to_clip_loc, 1, GL_FALSE, local_to_clip16);
 	glUniform4f(ctx.tube_params_loc, r_eff, half_len, half_wid, wid_offset);
+	glUniform1f(ctx.tube_fade_loc, fade);
 	glUniform1i(ctx.tube_pass_loc, 1);
 }
 
@@ -865,6 +869,7 @@ void renderInit(render_ctx_t &ctx, void *) {
 		"uniform bool debug_lod;"
 		"uniform bool tube_on;"
 		"uniform mediump int tube_pass;"
+		"uniform float tube_fade;"
 		"uniform bool body_on;"
 		"in vec2 v_texcoords;"
 		"in float v_loop;"
@@ -906,6 +911,9 @@ void renderInit(render_ctx_t &ctx, void *) {
 		"			: ph == 3 ? vec3(1.0, 0.0, 0.0) : ph == 4 ? vec3(0.0, 1.0, 0.2) : vec3(1.0, 0.0, 1.0);"
 		"		c = mix(c, t, 0.5);"
 		"	}"
+		// the tunnel down the heading: the walls go dark toward both ends,
+		// so the pipe runs off into black rather than stopping at a hole
+		"	if (tube_on && tube_fade > 0.0) c *= 1.0 - smoothstep(tube_fade, 1.0, abs(v_rect.x));"
 		"	frag_color = vec4(c, 1.0);"
 		"}"
 	);
@@ -916,6 +924,7 @@ void renderInit(render_ctx_t &ctx, void *) {
 	ctx.tube_local_to_clip_loc = glGetUniformLocation(ctx.program, "tube_local_to_clip");
 	ctx.tube_params_loc = glGetUniformLocation(ctx.program, "tube_params");
 	ctx.tube_pass_loc = glGetUniformLocation(ctx.program, "tube_pass");
+	ctx.tube_fade_loc = glGetUniformLocation(ctx.program, "tube_fade");
 	ctx.body_on_loc = glGetUniformLocation(ctx.program, "body_on");
 	ctx.body_curl_loc = glGetUniformLocation(ctx.program, "body_curl");
 	ctx.body_bands_loc = glGetUniformLocation(ctx.program, "body_bands");
