@@ -1303,6 +1303,9 @@ struct earth_core_t {
 					if (tunnel_on && in_rect && node->obb.extents.norm() > 1.25 * tube_radius)
 						tube_floor = true;
 					auto tube_want = 1e30; // floor/column: never shed
+					// the download order's default (see sched_pri below)
+					node->sched_pri = fmax(0.0, (node->obb.center - eye).norm()
+						- node->obb.extents.norm()) / (2 * node->obb.extents.norm());
 					if (!in_column && !tube_floor) {
 						auto texels_per_meter = 1.0f / node->meters_per_texel;
 						auto wh = width < height ? width : height;
@@ -1327,28 +1330,37 @@ struct earth_core_t {
 								Vector3d w = (tube_body ? bodyWarp(tube_c) : tubeWarp(tube_c)) - tube_eye_local;
 								auto straight = dist;
 								dist = w.norm();
+								// can the node's rolled position be on screen? a
+								// cone test widened by the node's own angular size
+								auto in_cone = true;
+								if (dist > 1e-6) {
+									auto half_diag = atan(tan(cam.fov / 2.0)
+										* sqrt(1.0 + aspect_ratio * aspect_ratio));
+									auto node_ang = asin(fmin(1.0,
+										node->obb.extents.norm() / dist));
+									auto cos_ang = w.dot(tube_dir_local) / dist;
+									in_cone = cos_ang >= cos(fmin(M_PI, half_diag + node_ang));
+								}
 								// zoom magnifies only what's on screen. tube
 								// lod ignores the view direction on purpose
 								// (the whole slab stays resident), but the
 								// zoom boost must not: boosted in a full
 								// circle it floods the node backstop, whose
 								// uniform-level break then *coarsens* the
-								// very thing being zoomed at. boost only
-								// nodes whose rolled position can appear in
-								// the zoomed view — a cone test widened by
-								// the node's own angular size; the rest keep
+								// very thing being zoomed at. the rest keep
 								// the default-fov target, i.e. unzoomed
 								// tube quality
-								if (zoom > 1.0 && dist > 1e-6) {
-									auto half_diag = atan(tan(cam.fov / 2.0)
-										* sqrt(1.0 + aspect_ratio * aspect_ratio));
-									auto node_ang = asin(fmin(1.0,
-										node->obb.extents.norm() / dist));
-									auto cos_ang = w.dot(tube_dir_local) / dist;
-									if (cos_ang < cos(fmin(M_PI, half_diag + node_ang)))
-										zoom = 1.0;
-								}
+								if (zoom > 1.0 && !in_cone) zoom = 1.0;
 								if (in_view) dist = fmin(dist, straight);
+								// and the download order sees the same
+								// distance: ranked by straight-line distance,
+								// the wall in front of the camera — ground a
+								// long way off, flat — queued behind tiles
+								// under and behind it that weren't on screen,
+								// and turning the tunnel on went blurry for
+								// seconds. what can't be on screen goes last
+								node->sched_pri = dist / (2 * node->obb.extents.norm())
+									* (in_cone ? 1.0 : 16.0);
 							}
 							auto t = Affine3d().Identity();
 							t.translate(eye + dist * direction);
@@ -1502,7 +1514,9 @@ struct earth_core_t {
 				if (!retry_ready(node)) continue; // waiting out a failure
 				auto radius = node->obb.extents.norm();
 				auto dist = fmax(0.0, (node->obb.center - eye).norm() - radius);
-				to_download.push_back({ dist / (2 * radius), kv.first.size(), node });
+				// (in tube mode the walk measured the distance through the
+				// roll, which is what proximity means there)
+				to_download.push_back({ tube_on ? node->sched_pri : dist / (2 * radius), kv.first.size(), node });
 			}
 			std::sort(to_download.begin(), to_download.end(), [](const candidate_t &a, const candidate_t &b) {
 				// tiles containing the camera all have priority 0; coarse first there

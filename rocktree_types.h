@@ -40,6 +40,10 @@ struct rocktree_t {
 		std::atomic<dl_state> dl_state;
 		std::atomic<int> fetch_phase{fetch_phase_none};
 		bulk_t* parent;
+		// tube mode: the download order's measure of this node, set by the
+		// walk — its distance through the roll over its size, pushed back
+		// when its rolled position can't be on screen (render thread only)
+		double sched_pri = 0;
 
 		void setNotDownloadedYet() {
 			dl_state = dl_state_stub;

@@ -311,6 +311,14 @@ tall as the rect is long, so a rect about 1.7× longer than it is wide wraps
 with the least stretch; anything else pulls the imagery around the waist or up
 the body. The crown and the soles are where the parameterisation collapses,
 and the far ends of the rect crumple there. The seam runs down the back.
+Downloads in tube and tunnel mode are ordered by the same distance through
+the roll the lod uses, with nodes whose rolled position can't be on screen
+pushed to the back. Ranked by straight-line distance, as the flat view is, the
+wall in front of the camera — ground a long way off, flat — queued behind the
+tiles under and behind the camera that weren't on screen, and turning the
+tunnel on went blurry for seconds (the lod overlay showed it: everything in
+view yellow, *not yet requested*). Now the view in front resolves first.
+
 `earth_core::bodyWarp` is the CPU twin the lod walk measures distances
 through, and the map marker is placed by the nearest skin cell to the camera,
 unwrapped to its spot on the rect.
