@@ -308,8 +308,11 @@ with an *aperture*, from a different point on a lens disc, aimed so the point
 under the crosshair stays put: thin-lens depth of field, physically, with
 real bokeh rather than a depth-weighted blur. It converges in about a second
 (256 samples by default), then holds. Anything that changes the picture — a
-move, a tile arriving, the drawn set changing — starts it over, and sample 0
-is the plain frame, so nothing ever looks worse than it would without it.
+move, a tile arriving, the drawn set changing — starts it over. Sample 0 is
+the plain frame with the occlusion (below) on it, which is applied from the
+first sample: what switching it on changes at once — about a tenth darker on
+average, all of it in street canyons and at the feet of buildings — is that,
+before anything has accumulated.
 The miniature's blur pass composes with it (the pass is what gets summed).
 Each sample also jitters the sun across its disc (`soft sun`: the real
 one's 0.27°, or larger for an overcast softness) and the shadow map's box
