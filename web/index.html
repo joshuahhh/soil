@@ -120,6 +120,12 @@
   body.rolled #rollpanel { display: flex; }
   /* the lod overlay's legend (L): a swatch per fetch phase */
   body.lod #lodpanel { display: flex; }
+  /* the atmosphere's controls (Y) */
+  body.skypanel #skypanel { display: flex; }
+  /* glamour mode (I): the accumulated render's controls and progress */
+  body.glamourpanel #glamourpanel { display: flex; }
+  #glamourpanel .row span.amt { min-width: 52px; text-align: right; font-variant-numeric: tabular-nums; }
+  #skypanel .row span.amt { min-width: 52px; text-align: right; font-variant-numeric: tabular-nums; }
   #lodpanel .row { gap: 4px 10px; }
   #lodpanel .row span { display: flex; align-items: center; gap: 4px; }
   .swatch { display: inline-block; width: 11px; height: 11px; border-radius: 2px; }
@@ -353,6 +359,47 @@
         <span><i class="swatch" style="background:#ff2020"></i>network</span>
         <span><i class="swatch" style="background:#20e040"></i>decoding</span>
         <span><i class="swatch" style="background:#ff30ff"></i>retrying</span>
+      </div>
+    </div>
+    <div id="skypanel" class="panel">
+      <div class="head"><span>sky</span><button class="x" id="skyclose" title="hide (Y)">✕</button></div>
+      <div class="row">
+        <label><input type="checkbox" id="skyon">sky</label>
+        <label><input type="checkbox" id="hazeon">haze</label>
+        <label><input type="checkbox" id="tinton">sun tint</label>
+        <label><input type="checkbox" id="shadowson">shadows</label>
+      </div>
+      <div class="row">
+        <input id="shade" type="range" min="0" max="100" value="45" title="how dark the shade is">
+        <span class="amt" id="shadeamount"></span>
+      </div>
+      <div class="row">
+        <input id="vis" type="range" min="0" max="100" value="50" title="visibility: how far one can see at sea level">
+        <span class="amt" id="visamount"></span>
+      </div>
+      <div class="row">
+        <input id="suntime" type="range" min="0" max="1439" value="840" step="5" title="the sun, by local solar time">
+        <span class="amt" id="sunamount"></span>
+        <button id="sunnow" title="follow the clock">now</button>
+      </div>
+    </div>
+    <div id="glamourpanel" class="panel">
+      <div class="head"><span>glamour</span><button class="x" id="glamourclose" title="hide (I)">✕</button></div>
+      <div class="row">
+        <label><input type="checkbox" id="glamouron">accumulate</label>
+        <span class="amt" id="glamoursamples"></span>
+      </div>
+      <div class="row">
+        <input id="aperture" type="range" min="0" max="100" value="0" title="lens aperture: depth of field around the crosshair">
+        <span class="amt" id="apertureamount"></span>
+      </div>
+      <div class="row">
+        <input id="soft" type="range" min="0" max="100" value="10" title="sun size: how soft shadow edges are">
+        <span class="amt" id="softamount"></span>
+      </div>
+      <div class="row">
+        <input id="glamourao" type="range" min="0" max="100" value="60" title="ambient occlusion: how much creases and street canyons darken">
+        <span class="amt" id="aoamount"></span>
       </div>
     </div>
     <div id="tunnelpanel" class="panel">
@@ -1027,6 +1074,7 @@
         roll: p.roll, fov: p.fov, zoom: map.getZoom(), gain, ortho, hug, miniature, full3d,
         nearCut: view.getNearCut(),
         lod: debugLod,
+        sky, glamour,
         tube: tubeRect ? { rect: tubeRect, on: tubeOn, ewAxis: tubeAxisEw, body: tubeBody } : null,
         tunnel: { on: tunnelOn && !tunnelClosing, c: tunnelC, across: tunnelAcross, lag: tunnelLag, k: tunnelK },
       }));
@@ -1463,6 +1511,8 @@
     if (mode === 'persp' && !tubeRect) viewRows.push([K('T'), 'tunnel']);
     viewRows.push([K('N'), miniature ? 'miniature off' : 'miniature (tilt-shift)']);
     if (!ortho) viewRows.push([K('H'), 'near cut']);
+    viewRows.push([K('Y'), 'sky: sun, haze']);
+    viewRows.push([K('I'), 'glamour: accumulate, aperture']);
     viewRows.push([K('C L K M'), 'debug: pick · lod · smoothing · mipmaps']);
     g.push(['view', viewRows]);
     if (document.body.classList.contains('overlay')) {
@@ -1630,7 +1680,7 @@
   const typingIn = (t) => !!t && (t.tagName === 'TEXTAREA' || t.isContentEditable
     || t.tagName === 'SELECT'
     || (t.tagName === 'INPUT' && !['range', 'checkbox', 'color', 'button', 'radio'].includes(t.type)));
-  const handled = new Set(['KeyW','KeyA','KeyS','KeyD','KeyQ','KeyE','KeyR','KeyF','KeyZ','KeyX','KeyG','KeyO','KeyC','KeyK','KeyL','KeyM','KeyT','KeyP','KeyV','KeyN','KeyB',
+  const handled = new Set(['KeyW','KeyA','KeyS','KeyD','KeyQ','KeyE','KeyR','KeyF','KeyZ','KeyX','KeyG','KeyO','KeyC','KeyK','KeyL','KeyM','KeyT','KeyP','KeyV','KeyN','KeyB','KeyY','KeyI',
     'Space','ArrowLeft','ArrowRight','ArrowUp','ArrowDown','Minus','Equal','Digit0','Numpad0','Home','KeyH']);
   let gain = 1; // re-initialized from the saved view once it loads
   let ortho = false;
@@ -1729,6 +1779,8 @@
     // like the native app's L key: tint octants red where a finer tile is
     // wanted but not yet downloaded
     if (e.code === 'KeyL' && !e.repeat) setDebugLod(!debugLod);
+    if (e.code === 'KeyY' && !e.repeat) document.body.classList.toggle('skypanel');
+    if (e.code === 'KeyI' && !e.repeat) document.body.classList.toggle('glamourpanel');
     // K, its neighbour: draw the smoothed copy of the track the follow camera
     // actually aims down, dashed on the map beside the track it was made from
     if (e.code === 'KeyK' && !e.repeat) setDebugSmooth(!debugSmooth);
@@ -4141,6 +4193,124 @@
     pasteState(text);
   });
 
+  // --- the sun ------------------------------------------------------------
+  // where the sun is at the camera, from the clock and the place (noaa's
+  // low-precision solar position, good to a fraction of a degree). the
+  // engine's sky and aerial perspective follow it. ?sun=az,el pins it, as
+  // captures need (test mode pins it by default — a golden can't depend on
+  // the time of day); ?sky=0 turns the atmosphere off; ?vis=km sets the
+  // visibility. __demo.sky({ hour: 19 }) and friends from the console
+  const sunPosition = (date, lat, lon) => {
+    const rad = Math.PI / 180;
+    const jd = date.getTime() / 86400000 + 2440587.5;
+    const t = (jd - 2451545) / 36525;
+    const L = (280.46646 + t * (36000.76983 + t * 0.0003032)) % 360;
+    const M = (357.52911 + t * (35999.05029 - 0.0001537 * t)) * rad;
+    const C = Math.sin(M) * (1.914602 - t * (0.004817 + 0.000014 * t)) + Math.sin(2 * M) * (0.019993 - 0.000101 * t) + Math.sin(3 * M) * 0.000289;
+    const lam = (L + C - 0.00569 - 0.00478 * Math.sin((125.04 - 1934.136 * t) * rad)) * rad;
+    const eps = (23.439291 - 0.0130042 * t) * rad;
+    const dec = Math.asin(Math.sin(eps) * Math.sin(lam));
+    const ra = Math.atan2(Math.cos(eps) * Math.sin(lam), Math.cos(lam));
+    const gmst = (280.46061837 + 360.98564736629 * (jd - 2451545)) % 360;
+    const ha = ((gmst + lon) * rad - ra);
+    const la = lat * rad;
+    const el = Math.asin(Math.sin(la) * Math.sin(dec) + Math.cos(la) * Math.cos(dec) * Math.cos(ha));
+    const az = Math.atan2(-Math.sin(ha), Math.cos(la) * Math.tan(dec) - Math.sin(la) * Math.cos(ha));
+    return { az: ((az / rad) + 360) % 360, el: el / rad };
+  };
+  // the atmosphere's state: the three passes, the visibility (km), and the
+  // sun's hour — local solar time at the camera, or null to follow the
+  // clock. a fixed afternoon by default: a place is not always wanted at
+  // the hour it happens to be there. part of the saved view
+  const SKY_DEFAULT = { sky: true, haze: true, tint: true, vis: 60, hour: 14, shadows: true, shade: 0.45 };
+  let sky = { ...SKY_DEFAULT, ...(START.sky || {}) };
+  if (QS.get('sky') === '0') sky = { ...sky, sky: false, haze: false, tint: false };
+  if (QS.has('shadowdebug')) view.setShadowDebug(+QS.get('shadowdebug'));
+  if (QS.has('aodebug')) view.setAoDebug(QS.get('aodebug') !== '0');
+  if (QS.has('vis')) sky.vis = parseFloat(QS.get('vis')) || sky.vis;
+  const sunPinned = QS.has('sun') ? QS.get('sun').split(',').map(Number)
+    : TEST ? [225, 35] : null;
+  const updateSun = () => {
+    if (!view.ready()) return;
+    if (sunPinned) { view.setSun(sunPinned[0], sunPinned[1]); return; }
+    const p = view.getPose();
+    let date = new Date();
+    if (sky.hour != null) {
+      // today, at that solar hour here: utc is solar time less the
+      // longitude's share of the day
+      date = new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate())
+        + (sky.hour - p.lon / 15) * 3600000);
+    }
+    const s = sunPosition(date, p.lat, p.lon);
+    view.setSun(s.az, s.el);
+  };
+  // glamour mode: while the camera sits still the engine averages frames
+  // drawn through sub-pixel offsets (supersampling) and, with an aperture,
+  // from points across a lens (thin-lens depth of field, focused on the
+  // crosshair). it converges in a second or two and starts over on any
+  // move. part of the saved view; ?glamour=1&aperture=m from the url
+  const GLAMOUR_DEFAULT = { on: false, aperture: 0, samples: 256, soft: 0.27, ao: 0.6 };
+  let glamour = { ...GLAMOUR_DEFAULT, ...(START.glamour || {}) };
+  if (typeof glamour.ao !== 'number') glamour.ao = GLAMOUR_DEFAULT.ao; // saved as a flag by an earlier build
+  if (QS.has('glamour')) glamour.on = QS.get('glamour') !== '0';
+  if (QS.has('aperture')) glamour.aperture = parseFloat(QS.get('aperture')) || 0;
+  const apertureFromSlider = (v) => v === 0 ? 0 : Math.round(100 * Math.pow(2, (v - 100) / 100 * 8)) / 100; // 0, then ~0.4..100 m, log
+  const sliderFromAperture = (m) => m <= 0 ? 0 : Math.round(100 + Math.log2(m / 100) / 8 * 100);
+  const applyGlamour = () => {
+    // the slider's 0..1 is up to three times the occlusion's natural weight
+    view.setGlamour(glamour.on, glamour.aperture, glamour.samples, glamour.soft, glamour.ao * 3);
+    document.getElementById('glamourao').value = Math.round(glamour.ao * 100);
+    document.getElementById('aoamount').textContent = `occl ${Math.round(glamour.ao * 100)}%`;
+    document.getElementById('soft').value = Math.round(glamour.soft / 2.7 * 100);
+    document.getElementById('softamount').textContent = `sun ${glamour.soft.toFixed(2)}°`;
+    document.getElementById('glamouron').checked = glamour.on;
+    document.getElementById('aperture').value = sliderFromAperture(glamour.aperture);
+    document.getElementById('apertureamount').textContent = glamour.aperture ? `${glamour.aperture} m` : 'pinhole';
+    saveView();
+  };
+  document.getElementById('glamouron').addEventListener('change', (e) => { glamour.on = e.target.checked; applyGlamour(); });
+  document.getElementById('glamourao').addEventListener('input', (e) => { glamour.ao = +e.target.value / 100; applyGlamour(); });
+  document.getElementById('aperture').addEventListener('input', (e) => { glamour.aperture = apertureFromSlider(+e.target.value); applyGlamour(); });
+  // 0..2.7 degrees of sun radius, the real one a tenth of the way along
+  document.getElementById('soft').addEventListener('input', (e) => { glamour.soft = Math.round(+e.target.value * 2.7) / 100; applyGlamour(); });
+  document.getElementById('glamourclose').addEventListener('click', () => { document.body.classList.remove('glamourpanel'); canvas.focus(); });
+  setInterval(() => {
+    if (!view.ready() || !document.body.classList.contains('glamourpanel')) return;
+    const st = view.getStats();
+    document.getElementById('glamoursamples').textContent = glamour.on ? `${st.accumSamples}/${st.accumMax}` : '';
+  }, 150);
+
+  const skyEl = (id) => document.getElementById(id);
+  const visFromSlider = (v) => Math.round(5 * Math.pow(2, v / 100 * 6)); // 5..320 km, log
+  const sliderFromVis = (km) => Math.round(Math.log2(km / 5) / 6 * 100);
+  const applySky = () => {
+    view.setAtmosphere(sky.sky, sky.haze, sky.tint, sky.vis);
+    view.setShadows(sky.shadows, sky.shade);
+    skyEl('shadowson').checked = sky.shadows;
+    skyEl('shade').value = Math.round(sky.shade * 100);
+    skyEl('shade').disabled = !sky.shadows;
+    skyEl('shadeamount').textContent = `shade ${Math.round(sky.shade * 100)}%`;
+    skyEl('skyon').checked = sky.sky;
+    skyEl('hazeon').checked = sky.haze;
+    skyEl('tinton').checked = sky.tint;
+    skyEl('vis').value = sliderFromVis(sky.vis);
+    skyEl('visamount').textContent = `${sky.vis} km`;
+    skyEl('suntime').value = sky.hour == null ? 0 : Math.round(sky.hour * 60);
+    skyEl('sunamount').textContent = sky.hour == null ? 'now'
+      : `${String(Math.floor(sky.hour)).padStart(2, '0')}:${String(Math.round((sky.hour % 1) * 60)).padStart(2, '0')}`;
+    skyEl('sunnow').disabled = sky.hour == null;
+    updateSun();
+    saveView();
+  };
+  skyEl('shade').addEventListener('input', (e) => { sky.shade = +e.target.value / 100; applySky(); });
+  for (const [id, key] of [['skyon', 'sky'], ['hazeon', 'haze'], ['tinton', 'tint'], ['shadowson', 'shadows']])
+    skyEl(id).addEventListener('change', (e) => { sky[key] = e.target.checked; applySky(); });
+  skyEl('vis').addEventListener('input', (e) => { sky.vis = visFromSlider(+e.target.value); applySky(); });
+  skyEl('suntime').addEventListener('input', (e) => { sky.hour = +e.target.value / 60; applySky(); });
+  skyEl('sunnow').addEventListener('click', () => { sky.hour = null; applySky(); canvas.focus(); });
+  skyEl('skyclose').addEventListener('click', () => { document.body.classList.remove('skypanel'); canvas.focus(); });
+  setInterval(updateSun, 5000);
+
   // ?lod=2 draws half as fine, which is a quarter of the tiles — the volume
   // of data a view asks for is what decides whether a deep zoom ever finishes,
   // and this is the only lever on it. live from the console too, via __demo
@@ -4151,6 +4321,8 @@
 
   // for devtools poking and automated testing
   window.__demo = { view, map, marker, isFollowing: () => following,
+    sky: (patch) => { Object.assign(sky, patch); applySky(); return { ...sky }; },
+    glamour: (patch) => { Object.assign(glamour, patch); applyGlamour(); return { ...glamour }; },
     lod: (v) => { if (v != null) view.setLodScale(v); return view.getLodScale(); },
     tube: () => ({ rect: tubeRect, on: tubeOn, body: tubeBody, curl }),
     body: (text) => text ? setBodyMesh(text) : view.bodyReady(),
@@ -4215,6 +4387,8 @@
       view.setTerrainFollow(hug);
       if (START.miniature) setMiniature(true);
       if (START.lod) setDebugLod(true);
+      applySky();
+      applyGlamour();
       // a banked camera comes back banked. inside the tube the bank belongs to
       // the airplane frame and is restored after the roll-up below instead,
       // because that is what creates the frame to bank

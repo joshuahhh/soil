@@ -40,9 +40,64 @@ struct dof_gl_t {
 	bool ortho = false;
 };
 
+// the sky pass: a fullscreen triangle drawn after the terrain at the far
+// plane, a gradient by elevation above the true horizon with the sun in it
+struct sky_gl_t {
+	GLuint program = 0;
+	GLint right_loc, up_loc, fwd_loc, local_up_loc, sun_loc, params_loc, zenith_loc, haze_loc, alt_loc;
+};
+
+// glamour mode's accumulator: frames rendered with sub-pixel and lens
+// offsets are summed into a float texture and shown as their average, which
+// converges while the camera sits still — supersampling and thin-lens depth
+// of field for the price of waiting a second (see EarthView::frame)
+struct accum_gl_t {
+	bool on = false;
+	bool hold = false; // enough samples: present the average, add nothing
+	bool failed = false; // no float render target here; stays off
+	GLuint fbo = 0, tex = 0, present_program = 0, blit_program = 0;
+	int w = 0, h = 0;
+	int samples = 0; // frames summed so far
+	GLint present_tex_loc, present_scale_loc, blit_tex_loc;
+	// ambient occlusion, applied to each sample on its way in (rotated
+	// differently each time, so the noise averages out): on, strength,
+	// this sample's rotation; and the camera it needs to read depth back
+	// into positions, set by the engine every frame
+	bool ao_on = true;
+	float ao_strength = 1.0f, ao_rotation = 0;
+	float near = 1, far = 1e6, tan_half = 0.414f, aspect = 1.6f;
+	bool ortho = false;
+	GLuint ao_program = 0;
+	GLint ao_color_loc, ao_depth_loc, ao_viewport_loc, ao_planes_loc, ao_proj_loc, ao_params_loc;
+};
+
+// sun shadows: a depth map rendered from the sun (orthographic, fitted by
+// the engine to the near part of the view) over the drawn nodes, sampled by
+// the terrain shader with hardware pcf. lives on texture unit 3, always
+// bound — a 1x1 placeholder until the first real pass — so the terrain
+// program's shadow sampler never points at nothing
+struct shadow_gl_t {
+	GLuint fbo = 0, tex = 0, program = 0;
+	int size = 0; // the depth texture's allocated size (1 = placeholder)
+	GLint mv_loc, box_loc, mask_loc;
+};
+static const int shadow_unit = 3;
+static int shadow_debug = 1; // 1 normal; 2 facing term only, 3 cast shadows only
+static bool ao_debug = false; // glamour shows the occlusion alone
+
 struct gl_ctx_t {
 	int width, height; // weblib: canvas drawable size, set by the shell
 	dof_gl_t dof;
+	sky_gl_t sky;
+	accum_gl_t accum;
+	shadow_gl_t shadow;
+	// the framebuffer the scene is being drawn into this frame, and its
+	// size: an offscreen pass (the shadow map) puts it back afterwards
+	GLuint scene_fbo = 0;
+	int scene_w = 0, scene_h = 0;
+	GLint shadow_mv_loc, shadow_box_loc, shadow_params_loc, shadow_map_loc, shadow_up_loc;
+	// aerial perspective: see renderSetAtmosphere
+	GLint fog_loc, haze_loc, tint_loc, fog_planes_loc, cam_loc, eye_loc, cam_params_loc, viewport_loc;
 	GLuint program;
 	GLint transform_loc;
 	GLint tube_on_loc;
@@ -269,8 +324,13 @@ void renderDofEnsure(render_ctx_t &ctx, int w, int h) {
 }
 
 void renderFrameBegin(render_ctx_t &ctx, void *window, int width, int height, int sky) {
-	if (ctx.dof.on) renderDofEnsure(ctx, width, height);
-	glBindFramebuffer(GL_FRAMEBUFFER, ctx.dof.on ? ctx.dof.fbo : 0);
+	// the scene goes to the offscreen target whenever a pass reads it back
+	auto offscreen = ctx.dof.on || ctx.accum.on;
+	if (offscreen) renderDofEnsure(ctx, width, height);
+	ctx.scene_fbo = offscreen ? ctx.dof.fbo : 0;
+	ctx.scene_w = width;
+	ctx.scene_h = height;
+	glBindFramebuffer(GL_FRAMEBUFFER, ctx.scene_fbo);
 	glViewport(0, 0, width, height);
 	glClearColor((sky>>16 & 0xff) / 255.0f, (sky>>8 & 0xff) / 255.0f, (sky & 0xff) / 255.0f, 1.0f);
 	glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
@@ -365,12 +425,207 @@ void renderSetBody(render_ctx_t &ctx, bool on, float curl, const float *bands4) 
 
 // resolve the miniature pass onto the canvas (see dof_gl_t). the terrain
 // program is left current again, as the rest of the frame code assumes
+// the accumulator's target, (re)made at the canvas size. a float texture
+// holding the running average (not the sum: a half float summing 128 frames
+// rounds every addition to a sixteenth once past 64, and the error, varying
+// with the value, drew contour bands across the sky)
+void renderAccumEnsure(render_ctx_t &ctx, int w, int h) {
+	auto &a = ctx.accum;
+	if (a.fbo && a.w == w && a.h == h) return;
+	if (!a.fbo) glGenFramebuffers(1, &a.fbo);
+	if (!a.tex) glGenTextures(1, &a.tex);
+	glBindTexture(GL_TEXTURE_2D, a.tex);
+	glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, w, h, 0, GL_RGBA, GL_HALF_FLOAT, NULL);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+	glBindTexture(GL_TEXTURE_2D, 0);
+	glBindFramebuffer(GL_FRAMEBUFFER, a.fbo);
+	glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, a.tex, 0);
+	auto status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+	if (status != GL_FRAMEBUFFER_COMPLETE) {
+		printf("glamour: no float render target (0x%x); accumulation off\n", status);
+		a.failed = true;
+		a.on = false;
+	}
+	glBindFramebuffer(GL_FRAMEBUFFER, 0);
+	a.w = w;
+	a.h = h;
+	a.samples = 0;
+}
+
+GLuint makeShader(const char* vert_src, const char* frag_src);
+
+void renderAccumInit(render_ctx_t &ctx) {
+	auto &a = ctx.accum;
+	static const char *fullscreen_vs =
+		"#version 300 es\n"
+		"out vec2 v_uv;"
+		"void main() {"
+		"	vec2 p = vec2(gl_VertexID == 1 ? 3.0 : -1.0, gl_VertexID == 2 ? 3.0 : -1.0);"
+		"	v_uv = p * 0.5 + 0.5;"
+		"	gl_Position = vec4(p, 0.0, 1.0);"
+		"}";
+	a.present_program = makeShader(fullscreen_vs,
+		"#version 300 es\n"
+		"precision highp float;"
+		"uniform sampler2D tex;"
+		"uniform float scale;" // 1 / samples
+		"in vec2 v_uv;"
+		"out vec4 frag_color;"
+		"void main() { frag_color = vec4(texture(tex, v_uv).rgb * scale, 1.0); }");
+	a.present_tex_loc = glGetUniformLocation(a.present_program, "tex");
+	a.present_scale_loc = glGetUniformLocation(a.present_program, "scale");
+	a.blit_program = makeShader(fullscreen_vs,
+		"#version 300 es\n"
+		"precision highp float;"
+		"uniform sampler2D tex;"
+		"in vec2 v_uv;"
+		"out vec4 frag_color;"
+		"void main() { frag_color = vec4(texture(tex, v_uv).rgb, 1.0); }");
+	a.blit_tex_loc = glGetUniformLocation(a.blit_program, "tex");
+	// ambient occlusion from the depth buffer: each pixel's view-space
+	// position and face normal, and a spiral of taps around it out to a
+	// radius in metres (a fraction of the distance, held between half a
+	// metre and thirty); a tap occludes by how far above the surface's
+	// plane it sits, and not at all past the radius, so a building's
+	// silhouette doesn't darken the distant ground behind it. the cap is
+	// high because street canyons are: a 30 m one left every wall of a
+	// manhattan street outside the radius
+	a.ao_program = makeShader(fullscreen_vs,
+		"#version 300 es\n"
+		"precision highp float;"
+		"uniform sampler2D color_tex;"
+		"uniform sampler2D depth_tex;"
+		"uniform vec2 viewport;"
+		"uniform vec3 planes;" // near, far, ortho flag
+		"uniform vec2 proj;" // tan(fov/2) (ortho: half height, metres), aspect
+		"uniform vec3 params;" // strength, rotation, radius as a fraction of distance
+		"in vec2 v_uv;"
+		"out vec4 frag_color;"
+		"float lin(float d) {"
+		"	if (planes.z > 0.5) return planes.x + d * (planes.y - planes.x);"
+		"	float z = d * 2.0 - 1.0;"
+		"	return 2.0 * planes.x * planes.y / (planes.y + planes.x - z * (planes.y - planes.x));"
+		"}"
+		"vec3 pos(vec2 uv) {"
+		"	float z = lin(texture(depth_tex, uv).r);"
+		"	vec2 n = uv * 2.0 - 1.0;"
+		"	if (planes.z > 0.5) return vec3(n.x * proj.x * proj.y, n.y * proj.x, -z);"
+		"	return vec3(n.x * proj.x * proj.y * z, n.y * proj.x * z, -z);"
+		"}"
+		"void main() {"
+		"	vec3 c = texture(color_tex, v_uv).rgb;"
+		"	if (texture(depth_tex, v_uv).r >= 1.0 || params.x == 0.0) { frag_color = vec4(params.x < 0.0 ? vec3(1.0) : c, 1.0); return; }"
+		"	vec3 p = pos(v_uv);"
+		"	vec3 n = normalize(cross(dFdx(p), dFdy(p)));"
+		"	if (dot(n, p) > 0.0) n = -n;" // toward the camera
+		"	float z = -p.z;"
+		"	float R = clamp(params.z * z, 0.5, 150.0);"
+		"	float rpx = planes.z > 0.5 ? R / (2.0 * proj.x) * viewport.y : R / (z * proj.x) * 0.5 * viewport.y;"
+		"	rpx = min(rpx, 0.08 * viewport.y);"
+		"	float occ = 0.0;"
+		"	const int N = 16;"
+		"	for (int i = 0; i < N; i++) {"
+		"		float r = sqrt((float(i) + 0.5) / float(N)) * rpx;"
+		"		float a = float(i) * 2.39996 + params.y;"
+		"		vec2 uv = v_uv + vec2(cos(a), sin(a)) * r / viewport;"
+		"		if (uv.x < 0.0 || uv.y < 0.0 || uv.x > 1.0 || uv.y > 1.0) continue;"
+		"		vec3 v = pos(uv) - p;"
+		"		float l = length(v);"
+		"		if (l < 1e-4) continue;"
+		"		occ += max(0.0, dot(v / l, n) - 0.1) * (1.0 - smoothstep(0.7 * R, R, l));"
+		"	}"
+		"	float ao = clamp(1.0 - abs(params.x) * 1.6 * occ / float(N), 0.0, 1.0);"
+		// a negative strength shows the occlusion alone (?aodebug)
+		"	frag_color = vec4(params.x < 0.0 ? vec3(ao) : c * ao, 1.0);"
+		"}");
+	a.ao_color_loc = glGetUniformLocation(a.ao_program, "color_tex");
+	a.ao_depth_loc = glGetUniformLocation(a.ao_program, "depth_tex");
+	a.ao_viewport_loc = glGetUniformLocation(a.ao_program, "viewport");
+	a.ao_planes_loc = glGetUniformLocation(a.ao_program, "planes");
+	a.ao_proj_loc = glGetUniformLocation(a.ao_program, "proj");
+	a.ao_params_loc = glGetUniformLocation(a.ao_program, "params");
+}
+
+void dofDraw(render_ctx_t &ctx);
+
+// the scene is drawn; put it on the screen. plain frames go straight there.
+// with the miniature on, the scene was drawn offscreen and the blur pass
+// writes it out. in glamour mode the pass (or a copy) is summed into the
+// accumulator instead, and the average of the samples so far is presented
 void renderFrameEnd(render_ctx_t &ctx) {
 	auto &d = ctx.dof;
-	if (!d.on) return;
-	glBindFramebuffer(GL_FRAMEBUFFER, 0);
-	glViewport(0, 0, d.w, d.h);
+	auto &a = ctx.accum;
+	if (!d.on && !a.on) return;
 	glDisable(GL_DEPTH_TEST);
+	if (a.on) {
+		renderAccumEnsure(ctx, d.w, d.h);
+		if (a.on) { // (ensure can turn it off)
+			glBindFramebuffer(GL_FRAMEBUFFER, a.fbo);
+			glViewport(0, 0, a.w, a.h);
+			if (!a.hold || a.samples == 0) {
+				// the n-th sample goes in with weight 1/n: the first replaces
+				// whatever was there, and the texture is always the average
+				glEnable(GL_BLEND);
+				glBlendColor(0, 0, 0, 1.0f / (float)(a.samples + 1));
+				glBlendFunc(GL_CONSTANT_ALPHA, GL_ONE_MINUS_CONSTANT_ALPHA);
+				if (d.on) dofDraw(ctx);
+				else if (a.ao_on && a.ao_strength > 0) {
+					glUseProgram(a.ao_program);
+					glBindVertexArray(d.vao);
+					glActiveTexture(GL_TEXTURE1);
+					glBindTexture(GL_TEXTURE_2D, d.depth);
+					glActiveTexture(GL_TEXTURE0);
+					glBindTexture(GL_TEXTURE_2D, d.color);
+					glUniform1i(a.ao_color_loc, 0);
+					glUniform1i(a.ao_depth_loc, 1);
+					glUniform2f(a.ao_viewport_loc, (float)a.w, (float)a.h);
+					glUniform3f(a.ao_planes_loc, a.near, a.far, a.ortho ? 1.0f : 0.0f);
+					glUniform2f(a.ao_proj_loc, a.tan_half, a.aspect);
+					glUniform3f(a.ao_params_loc, ao_debug ? -a.ao_strength : a.ao_strength, a.ao_rotation, 0.04f);
+					glDrawArrays(GL_TRIANGLES, 0, 3);
+				} else {
+					glUseProgram(a.blit_program);
+					glBindVertexArray(d.vao);
+					glActiveTexture(GL_TEXTURE0);
+					glBindTexture(GL_TEXTURE_2D, d.color);
+					glUniform1i(a.blit_tex_loc, 0);
+					glDrawArrays(GL_TRIANGLES, 0, 3);
+				}
+				glDisable(GL_BLEND);
+				a.samples++;
+			}
+			glBindFramebuffer(GL_FRAMEBUFFER, 0);
+			glViewport(0, 0, a.w, a.h);
+			glUseProgram(a.present_program);
+			glBindVertexArray(d.vao);
+			glActiveTexture(GL_TEXTURE0);
+			glBindTexture(GL_TEXTURE_2D, a.tex);
+			glUniform1i(a.present_tex_loc, 0);
+			glUniform1f(a.present_scale_loc, 1.0f);
+			glDrawArrays(GL_TRIANGLES, 0, 3);
+			glBindVertexArray(0);
+		}
+	}
+	if (!a.on) {
+		glBindFramebuffer(GL_FRAMEBUFFER, 0);
+		glViewport(0, 0, d.w, d.h);
+		dofDraw(ctx);
+	}
+	glBindVertexArray(0);
+	glActiveTexture(GL_TEXTURE1);
+	glBindTexture(GL_TEXTURE_2D, 0);
+	glActiveTexture(GL_TEXTURE0); // the terrain textures live on unit 0
+	glEnable(GL_DEPTH_TEST);
+	glUseProgram(ctx.program);
+}
+
+// the miniature's blur pass over the offscreen scene, into whatever
+// framebuffer is bound
+void dofDraw(render_ctx_t &ctx) {
+	auto &d = ctx.dof;
 	glUseProgram(d.program);
 	glBindVertexArray(d.vao);
 	glActiveTexture(GL_TEXTURE0);
@@ -383,12 +638,6 @@ void renderFrameEnd(render_ctx_t &ctx) {
 	glUniform3f(d.planes_loc, d.near, d.far, d.ortho ? 1.0f : 0.0f);
 	glUniform3f(d.params_loc, d.focus, d.strength * d.h, d.range);
 	glDrawArrays(GL_TRIANGLES, 0, 3);
-	glBindVertexArray(0);
-	glActiveTexture(GL_TEXTURE1);
-	glBindTexture(GL_TEXTURE_2D, 0);
-	glActiveTexture(GL_TEXTURE0); // the terrain textures live on unit 0
-	glEnable(GL_DEPTH_TEST);
-	glUseProgram(ctx.program);
 }
 
 
@@ -689,6 +938,223 @@ void renderPathDraw(render_ctx_t &ctx, const float *transform16, const float *rg
 }
 
 // backend init
+// the terrain program's aerial-perspective uniforms, once per frame. the
+// terrain program must be current
+void renderSetAtmosphere(render_ctx_t &ctx, bool on, float visibility_m, const float *haze3,
+		const float *tint3, float near, float far, bool ortho,
+		const float *cam9, const float *eye3, float tan_half_fov, float aspect, float planet_r, float scale_h,
+		int width, int height) {
+	glUniform4f(ctx.fog_loc, visibility_m, on ? 1.0f : 0.0f, 0.0f, 0.0f);
+	glUniform3fv(ctx.haze_loc, 1, haze3);
+	glUniform3fv(ctx.tint_loc, 1, tint3);
+	glUniform3f(ctx.fog_planes_loc, near, far, ortho ? 1.0f : 0.0f);
+	glUniformMatrix3fv(ctx.cam_loc, 1, GL_FALSE, cam9);
+	glUniform3fv(ctx.eye_loc, 1, eye3);
+	glUniform4f(ctx.cam_params_loc, tan_half_fov, aspect, planet_r, scale_h);
+	glUniform2f(ctx.viewport_loc, (float)width, (float)height);
+}
+
+// (re)allocate the shadow map at size x size. the placeholder is 1x1
+void renderShadowEnsure(render_ctx_t &ctx, int size) {
+	auto &s = ctx.shadow;
+	if (s.tex && s.size == size) return;
+	if (!s.tex) glGenTextures(1, &s.tex);
+	glActiveTexture(GL_TEXTURE0 + shadow_unit);
+	glBindTexture(GL_TEXTURE_2D, s.tex);
+	glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT32F, size, size, 0, GL_DEPTH_COMPONENT, GL_FLOAT, NULL);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_COMPARE_MODE, GL_COMPARE_REF_TO_TEXTURE);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_COMPARE_FUNC, GL_LEQUAL);
+	glActiveTexture(GL_TEXTURE0);
+	if (!s.fbo) glGenFramebuffers(1, &s.fbo);
+	glBindFramebuffer(GL_FRAMEBUFFER, s.fbo);
+	glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, s.tex, 0);
+	GLenum none = GL_NONE;
+	glDrawBuffers(1, &none);
+	glReadBuffer(GL_NONE);
+	auto status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+	if (status != GL_FRAMEBUFFER_COMPLETE) printf("shadow framebuffer incomplete: 0x%x\n", status);
+	glBindFramebuffer(GL_FRAMEBUFFER, ctx.scene_fbo);
+	s.size = size;
+}
+
+void renderShadowInit(render_ctx_t &ctx) {
+	auto &s = ctx.shadow;
+	s.program = makeShader(
+		"#version 300 es\n"
+		"uniform mat4 shadow_mv;"
+		"uniform vec4 shadow_box;" // half x, half y, near, far (metres along the sun)
+		"uniform int octant_mask;"
+		"layout(location = 0) in vec3 position;"
+		"layout(location = 1) in float octant;"
+		"out float v_mask;"
+		"void main() {"
+		"	vec3 v = (shadow_mv * vec4(position, 1.0)).xyz;"
+		// the octants a finer drawn tile covers cast through that tile,
+		// not through this coarser copy of the same ground — and unlike the
+		// colour pass, which pushes a triangle straddling the boundary back
+		// in depth, here any part-masked one goes: a coarse triangle sitting
+		// above the fine surface would shade it
+		"	v_mask = ((octant_mask >> int(octant)) & 1) != 0 ? 0.0 : 1.0;"
+		"	gl_Position = vec4(v.xy / shadow_box.xy,"
+		"		(-v.z - shadow_box.z) / (shadow_box.w - shadow_box.z) * 2.0 - 1.0, 1.0);"
+		"}",
+		"#version 300 es\n"
+		"precision highp float;"
+		"in float v_mask;"
+		"void main() { if (v_mask < 0.999) discard; }"
+	);
+	s.mv_loc = glGetUniformLocation(s.program, "shadow_mv");
+	s.box_loc = glGetUniformLocation(s.program, "shadow_box");
+	s.mask_loc = glGetUniformLocation(s.program, "octant_mask");
+	renderShadowEnsure(ctx, 1);
+}
+
+// the shadow pass: into the map, depth only, both faces (terrain is a
+// sheet, not a solid), with a slope-scaled depth offset against acne
+static bool shadow_cull_was = true;
+void renderShadowBegin(render_ctx_t &ctx, int size, const float *box4) {
+	auto &s = ctx.shadow;
+	renderShadowEnsure(ctx, size);
+	glBindFramebuffer(GL_FRAMEBUFFER, s.fbo);
+	glViewport(0, 0, s.size, s.size);
+	glClear(GL_DEPTH_BUFFER_BIT);
+	glUseProgram(s.program);
+	glUniform4fv(s.box_loc, 1, box4);
+	shadow_cull_was = glIsEnabled(GL_CULL_FACE);
+	glDisable(GL_CULL_FACE);
+	glEnable(GL_POLYGON_OFFSET_FILL);
+	glPolygonOffset(2.0f, 2.0f);
+}
+
+void renderShadowNode(render_ctx_t &ctx, const float *mv16, uint8_t octant_mask) {
+	glUniformMatrix4fv(ctx.shadow.mv_loc, 1, GL_FALSE, mv16);
+	glUniform1i(ctx.shadow.mask_loc, octant_mask);
+}
+
+void renderShadowMesh(const rocktree_t::node_t::mesh_t &mesh) {
+	glBindVertexArray(mesh.vao);
+	glDrawElements(GL_TRIANGLE_STRIP, mesh.indices.size(), GL_UNSIGNED_SHORT, NULL);
+}
+
+void renderShadowEnd(render_ctx_t &ctx) {
+	glBindVertexArray(0);
+	glDisable(GL_POLYGON_OFFSET_FILL);
+	glPolygonOffset(0.0f, 0.0f);
+	if (shadow_cull_was) glEnable(GL_CULL_FACE);
+	glBindFramebuffer(GL_FRAMEBUFFER, ctx.scene_fbo);
+	glViewport(0, 0, ctx.scene_w, ctx.scene_h);
+	glUseProgram(ctx.program);
+}
+
+// the terrain program's shadow uniforms: per frame, then per node
+void renderSetShadow(render_ctx_t &ctx, bool on, const float *box4, float strength, float texel_uv, float bias,
+		const float *up3) {
+	glUniform4f(ctx.shadow_params_loc, on ? (float)shadow_debug : 0.0f, strength, texel_uv, bias);
+	if (box4) glUniform4fv(ctx.shadow_box_loc, 1, box4);
+	if (up3) glUniform3fv(ctx.shadow_up_loc, 1, up3);
+}
+
+void renderSetShadowNode(render_ctx_t &ctx, const float *mv16) {
+	glUniformMatrix4fv(ctx.shadow_mv_loc, 1, GL_FALSE, mv16);
+}
+
+void renderSkyInit(render_ctx_t &ctx) {
+	auto &s = ctx.sky;
+	s.program = makeShader(
+		"#version 300 es\n"
+		"out vec2 v_uv;"
+		"void main() {"
+		"	vec2 p = vec2(gl_VertexID == 1 ? 3.0 : -1.0, gl_VertexID == 2 ? 3.0 : -1.0);"
+		"	v_uv = p * 0.5 + 0.5;"
+		// at the far plane exactly: it shows wherever nothing was drawn
+		"	gl_Position = vec4(p, 1.0, 1.0);"
+		"}",
+		"#version 300 es\n"
+		"precision highp float;"
+		"uniform vec3 cam_right, cam_up, cam_fwd;" // the camera's frame, world
+		"uniform vec3 local_up;" // straight up at the eye
+		"uniform vec3 sun;" // toward the sun, unit
+		"uniform vec4 params;" // tan(fov/2), aspect, horizon dip below level (rad), sun elevation (rad)
+		"uniform vec3 zenith, haze;"
+		// how much sky there is above the eye (1 on the ground, 0 in
+		// space) and the angular thickness of the limb seen from there
+		"uniform vec2 alt_params;"
+		"in vec2 v_uv;"
+		"out vec4 frag_color;"
+		"void main() {"
+		"	vec2 n = v_uv * 2.0 - 1.0;"
+		"	vec3 dir = normalize(cam_fwd + cam_right * (n.x * params.x * params.y) + cam_up * (n.y * params.x));"
+		"	float el = asin(clamp(dot(dir, local_up), -1.0, 1.0));"
+		// height above the horizon line, which sits below level by the dip
+		// (more the higher you are)
+		"	float h = el + params.z;"
+		"	vec3 c;"
+		"	float d = max(dot(dir, sun), 0.0);"
+		"	vec3 sunc = vec3(1.0, 0.96, 0.88);"
+		"	if (h >= 0.0) {"
+		// haze at the horizon, the zenith colour high up; the hazy band is
+		// thick, as it is, and the gradient slow. the whole of it thins
+		// away with altitude (space is black), leaving the limb: the
+		// atmosphere seen edge-on just above the horizon line
+		"		c = mix(haze, zenith, pow(clamp(h / 1.3, 0.0, 1.0), 0.5)) * alt_params.x;"
+		"		c += haze * (1.0 - alt_params.x) * exp(-h / alt_params.y);"
+		// the disc (half a degree across), its glow, and a wide forward
+		// scatter that brightens the sky around a low sun
+		"		c += sunc * (0.5 * pow(d, 1400.0) + (0.14 * pow(d, 24.0) + 0.05 * pow(d, 3.0)) * alt_params.x);"
+		"		if (d > 0.99996) c = sunc * 1.4;"
+		"	} else {"
+		// below the horizon line nothing is drawn only past the far plane:
+		// the planet's limb from high up. darken toward it
+		"		c = mix(haze, haze * 0.3, clamp(-h * 2.5, 0.0, 1.0)) * alt_params.x;"
+		"	}"
+		"	frag_color = vec4(clamp(c, 0.0, 1.0), 1.0);"
+		"}"
+	);
+	s.right_loc = glGetUniformLocation(s.program, "cam_right");
+	s.up_loc = glGetUniformLocation(s.program, "cam_up");
+	s.fwd_loc = glGetUniformLocation(s.program, "cam_fwd");
+	s.local_up_loc = glGetUniformLocation(s.program, "local_up");
+	s.sun_loc = glGetUniformLocation(s.program, "sun");
+	s.params_loc = glGetUniformLocation(s.program, "params");
+	s.zenith_loc = glGetUniformLocation(s.program, "zenith");
+	s.haze_loc = glGetUniformLocation(s.program, "haze");
+	s.alt_loc = glGetUniformLocation(s.program, "alt_params");
+}
+
+// after the terrain: the sky fills whatever the depth buffer still has at
+// the far plane. leaves the terrain program current
+void renderSkyDraw(render_ctx_t &ctx, const float *right3, const float *up3, const float *fwd3,
+		const float *local_up3, const float *sun3, float tan_half_fov, float aspect,
+		float horizon_dip, float sun_el, const float *zenith3, const float *haze3,
+		float sky_amount, float limb_angle) {
+	auto &s = ctx.sky;
+	auto cull = glIsEnabled(GL_CULL_FACE);
+	glUseProgram(s.program);
+	glUniform3fv(s.right_loc, 1, right3);
+	glUniform3fv(s.up_loc, 1, up3);
+	glUniform3fv(s.fwd_loc, 1, fwd3);
+	glUniform3fv(s.local_up_loc, 1, local_up3);
+	glUniform3fv(s.sun_loc, 1, sun3);
+	glUniform4f(s.params_loc, tan_half_fov, aspect, horizon_dip, sun_el);
+	glUniform3fv(s.zenith_loc, 1, zenith3);
+	glUniform3fv(s.haze_loc, 1, haze3);
+	glUniform2f(s.alt_loc, sky_amount, limb_angle);
+	glDepthFunc(GL_LEQUAL); // equal to the cleared depth, where nothing was drawn
+	glDepthMask(GL_FALSE);
+	glDisable(GL_CULL_FACE);
+	glBindVertexArray(ctx.dof.vao); // the empty one
+	glDrawArrays(GL_TRIANGLES, 0, 3);
+	glBindVertexArray(0);
+	glDepthMask(GL_TRUE);
+	glDepthFunc(GL_LESS);
+	if (cull) glEnable(GL_CULL_FACE);
+	glUseProgram(ctx.program);
+}
+
 void renderInit(render_ctx_t &ctx, void *) {
 	// gles 3.0 dropped the single-string GL_EXTENSIONS query — it returns null
 	// here, and taking that as "no s3tc" would silently push every texture
@@ -758,9 +1224,18 @@ void renderInit(render_ctx_t &ctx, void *) {
 		// see earth_core's draw loop for the legend)
 		"uniform int octant_mask;"
 		"uniform int stale_mask;"
-		"in vec3 position;"
-		"in float octant;"
-		"in vec2 texcoords;"
+		// near, far, ortho flag: the fragment's distance from the eye for
+		// the aerial perspective comes out of the clip position
+		"uniform vec3 fog_planes;"
+		"out float v_dist;"
+		// the sun's view of this vertex: metres, in a frame centred on the
+		// shadow map's box with +z toward the sun (see renderShadowBegin)
+		"uniform mat4 shadow_mv;"
+		"out vec3 v_sunv;"
+		// fixed locations: the shadow pass's program reads the same vaos
+		"layout(location = 0) in vec3 position;"
+		"layout(location = 1) in float octant;"
+		"layout(location = 2) in vec2 texcoords;"
 		"out vec2 v_texcoords;"
 		"flat out float v_stale;"
 		"out float v_mask;"
@@ -856,6 +1331,10 @@ void renderInit(render_ctx_t &ctx, void *) {
 		"	}"
 		"	p.z += (1.0 - mask) * 0.002 * p.w;"
 		"	gl_Position = p;"
+		"	v_sunv = (shadow_mv * vec4(position, 1.0)).xyz;"
+		// view depth: w in perspective; in ortho w is 1 and ndc z is linear
+		"	v_dist = fog_planes.z > 0.5"
+		"		? fog_planes.x + (p.z / p.w * 0.5 + 0.5) * (fog_planes.y - fog_planes.x) : p.w;"
 		"}",
 
 		"#version 300 es\n"
@@ -869,6 +1348,28 @@ void renderInit(render_ctx_t &ctx, void *) {
 		"uniform bool debug_lod;"
 		"uniform bool tube_on;"
 		"uniform mediump int tube_pass;"
+		// aerial perspective: fog.x the visibility (m) at sea level, fog.y
+		// on/off; haze what distance fades toward; tint the sun's colour on
+		// the ground (warm and dim at a low sun, dark at night). the camera
+		// frame and eye (world, float — metres of precision are plenty for
+		// a height) recover the fragment's world height from its depth
+		"uniform vec4 fog;"
+		"uniform vec3 haze;"
+		"uniform vec3 tint;"
+		"uniform mat3 cam;" // columns: right, up, forward
+		"uniform vec3 eye;"
+		"uniform vec3 fog_planes;" // (the vertex stage's; same uniform)
+		"uniform vec4 cam_params;" // tan(fov/2), aspect, planet radius, scale height
+		"uniform vec2 viewport;"
+		"in float v_dist;"
+		// sun shadows: x on, y strength (how dark the shade is), z one
+		// shadow texel in uv, w the depth bias; box is the map's half
+		// widths and its near/far along the sun (metres)
+		"uniform highp sampler2DShadow shadow_map;"
+		"uniform vec4 shadow_params;"
+		"uniform vec4 shadow_box;"
+		"uniform vec3 shadow_up;" // straight up at the eye, in the sun's frame
+		"in vec3 v_sunv;"
 		"uniform float tube_fade;"
 		"uniform bool body_on;"
 		"in vec2 v_texcoords;"
@@ -899,7 +1400,69 @@ void renderInit(render_ctx_t &ctx, void *) {
 		// interpolates to a fraction somewhere inside it
 		"		if (body_on && tube_pass == 1 && abs(v_loop - 1000.0 * floor(v_loop / 1000.0 + 0.5)) > 0.5) discard;"
 		"	}"
-		"	vec3 c = texture(tex, v_texcoords).rgb;"
+		"	vec3 c = texture(tex, v_texcoords).rgb * tint;"
+		// the sun: faces turned away from it are in their own shade (the
+		// face normal from the screen-space slope of the sun-frame
+		// position, which points at the camera, so +z is toward the sun),
+		// and inside the map's box so is whatever something nearer the sun
+		// hides. the shade is lit by the sky instead, so it goes a little
+		// blue. 3x3 taps over the hardware's 2x2 comparison filter
+		"	if (shadow_params.x > 0.5 && !tube_on) {"
+		// a crack-fill line has no face: its normal would be nan
+		"		vec3 cr = cross(dFdx(v_sunv), dFdy(v_sunv));"
+		"		vec3 n = dot(cr, cr) > 1e-20 ? normalize(cr) : shadow_up;"
+		// relative to flat ground, so level land is fully lit at any sun
+		// height, and only faces actually turned from the sun darken —
+		// walls, the far side of a ridge. anything gentler is left alone:
+		// the photogrammetry's water is bumpy (reflections defeat the
+		// stereo), and a low sun turned each bump into a hard facet
+		"		float lit = smoothstep(-0.3, 0.1, n.z / max(shadow_up.z, 0.05));"
+		// debug (?shadowdebug=): 2 the facing term alone, 3 cast shadows alone
+		"		if (shadow_params.x > 2.5) lit = 1.0;"
+		// normal offset: look the map up a texel and a half off the
+		// surface, so a surface at a grazing sun doesn't shadow itself
+		"		float texel_m = shadow_params.z * 2.0 * shadow_box.x;"
+		"		vec3 q = v_sunv + n * (1.5 * texel_m);"
+		"		vec2 uv = q.xy / (2.0 * shadow_box.xy) + 0.5;"
+		"		float d = (-q.z - shadow_box.z) / (shadow_box.w - shadow_box.z) - shadow_params.w;"
+		"		if (shadow_params.x < 1.5 || shadow_params.x > 2.5)"
+		"		if (uv.x > 0.0 && uv.y > 0.0 && uv.x < 1.0 && uv.y < 1.0 && d < 1.0) {"
+		"			float s = 0.0;"
+		"			for (int i = -1; i <= 1; i++)"
+		"				for (int j = -1; j <= 1; j++)"
+		"					s += texture(shadow_map, vec3(uv + vec2(float(i), float(j)) * shadow_params.z, d));"
+		"			vec2 e = min(uv, 1.0 - uv);"
+		"			float edge = smoothstep(0.0, 0.04, min(e.x, e.y));"
+		"			lit = min(lit, mix(1.0, s / 9.0, edge));"
+		"		}"
+		"		vec3 shade = (1.0 - shadow_params.y) * vec3(0.88, 0.95, 1.12);"
+		"		c *= mix(shade, vec3(1.0), lit);"
+		"	}"
+		// aerial perspective: light from a distance is scattered out on the
+		// way and the sky's light scattered in takes its place, so what is
+		// far fades toward the haze — per channel, the red surviving the
+		// trip best, which is why distance goes blue-grey. not in the tube,
+		// whose distances are through the roll and whose ends fade to
+		// black on their own
+		"	if (fog.y > 0.5 && !tube_on) {"
+		// the air thins with height, so the optical depth of the way
+		// here is the distance times the mean density along it — taken
+		// between the eye's height and this fragment's, exponential in
+		// height with the scale height H. from orbit that leaves the
+		// planet clear with a hazy limb instead of a pale disc
+		"		vec2 ndc = gl_FragCoord.xy / viewport * 2.0 - 1.0;"
+		"		vec3 off = vec3(ndc.x * cam_params.x * cam_params.y, ndc.y * cam_params.x, 1.0);"
+		"		if (fog_planes.z > 0.5) off = vec3(0.0, 0.0, 1.0);"
+		"		vec3 w = eye + cam * (off * v_dist);"
+		"		float H = cam_params.w;"
+		"		float ha = max(length(eye) - cam_params.z, 0.0) / H;"
+		"		float hf = max(length(w) - cam_params.z, 0.0) / H;"
+		"		float dh = ha - hf;"
+		"		float mean = abs(dh) < 1e-3 ? exp(-hf) : (exp(-hf) - exp(-ha)) / dh;"
+		"		float d = v_dist * length(off) * mean;"
+		"		vec3 e = exp(-d / (fog.x * vec3(1.3, 1.0, 0.75)));"
+		"		c = mix(haze, c, e);"
+		"	}"
 		// the lod overlay: a finer tile is wanted here and isn't drawn yet;
 		// the colour says where its request is. yellow: not yet requested
 		// (queued behind the download slots). blue: being looked up in
@@ -925,6 +1488,19 @@ void renderInit(render_ctx_t &ctx, void *) {
 	ctx.tube_params_loc = glGetUniformLocation(ctx.program, "tube_params");
 	ctx.tube_pass_loc = glGetUniformLocation(ctx.program, "tube_pass");
 	ctx.tube_fade_loc = glGetUniformLocation(ctx.program, "tube_fade");
+	ctx.fog_loc = glGetUniformLocation(ctx.program, "fog");
+	ctx.haze_loc = glGetUniformLocation(ctx.program, "haze");
+	ctx.tint_loc = glGetUniformLocation(ctx.program, "tint");
+	ctx.fog_planes_loc = glGetUniformLocation(ctx.program, "fog_planes");
+	ctx.cam_loc = glGetUniformLocation(ctx.program, "cam");
+	ctx.eye_loc = glGetUniformLocation(ctx.program, "eye");
+	ctx.cam_params_loc = glGetUniformLocation(ctx.program, "cam_params");
+	ctx.viewport_loc = glGetUniformLocation(ctx.program, "viewport");
+	ctx.shadow_mv_loc = glGetUniformLocation(ctx.program, "shadow_mv");
+	ctx.shadow_box_loc = glGetUniformLocation(ctx.program, "shadow_box");
+	ctx.shadow_params_loc = glGetUniformLocation(ctx.program, "shadow_params");
+	ctx.shadow_map_loc = glGetUniformLocation(ctx.program, "shadow_map");
+	ctx.shadow_up_loc = glGetUniformLocation(ctx.program, "shadow_up");
 	ctx.body_on_loc = glGetUniformLocation(ctx.program, "body_on");
 	ctx.body_curl_loc = glGetUniformLocation(ctx.program, "body_curl");
 	ctx.body_bands_loc = glGetUniformLocation(ctx.program, "body_bands");
@@ -945,6 +1521,13 @@ void renderInit(render_ctx_t &ctx, void *) {
 
 	renderPathInit(ctx);
 	renderDofInit(ctx);
+	renderSkyInit(ctx);
+	renderAccumInit(ctx);
+	renderShadowInit(ctx);
 	glUseProgram(ctx.program); // the overlay inits left their own programs current
+	glUniform1i(ctx.shadow_map_loc, shadow_unit);
+	glUniform4f(ctx.shadow_params_loc, 0.0f, 0.0f, 0.0f, 0.0f);
 	glUniform1i(ctx.texture_loc, 0); // the terrain textures live on unit 0, always
+	glUniform4f(ctx.fog_loc, 60000.0f, 0.0f, 0.0f, 0.0f);
+	glUniform3f(ctx.tint_loc, 1.0f, 1.0f, 1.0f);
 }

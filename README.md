@@ -243,6 +243,94 @@ lines is the float. The aim height comes from
 NaN where it hasn't, so the camera rides the terrain rather than the track's
 GPS altitudes, easing between the two as the measurements land.
 
+#### Sky and haze
+
+The terrain is drawn under an atmosphere: a sky pass with the sun in it, and
+aerial perspective on the ground — what is far fades toward the haze, per
+channel, the red surviving the trip best, which is why distance goes
+blue-grey. **Y** opens the `sky` panel: the three passes (the sky, the haze,
+the sun's tint on the ground) switch separately, a visibility slider sets how
+far one can see at sea level (5–320 km), and a time slider puts the sun by
+local solar time at the camera, with *now* following the clock instead. The
+default is a fixed afternoon, not the clock: a place is not always wanted at
+the hour it happens to be there. It is all part of the saved view, and
+`?sky=0`, `?vis=km` and `?sun=az,el` set it from the url; test mode pins the
+sun so goldens don't depend on the time of day.
+
+The haze is an optical depth, not a distance: the air thins with height
+(scale height 12 km), so the depth of the way to a fragment is its length
+times the mean density between the eye's height and the fragment's — which
+the fragment shader recovers from its depth and the camera frame. That is
+what keeps the planet clear from orbit, with a hazy limb, where a plain
+distance fog made it a pale disc. The sky thins away with altitude the same
+way, to black, leaving the limb: the atmosphere seen edge-on just above the
+horizon line, which sits below level by the dip the altitude gives it. The
+haze colour and the sky's horizon band are one colour, derived each frame
+from the sky colour and the sun's height — warm near the horizon, dim past
+it — so the ground fades into the sky it is under. The sun itself is the
+NOAA low-precision position from the date, computed on the page.
+
+**Sun shadows** (the `shadows` switch and the `shade` slider on the same
+panel) are a 4096² depth map rendered from the sun over what is drawn,
+fitted to the near part of the view — the frustum out to a couple of times
+the distance to the terrain under the crosshair, at most 40 km — with its
+size quantized and its centre snapped to whole texels, so it doesn't crawl
+as the camera moves; it is re-rendered only when something changed (a still
+camera costs nothing). The terrain shader samples it with hardware pcf and a
+normal offset, and adds a facing term from the screen-space normal, relative
+to flat ground: only faces actually turned from the sun darken — walls, the
+far side of a ridge — so mountains get relief from the real sun direction
+everywhere, not just inside the map's box. The shade is lit by the sky, so
+it goes a little blue. Casters must be drawn to cast: a tower behind the
+camera, out of the frustum, casts nothing.
+
+Two things the photogrammetry does to it. Its water is bumpy (reflections
+defeat the stereo matching), so a low sun picks out facets and blobs on a
+bay — real geometry, which a sun above ~20° doesn't show. And the imagery has
+its own shadows baked in from whenever it was flown; ours land on top, which
+reads fine at a low sun (long ours, short theirs) and is what `shade` is for.
+The shadow pass drops any triangle straddling a masked octant, where the
+colour pass merely pushes it back: a coarse triangle sitting above the fine
+surface would otherwise shade it. `?shadowdebug=2` shows the facing term
+alone, `3` the cast shadows alone.
+
+#### Glamour mode
+
+**I** opens the `glamour` panel. With *accumulate* on, the engine keeps
+rendering while the camera sits still and averages the frames, each drawn
+through a different sub-pixel offset (a Halton sequence, so the average is a
+proper supersample — edges, crack lines and distant detail all settle) and,
+with an *aperture*, from a different point on a lens disc, aimed so the point
+under the crosshair stays put: thin-lens depth of field, physically, with
+real bokeh rather than a depth-weighted blur. It converges in about a second
+(256 samples by default), then holds. Anything that changes the picture — a
+move, a tile arriving, the drawn set changing — starts it over, and sample 0
+is the plain frame, so nothing ever looks worse than it would without it.
+The miniature's blur pass composes with it (the pass is what gets summed).
+Each sample also jitters the sun across its disc (the `sun` slider: the real
+one's 0.27°, or larger for an overcast softness) and the shadow map's box
+across a texel, so shadow edges come out as true penumbras, and applies
+**ambient occlusion** from the depth buffer with a different rotation, so
+its noise averages away: a spiral of taps out to a radius in metres (a
+twenty-fifth of the distance, 0.5–150 m — street canyons need the top of
+that), each occluding by how far above the surface's plane it sits and not
+at all past the radius, so silhouettes don't halo. `occl` sets its weight;
+`?aodebug=1` shows the occlusion alone, which doubles as a clay render.
+The aperture is in metres of eye travel: 0 is a pinhole, supersampling only;
+half a metre is a camera; tens of metres is a tilt-shift toy. Part of the
+saved view; `?glamour=1&aperture=m` from the url.
+
+The running average lives in a float texture (`EXT_color_buffer_float`;
+without it the mode stays off and says so), each sample blended in at weight
+1/n. Not a sum: a half float summing 128 frames rounds every addition to a
+sixteenth once past 64, and the error, varying with the value, drew contour
+bands across the sky. The
+scene itself is drawn to the miniature's offscreen target, which it shares.
+The walk's cache key deliberately ignores both offsets — and the clip planes
+are taken from the unmoved eye — because a key that moved with the lens
+re-ran the walk every sample and reset the average every frame. Not in tube
+or tunnel mode, whose walk never reuses.
+
 #### Body mode
 
 Draw a rect on the map (shift-drag) and **B** wraps it onto a human figure
@@ -543,6 +631,12 @@ per-tile timeline (issue → cache → network → engine → decode), and
 the functions with the most self time; build with `EARTH_PROFILE=1 ./build.sh`
 to see the engine's function names in it rather than `wasm-function[1234]`.
 `--q k=v` passes any page query parameter through.
+
+`node tools/shot.mjs <shot> <out.png>` is the one-pose version: settle on the
+real gpu, save a png — `--session`, `--q k=v` and `--glamour n` (accumulate
+that many samples first) as above, a 180 s deadline, and page errors (a
+shader that fails to compile) printed rather than swallowed. The warm tools
+share a fixed port, 18765, since the tile cache is keyed by origin.
 
 It runs in **full chrome in headless mode** (playwright's `channel:
 'chromium'`), not the headless shell the capture harness uses, and that is not

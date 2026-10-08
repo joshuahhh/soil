@@ -292,7 +292,21 @@ struct EarthView {
 		return earth.path_ground[i] - planetRadius();
 	}
 
-	void setSkyColor(int rgb) { sky_color = rgb; }
+	void setSkyColor(int rgb) { sky_color = rgb; earth.sky_rgb = rgb; }
+	// the sun at the camera, degrees: azimuth clockwise from north, elevation
+	// above the horizon (negative at night)
+	void setSun(double az_deg, double el_deg) {
+		earth.sun_az = az_deg * M_PI / 180.0;
+		earth.sun_el = el_deg * M_PI / 180.0;
+	}
+	// the sky pass, the aerial perspective on the terrain, the sun's tint on
+	// the ground, and how far one can see at sea level (km)
+	void setAtmosphere(bool sky, bool haze, bool tint, double visibility_km) {
+		earth.sky_on = sky;
+		earth.haze_on = haze;
+		earth.tint_on = tint;
+		earth.visibility_m = fmax(1000.0, visibility_km * 1000.0);
+	}
 	void setDebugLod(bool on) { earth.debug_lod = on; }
 	// 1 = the standard target; 2 = half the linear resolution, which is a
 	// quarter of the tiles. the pixel budget of a view is the whole story on
@@ -338,6 +352,8 @@ struct EarthView {
 		o.set("bulksStarted", earth.stat_bulks_started);
 		// per-frame averages since the last call (see frame)
 		o.set("frameMs", acc_frames ? acc_frame_ms / acc_frames : 0.0);
+		o.set("accumSamples", ctx.accum.samples);
+		o.set("accumMax", glamour_samples);
 		o.set("beginMs", acc_frames ? acc_begin_ms / acc_frames : 0.0);
 		acc_begin_ms = acc_frame_ms = 0; acc_frames = 0;
 		return o;
@@ -433,14 +449,100 @@ struct EarthView {
 		// and anything outside them (a clear that waits on the previous
 		// frame's swap, say) is what this is for
 		auto t0 = earth_core_t::ticksMs();
+		earth.sky_dark = dark; // the sky pass dims with it too
+		// glamour mode: while nothing in the picture changes, every frame is
+		// drawn through a slightly different pixel offset and, with an
+		// aperture, from a slightly different point on the lens, and the
+		// frames are averaged (renderFrameEnd). the walk cache already
+		// knows whether the camera and the tree are as they were; a tile
+		// arriving, or the drawn set changing, starts the average over.
+		// sample 0 is the plain frame, so the picture never looks worse
+		// than it would without the mode
+		auto &a = ctx.accum;
+		a.on = glamour && !a.failed;
+		if (a.on) {
+			auto n = a.samples;
+			if (n > 0 && n < glamour_samples) {
+				earth.jitter_x = halton(n, 2) - 0.5;
+				earth.jitter_y = halton(n, 3) - 0.5;
+				// a point on the aperture disc, uniformly
+				auto r = sqrt(halton(n, 5)) * glamour_aperture, th = 2.0 * M_PI * halton(n, 7);
+				earth.lens_x = r * cos(th);
+				earth.lens_y = r * sin(th);
+				// the sun across its disc (soft shadows), and the shadow
+				// map's box across a texel (an anti-aliased map)
+				auto sr = sqrt(halton(n, 11)) * glamour_soft, sth = 2.0 * M_PI * halton(n, 13);
+				earth.sun_jitter_x = sr * cos(sth);
+				earth.sun_jitter_y = sr * sin(sth);
+				earth.shadow_jitter_x = halton(n, 17) - 0.5;
+				earth.shadow_jitter_y = halton(n, 19) - 0.5;
+				a.ao_rotation = (float)(2.0 * M_PI * halton(n, 23));
+			} else {
+				earth.jitter_x = earth.jitter_y = earth.lens_x = earth.lens_y = 0;
+				earth.sun_jitter_x = earth.sun_jitter_y = earth.shadow_jitter_x = earth.shadow_jitter_y = 0;
+			}
+			if (n == 0) earth.lens_focus = fmax(1.0, earth.centerDistanceMesh(camera));
+		} else {
+			earth.jitter_x = earth.jitter_y = earth.lens_x = earth.lens_y = 0;
+			earth.sun_jitter_x = earth.sun_jitter_y = earth.shadow_jitter_x = earth.shadow_jitter_y = 0;
+		}
 		renderFrameBegin(ctx, nullptr, w, h, sky);
 		auto t1 = earth_core_t::ticksMs();
 		earth.updateAndDraw(ctx, camera, w, h, dt_ms);
+		if (a.on) {
+			// anything that changed the picture: the average starts over
+			auto drawn = (int)earth.drawn_nodes.size();
+			if (!earth.walk_reused || earth.uploads_this_frame > 0
+				|| earth.stat_nodes_loaded != glamour_loaded || drawn != glamour_drawn
+				|| w != glamour_w || h != glamour_h)
+				a.samples = 0;
+			glamour_loaded = earth.stat_nodes_loaded; glamour_drawn = drawn;
+			glamour_w = w; glamour_h = h;
+			// enough: keep showing the average without adding to it
+			a.hold = a.samples >= glamour_samples;
+		}
 		renderFrameEnd(ctx);
 		auto t2 = earth_core_t::ticksMs();
 		acc_begin_ms += t1 - t0; acc_frame_ms += t2 - t0; acc_frames++;
 	}
 	double acc_begin_ms = 0, acc_frame_ms = 0; int acc_frames = 0;
+
+	// glamour mode's settings (see frame): on, the lens aperture (metres of
+	// eye travel — 0 is a pinhole, supersampling only), and how many
+	// samples to stop at
+	bool glamour = false;
+	double glamour_aperture = 0;
+	double glamour_soft = 0.0047; // radians of sun disc: the real one, 0.27 degrees
+	int glamour_samples = 256;
+	int glamour_loaded = -1, glamour_drawn = -1, glamour_w = 0, glamour_h = 0;
+	static double halton(int i, int base) {
+		double f = 1, r = 0;
+		for (i++; i > 0; i /= base) { f /= base; r += f * (i % base); }
+		return r;
+	}
+	// soft_deg: the angular radius the sun's light comes from, which sets how
+	// soft shadow edges are (the real sun is 0.27; more is an overcast-ish
+	// look)
+	void setGlamour(bool on, double aperture_m, int samples, double soft_deg, double ao) {
+		auto &acc = ctx.accum;
+		if ((float)ao != acc.ao_strength || acc.ao_on != (ao > 0)) acc.samples = 0;
+		acc.ao_on = ao > 0;
+		acc.ao_strength = (float)fmax(0.0, ao);
+		auto soft = fmax(0.0, soft_deg) * M_PI / 180.0;
+		if (on != glamour || aperture_m != glamour_aperture || soft != glamour_soft) ctx.accum.samples = 0;
+		glamour = on;
+		glamour_aperture = fmax(0.0, aperture_m);
+		glamour_samples = samples < 1 ? 1 : samples;
+		glamour_soft = soft;
+	}
+	void setShadowDebug(int mode) { shadow_debug = mode < 1 || mode > 3 ? 1 : mode; ctx.accum.samples = 0; }
+	void setAoDebug(bool on) { ao_debug = on; ctx.accum.samples = 0; }
+	// sun shadows, and how dark the shade (0..1)
+	void setShadows(bool on, double strength) {
+		earth.shadows_on = on;
+		earth.shadow_strength = fmin(1.0, fmax(0.0, strength));
+		ctx.accum.samples = 0;
+	}
 
 	// pose in degrees/meters, the vocabulary of 2d maps. roll is the
 	// airplane-frame bank angle (0 outside airplane mode) — not part of the
@@ -876,6 +978,12 @@ EMSCRIPTEN_BINDINGS(earth) {
 		.function("setPathStyle", &EarthView::setPathStyle)
 		.function("getPathGroundAlt", &EarthView::getPathGroundAlt)
 		.function("setSkyColor", &EarthView::setSkyColor)
+		.function("setSun", &EarthView::setSun)
+		.function("setAtmosphere", &EarthView::setAtmosphere)
+		.function("setGlamour", &EarthView::setGlamour)
+		.function("setShadows", &EarthView::setShadows)
+		.function("setShadowDebug", &EarthView::setShadowDebug)
+		.function("setAoDebug", &EarthView::setAoDebug)
 		.function("setDebugLod", &EarthView::setDebugLod)
 		.function("setLodScale", &EarthView::setLodScale)
 		.function("getLodScale", &EarthView::getLodScale)
