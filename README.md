@@ -248,12 +248,15 @@ GPS altitudes, easing between the two as the measurements land.
 The terrain is drawn under an atmosphere: a sky pass with the sun in it, and
 aerial perspective on the ground — what is far fades toward the haze, per
 channel, the red surviving the trip best, which is why distance goes
-blue-grey. **Y** opens the `sky` panel: the three passes (the sky, the haze,
-the sun's tint on the ground) switch separately, a visibility slider sets how
-far one can see at sea level (5–320 km), and a time slider puts the sun by
-local solar time at the camera, with *now* following the clock instead. The
-default is a fixed afternoon, not the clock: a place is not always wanted at
-the hour it happens to be there. It is all part of the saved view, and
+blue-grey. **Y** opens the `sky` panel: `time` puts the sun by local solar
+time at the camera, or *follow the clock* takes it from the real one (the
+slider then shows where the clock has it, locked); `sky` and `sun tint`
+switch those passes; `haze` switches the aerial perspective, its slider the
+visibility at sea level (5–320 km); `shadows` the sun shadows, its slider how
+dark the shade is. A switch that gates a slider stands in for the slider's
+name, and an off switch dims and locks its slider without losing the value.
+The default is a fixed afternoon, not the clock: a place is not always wanted
+at the hour it happens to be there. It is all part of the saved view, and
 `?sky=0`, `?vis=km` and `?sun=az,el` set it from the url; test mode pins the
 sun so goldens don't depend on the time of day.
 
@@ -270,8 +273,7 @@ from the sky colour and the sun's height — warm near the horizon, dim past
 it — so the ground fades into the sky it is under. The sun itself is the
 NOAA low-precision position from the date, computed on the page.
 
-**Sun shadows** (the `shadows` switch and the `shade` slider on the same
-panel) are a 4096² depth map rendered from the sun over what is drawn,
+**Sun shadows** (the `shadows` row on the same panel) are a 4096² depth map rendered from the sun over what is drawn,
 fitted to the near part of the view — the frustum out to a couple of times
 the distance to the terrain under the crosshair, at most 40 km — with its
 size quantized and its centre snapped to whole texels, so it doesn't crawl
@@ -296,7 +298,9 @@ alone, `3` the cast shadows alone.
 
 #### Glamour mode
 
-**I** opens the `glamour` panel. With *accumulate* on, the engine keeps
+**I** opens the `glamour` panel. Its three sliders — `lens blur`, `soft
+sun`, `occlusion` — only act while *accumulate* is on, and are locked and
+dimmed otherwise (`soft sun` also while shadows are off). With it on, the engine keeps
 rendering while the camera sits still and averages the frames, each drawn
 through a different sub-pixel offset (a Halton sequence, so the average is a
 proper supersample — edges, crack lines and distant detail all settle) and,
@@ -307,16 +311,16 @@ real bokeh rather than a depth-weighted blur. It converges in about a second
 move, a tile arriving, the drawn set changing — starts it over, and sample 0
 is the plain frame, so nothing ever looks worse than it would without it.
 The miniature's blur pass composes with it (the pass is what gets summed).
-Each sample also jitters the sun across its disc (the `sun` slider: the real
+Each sample also jitters the sun across its disc (`soft sun`: the real
 one's 0.27°, or larger for an overcast softness) and the shadow map's box
 across a texel, so shadow edges come out as true penumbras, and applies
 **ambient occlusion** from the depth buffer with a different rotation, so
 its noise averages away: a spiral of taps out to a radius in metres (a
 twenty-fifth of the distance, 0.5–150 m — street canyons need the top of
 that), each occluding by how far above the surface's plane it sits and not
-at all past the radius, so silhouettes don't halo. `occl` sets its weight;
+at all past the radius, so silhouettes don't halo. `occlusion` sets its weight;
 `?aodebug=1` shows the occlusion alone, which doubles as a clay render.
-The aperture is in metres of eye travel: 0 is a pinhole, supersampling only;
+`lens blur` is the aperture, in metres of eye travel: off is a pinhole, supersampling only;
 half a metre is a camera; tens of metres is a tilt-shift toy. Part of the
 saved view; `?glamour=1&aperture=m` from the url.
 

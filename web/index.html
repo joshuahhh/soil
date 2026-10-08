@@ -124,8 +124,12 @@
   body.skypanel #skypanel { display: flex; }
   /* glamour mode (I): the accumulated render's controls and progress */
   body.glamourpanel #glamourpanel { display: flex; }
-  #glamourpanel .row span.amt { min-width: 52px; text-align: right; font-variant-numeric: tabular-nums; }
-  #skypanel .row span.amt { min-width: 52px; text-align: right; font-variant-numeric: tabular-nums; }
+  /* slider rows: a name in a fixed column — or the switch that gates the
+     row, standing in for its name — then the slider, then its value. what
+     a switch (or another panel's) has turned off is dimmed and locked */
+  .panel .row > .lbl { flex: 0 0 68px; }
+  .panel .row span.amt { min-width: 44px; text-align: right; font-variant-numeric: tabular-nums; }
+  .panel .off { opacity: .4; }
   #lodpanel .row { gap: 4px 10px; }
   #lodpanel .row span { display: flex; align-items: center; gap: 4px; }
   .swatch { display: inline-block; width: 11px; height: 11px; border-radius: 2px; }
@@ -364,41 +368,49 @@
     <div id="skypanel" class="panel">
       <div class="head"><span>sky</span><button class="x" id="skyclose" title="hide (Y)">✕</button></div>
       <div class="row">
-        <label><input type="checkbox" id="skyon">sky</label>
-        <label><input type="checkbox" id="hazeon">haze</label>
+        <span class="lbl" id="suntimelbl">time</span>
+        <input id="suntime" type="range" min="0" max="1439" step="5" title="the sun, by local solar time at the camera">
+        <span class="amt" id="sunamount"></span>
+      </div>
+      <div class="row">
+        <span class="lbl"></span>
+        <label><input type="checkbox" id="sunclock">follow the clock</label>
+      </div>
+      <div class="row">
+        <label class="lbl"><input type="checkbox" id="skyon">sky</label>
         <label><input type="checkbox" id="tinton">sun tint</label>
-        <label><input type="checkbox" id="shadowson">shadows</label>
       </div>
       <div class="row">
-        <input id="shade" type="range" min="0" max="100" value="45" title="how dark the shade is">
-        <span class="amt" id="shadeamount"></span>
-      </div>
-      <div class="row">
-        <input id="vis" type="range" min="0" max="100" value="50" title="visibility: how far one can see at sea level">
+        <label class="lbl"><input type="checkbox" id="hazeon">haze</label>
+        <input id="vis" type="range" min="0" max="100" title="visibility: how far one can see at sea level">
         <span class="amt" id="visamount"></span>
       </div>
       <div class="row">
-        <input id="suntime" type="range" min="0" max="1439" value="840" step="5" title="the sun, by local solar time">
-        <span class="amt" id="sunamount"></span>
-        <button id="sunnow" title="follow the clock">now</button>
+        <label class="lbl"><input type="checkbox" id="shadowson">shadows</label>
+        <input id="shade" type="range" min="0" max="100" title="how dark the shade is">
+        <span class="amt" id="shadeamount"></span>
       </div>
     </div>
     <div id="glamourpanel" class="panel">
       <div class="head"><span>glamour</span><button class="x" id="glamourclose" title="hide (I)">✕</button></div>
       <div class="row">
         <label><input type="checkbox" id="glamouron">accumulate</label>
+        <span style="flex:1"></span>
         <span class="amt" id="glamoursamples"></span>
       </div>
-      <div class="row">
-        <input id="aperture" type="range" min="0" max="100" value="0" title="lens aperture: depth of field around the crosshair">
+      <div class="row" id="aperturerow">
+        <span class="lbl">lens blur</span>
+        <input id="aperture" type="range" min="0" max="100" title="lens aperture: depth of field, focused under the crosshair">
         <span class="amt" id="apertureamount"></span>
       </div>
-      <div class="row">
-        <input id="soft" type="range" min="0" max="100" value="10" title="sun size: how soft shadow edges are">
+      <div class="row" id="softrow">
+        <span class="lbl">soft sun</span>
+        <input id="soft" type="range" min="0" max="100" title="the sun's size: how soft shadow edges are (the real sun is 0.27°)">
         <span class="amt" id="softamount"></span>
       </div>
-      <div class="row">
-        <input id="glamourao" type="range" min="0" max="100" value="60" title="ambient occlusion: how much creases and street canyons darken">
+      <div class="row" id="aorow">
+        <span class="lbl">occlusion</span>
+        <input id="glamourao" type="range" min="0" max="100" title="ambient occlusion: how much creases and street canyons darken">
         <span class="amt" id="aoamount"></span>
       </div>
     </div>
@@ -1511,8 +1523,8 @@
     if (mode === 'persp' && !tubeRect) viewRows.push([K('T'), 'tunnel']);
     viewRows.push([K('N'), miniature ? 'miniature off' : 'miniature (tilt-shift)']);
     if (!ortho) viewRows.push([K('H'), 'near cut']);
-    viewRows.push([K('Y'), 'sky: sun, haze']);
-    viewRows.push([K('I'), 'glamour: accumulate, aperture']);
+    viewRows.push([K('Y'), 'sky: time of day, haze, shadows']);
+    viewRows.push([K('I'), 'glamour: refine a still frame']);
     viewRows.push([K('C L K M'), 'debug: pick · lod · smoothing · mipmaps']);
     g.push(['view', viewRows]);
     if (document.body.classList.contains('overlay')) {
@@ -4261,13 +4273,25 @@
     // the slider's 0..1 is up to three times the occlusion's natural weight
     view.setGlamour(glamour.on, glamour.aperture, glamour.samples, glamour.soft, glamour.ao * 3);
     document.getElementById('glamourao').value = Math.round(glamour.ao * 100);
-    document.getElementById('aoamount').textContent = `occl ${Math.round(glamour.ao * 100)}%`;
+    document.getElementById('aoamount').textContent = `${Math.round(glamour.ao * 100)}%`;
     document.getElementById('soft').value = Math.round(glamour.soft / 2.7 * 100);
-    document.getElementById('softamount').textContent = `sun ${glamour.soft.toFixed(2)}°`;
+    document.getElementById('softamount').textContent = `${glamour.soft.toFixed(2)}°`;
     document.getElementById('glamouron').checked = glamour.on;
     document.getElementById('aperture').value = sliderFromAperture(glamour.aperture);
-    document.getElementById('apertureamount').textContent = glamour.aperture ? `${glamour.aperture} m` : 'pinhole';
+    document.getElementById('apertureamount').textContent = glamour.aperture ? `${glamour.aperture} m` : 'off';
+    gateGlamourRows();
     saveView();
+  };
+  // the three sliders only act while accumulating, and soft sun only with
+  // shadows on (the sky panel's switch): locked and dimmed otherwise
+  const gateGlamourRows = () => {
+    const gate = (row, input, on) => {
+      document.getElementById(row).classList.toggle('off', !on);
+      document.getElementById(input).disabled = !on;
+    };
+    gate('aperturerow', 'aperture', glamour.on);
+    gate('softrow', 'soft', glamour.on && sky.shadows);
+    gate('aorow', 'glamourao', glamour.on);
   };
   document.getElementById('glamouron').addEventListener('change', (e) => { glamour.on = e.target.checked; applyGlamour(); });
   document.getElementById('glamourao').addEventListener('input', (e) => { glamour.ao = +e.target.value / 100; applyGlamour(); });
@@ -4284,22 +4308,44 @@
   const skyEl = (id) => document.getElementById(id);
   const visFromSlider = (v) => Math.round(5 * Math.pow(2, v / 100 * 6)); // 5..320 km, log
   const sliderFromVis = (km) => Math.round(Math.log2(km / 5) / 6 * 100);
+  // local solar time at the camera now, in hours: what the time slider
+  // shows while following the clock
+  const solarHourNow = () => {
+    const p = view.getPose(), d = new Date();
+    const utc = d.getUTCHours() + d.getUTCMinutes() / 60;
+    return ((utc + p.lon / 15) % 24 + 24) % 24;
+  };
+  const hhmm = (h) => {
+    const m = Math.round(h * 60) % 1440;
+    return `${String(Math.floor(m / 60)).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`;
+  };
+  const refreshSunTime = () => {
+    const following = sky.hour == null;
+    const h = following ? (view.ready() ? solarHourNow() : 12) : sky.hour;
+    skyEl('suntime').value = Math.round(h * 60);
+    skyEl('suntime').disabled = following;
+    skyEl('suntime').classList.toggle('off', following);
+    skyEl('sunamount').textContent = hhmm(h);
+    skyEl('sunclock').checked = following;
+  };
   const applySky = () => {
     view.setAtmosphere(sky.sky, sky.haze, sky.tint, sky.vis);
     view.setShadows(sky.shadows, sky.shade);
-    skyEl('shadowson').checked = sky.shadows;
-    skyEl('shade').value = Math.round(sky.shade * 100);
-    skyEl('shade').disabled = !sky.shadows;
-    skyEl('shadeamount').textContent = `shade ${Math.round(sky.shade * 100)}%`;
     skyEl('skyon').checked = sky.sky;
-    skyEl('hazeon').checked = sky.haze;
     skyEl('tinton').checked = sky.tint;
+    skyEl('hazeon').checked = sky.haze;
     skyEl('vis').value = sliderFromVis(sky.vis);
     skyEl('visamount').textContent = `${sky.vis} km`;
-    skyEl('suntime').value = sky.hour == null ? 0 : Math.round(sky.hour * 60);
-    skyEl('sunamount').textContent = sky.hour == null ? 'now'
-      : `${String(Math.floor(sky.hour)).padStart(2, '0')}:${String(Math.round((sky.hour % 1) * 60)).padStart(2, '0')}`;
-    skyEl('sunnow').disabled = sky.hour == null;
+    skyEl('shadowson').checked = sky.shadows;
+    skyEl('shade').value = Math.round(sky.shade * 100);
+    skyEl('shadeamount').textContent = `${Math.round(sky.shade * 100)}%`;
+    // a slider whose switch is off: dimmed and locked, value kept
+    for (const [id, on] of [['vis', sky.haze], ['visamount', sky.haze], ['shade', sky.shadows], ['shadeamount', sky.shadows]]) {
+      skyEl(id).classList.toggle('off', !on);
+      if (skyEl(id).tagName === 'INPUT') skyEl(id).disabled = !on;
+    }
+    refreshSunTime();
+    gateGlamourRows();
     updateSun();
     saveView();
   };
@@ -4308,9 +4354,13 @@
     skyEl(id).addEventListener('change', (e) => { sky[key] = e.target.checked; applySky(); });
   skyEl('vis').addEventListener('input', (e) => { sky.vis = visFromSlider(+e.target.value); applySky(); });
   skyEl('suntime').addEventListener('input', (e) => { sky.hour = +e.target.value / 60; applySky(); });
-  skyEl('sunnow').addEventListener('click', () => { sky.hour = null; applySky(); canvas.focus(); });
+  // off the clock: the slider stays where the clock had put it
+  skyEl('sunclock').addEventListener('change', (e) => {
+    sky.hour = e.target.checked ? null : (view.ready() ? solarHourNow() : 14);
+    applySky();
+  });
   skyEl('skyclose').addEventListener('click', () => { document.body.classList.remove('skypanel'); canvas.focus(); });
-  setInterval(updateSun, 5000);
+  setInterval(() => { updateSun(); if (sky.hour == null) refreshSunTime(); }, 5000);
 
   // ?lod=2 draws half as fine, which is a quarter of the tiles — the volume
   // of data a view asks for is what decides whether a deep zoom ever finishes,
