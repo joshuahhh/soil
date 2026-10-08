@@ -26,7 +26,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { chromium, firefox } from 'playwright';
-import { serveWeb } from './serve.mjs';
+import { serveWeb, WARM_PORT } from './serve.mjs';
 import { OUT, readShots, shotQuery } from './lib.mjs';
 
 const argv = process.argv.slice(2);
@@ -72,7 +72,7 @@ q.set('fetchlog', '0');
 
 await fs.mkdir(OUT, { recursive: true });
 // a fixed port for warm runs: the origin is what the cache is keyed by
-const { base, close } = await serveWeb({ port: warm ? 8765 : 0 });
+const { base, close } = await serveWeb({ port: warm ? WARM_PORT : 0 });
 const vp = { viewport: { width, height }, deviceScaleFactor: 1 };
 const ctx = warm
   ? await engine.launchPersistentContext(path.join(OUT, 'profile'), { ...launch, ...vp })

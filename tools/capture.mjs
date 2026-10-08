@@ -50,7 +50,13 @@ for (const shot of shots) {
   // warm, and localstorage can't leak a pose between shots
   const ctx = await browser.newContext({ viewport: { width, height }, deviceScaleFactor: 1 });
   const page = await ctx.newPage();
-  const { png, meta } = await captureShot(page, base, shot, { timeoutMs });
+  // a hard deadline over the whole shot, context teardown included: the
+  // driver's own timeouts cover the page, not a wedged browser, and a run
+  // once sat silent for a quarter of an hour on one
+  const deadline = new Promise((_, rej) => setTimeout(() => rej(new Error('shot deadline')), timeoutMs + 60000));
+  const { png, meta } = await Promise.race([captureShot(page, base, shot, { timeoutMs }), deadline])
+    .catch((e) => ({ png: null, meta: { name: shot.name, note: shot.note, view: shot, rendered: false,
+      complete: false, settleMs: 0, wallMs: 0, timings: {}, counters: {}, drawnNodes: [], errors: ['DRIVER ' + e.message] } }));
   if (png) await fs.writeFile(path.join(CUR, shot.name + '.png'), png);
   await fs.writeFile(path.join(CUR, shot.name + '.json'),
     JSON.stringify({ ...meta, width, height }, null, 2));
@@ -60,7 +66,7 @@ for (const shot of shots) {
   console.log(`${shot.name.padEnd(20)} ${tag.padEnd(11)} ` +
     `${meta.nodesLoaded}/${meta.nodesWanted} tiles, ${meta.nodesDrawn} drawn, ` +
     `${(meta.settleMs / 1000).toFixed(1)}s, draw ${(meta.timings.drawMs ?? 0).toFixed(2)}ms/f`);
-  await ctx.close();
+  await Promise.race([ctx.close(), new Promise((r) => setTimeout(r, 15000))]);
 }
 
 await browser.close();
