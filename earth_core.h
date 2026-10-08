@@ -2070,9 +2070,12 @@ struct earth_core_t {
 			avg_oct = cnt_oct / sec_frames; avg_cull = cnt_cull / sec_frames;
 			avg_lod = cnt_lod / sec_frames;
 			avg_fps = sec_frames / 2;
-			printf("sections avg ms: bfs %.2f, dl %.2f, evict %.2f, draw %.2f (%d frames; per frame: oct %ld, cull %ld, lod %ld)\n",
+			printf("sections avg ms: bfs %.2f, dl %.2f, evict %.2f, draw %.2f (%d frames; per frame: oct %ld, cull %ld, lod %ld)"
+				" · gpu %.2f (shadow %.2f, scene %.2f, occlusion %.2f, post %.2f)\n",
 				avg_bfs, avg_dl, avg_evict, avg_draw,
-				sec_frames, avg_oct, avg_cull, avg_lod);
+				sec_frames, avg_oct, avg_cull, avg_lod,
+				ctx.gpu.avg[0] + ctx.gpu.avg[1] + ctx.gpu.avg[2] + ctx.gpu.avg[3],
+				ctx.gpu.avg[gpu_shadow], ctx.gpu.avg[gpu_scene], ctx.gpu.avg[gpu_occlusion], ctx.gpu.avg[gpu_post]);
 			// what the view is still waiting for. the section above times the
 			// cpu work; this says whether anything is actually coming. a view
 			// that never completes with waiting=0 and inflight=0 is not slow,

@@ -69,9 +69,14 @@ if (!errors.length) {
   const uri = await page.evaluate(() => window.__test.shot());
   await fs.writeFile(out, Buffer.from(uri.split(',')[1], 'base64'));
 }
+// the gpu timings are a second's average, read back frames late: give
+// them two seconds of frames at the pose before reading
+if (!errors.length) await page.waitForTimeout(2200);
 const st = await page.evaluate(() => window.__test && window.__test.stats()).catch(() => null);
 console.log(`${path.basename(out)}: ${settled.complete ? 'complete' : 'INCOMPLETE'}`
-  + (st ? ` ${st.nodesLoaded}/${st.nodesWanted} tiles, ${st.nodesDrawn} drawn, frame ${st.frameMs.toFixed(1)} ms` : '')
+  + (st ? ` ${st.nodesLoaded}/${st.nodesWanted} tiles, ${st.nodesDrawn} drawn, frame ${st.frameMs.toFixed(1)} ms cpu` : '')
+  + (st && st.gpuMs >= 0 ? `, ${st.gpuMs.toFixed(2)} ms gpu (shadow ${st.gpuShadowMs.toFixed(2)}, scene ${st.gpuSceneMs.toFixed(2)},`
+    + ` occlusion ${st.gpuOcclusionMs.toFixed(2)}, post ${st.gpuPostMs.toFixed(2)})` : '')
   + (glamour ? `, ${st && st.accumSamples} samples` : '')
   + (errors.length ? '\n  ' + [...new Set(errors)].join('\n  ') : ''));
 await ctx.close();

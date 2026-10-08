@@ -119,6 +119,7 @@ struct EarthView {
 		}
 		emscripten_webgl_make_context_current(gl);
 		ctx.msaa_samples = g_antialias ? 4 : 0; // the offscreen passes match the context
+		ctx.gpu.ok = emscripten_webgl_enable_extension(gl, "EXT_disjoint_timer_query_webgl2");
 		renderInit(ctx, nullptr);
 		earth.load();
 	}
@@ -353,6 +354,14 @@ struct EarthView {
 		o.set("bulksStarted", earth.stat_bulks_started);
 		// per-frame averages since the last call (see frame)
 		o.set("frameMs", acc_frames ? acc_frame_ms / acc_frames : 0.0);
+		// gpu ms per frame by section, averaged over the last second (-1
+		// without the timer extension). total is their sum
+		auto &g = ctx.gpu;
+		o.set("gpuShadowMs", g.ok ? g.avg[gpu_shadow] : -1.0);
+		o.set("gpuSceneMs", g.ok ? g.avg[gpu_scene] : -1.0);
+		o.set("gpuOcclusionMs", g.ok ? g.avg[gpu_occlusion] : -1.0);
+		o.set("gpuPostMs", g.ok ? g.avg[gpu_post] : -1.0);
+		o.set("gpuMs", g.ok ? g.avg[0] + g.avg[1] + g.avg[2] + g.avg[3] : -1.0);
 		o.set("accumSamples", ctx.accum.samples);
 		o.set("accumMax", glamour_samples);
 		o.set("beginMs", acc_frames ? acc_begin_ms / acc_frames : 0.0);
@@ -450,6 +459,7 @@ struct EarthView {
 		// and anything outside them (a clear that waits on the previous
 		// frame's swap, say) is what this is for
 		auto t0 = earth_core_t::ticksMs();
+		gpuFrameStart(ctx, dt_ms);
 		earth.sky_dark = dark; // the sky pass dims with it too
 		// glamour mode: while nothing in the picture changes, every frame is
 		// drawn through a slightly different pixel offset and, with an

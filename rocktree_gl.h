@@ -91,8 +91,34 @@ static const int shadow_unit = 3;
 static int shadow_debug = 1; // 1 normal; 2 facing term only, 3 cast shadows only
 static bool ao_debug = false; // glamour shows the occlusion alone
 
+// gpu timing (EXT_disjoint_timer_query_webgl2): the frame is cut into
+// sections, each a run of time-elapsed queries — they can't nest, so
+// switching section ends one query and starts the next — read back a few
+// frames later, when the gpu has got round to them, and averaged per frame
+// over about a second. cpu timers can't see any of this: webgl only queues
+// the work, and the gpu does it afterwards
+#ifndef GL_TIME_ELAPSED_EXT
+#define GL_TIME_ELAPSED_EXT 0x88BF
+#endif
+#ifndef GL_GPU_DISJOINT_EXT
+#define GL_GPU_DISJOINT_EXT 0x8FBB
+#endif
+enum gpu_section : int { gpu_shadow = 0, gpu_scene = 1, gpu_occlusion = 2, gpu_post = 3, gpu_sections = 4 };
+struct gpu_timer_t {
+	bool ok = false; // the extension is there (set by the shell)
+	struct pending_t { GLuint q; int section; int frame; };
+	std::vector<GLuint> spare;
+	std::vector<pending_t> pending; // oldest first
+	GLuint active = 0;
+	int active_section = -1, frame = 0, last_done = -1, frames_done = 0;
+	double sum[gpu_sections] = {};
+	double avg[gpu_sections] = {}; // ms per frame, the last second's
+	double window_ms = 0;
+};
+
 struct gl_ctx_t {
 	int width, height; // weblib: canvas drawable size, set by the shell
+	gpu_timer_t gpu;
 	dof_gl_t dof;
 	sky_gl_t sky;
 	accum_gl_t accum;
@@ -344,6 +370,56 @@ void renderDofEnsure(render_ctx_t &ctx, int w, int h) {
 	d.h = h;
 }
 
+// end whatever section is running and start s (-1: just end it)
+void gpuSection(render_ctx_t &ctx, int s) {
+	auto &g = ctx.gpu;
+	if (!g.ok || s == g.active_section) return;
+	if (g.active) {
+		glEndQuery(GL_TIME_ELAPSED_EXT);
+		g.pending.push_back({ g.active, g.active_section, g.frame });
+		g.active = 0;
+	}
+	g.active_section = s;
+	if (s < 0) return;
+	GLuint q;
+	if (g.spare.empty()) glGenQueries(1, &q); else { q = g.spare.back(); g.spare.pop_back(); }
+	glBeginQuery(GL_TIME_ELAPSED_EXT, q);
+	g.active = q;
+}
+
+// once a frame, before its first section: collect what the gpu has
+// finished, and fold a second's worth into the averages
+void gpuFrameStart(render_ctx_t &ctx, double dt_ms) {
+	auto &g = ctx.gpu;
+	if (!g.ok) return;
+	g.frame++;
+	GLint disjoint = 0;
+	glGetIntegerv(GL_GPU_DISJOINT_EXT, &disjoint);
+	if (disjoint) { // a clock change or the like: these are meaningless
+		for (auto &p : g.pending) g.spare.push_back(p.q);
+		g.pending.clear();
+	}
+	size_t done = 0;
+	for (; done < g.pending.size(); done++) {
+		auto &p = g.pending[done];
+		GLuint avail = 0;
+		glGetQueryObjectuiv(p.q, GL_QUERY_RESULT_AVAILABLE, &avail);
+		if (!avail) break; // in order: nothing after this is ready either
+		GLuint ns = 0;
+		glGetQueryObjectuiv(p.q, GL_QUERY_RESULT, &ns);
+		g.sum[p.section] += ns / 1e6;
+		if (p.frame != g.last_done) { g.last_done = p.frame; g.frames_done++; }
+		g.spare.push_back(p.q);
+	}
+	g.pending.erase(g.pending.begin(), g.pending.begin() + done);
+	g.window_ms += dt_ms;
+	if (g.window_ms >= 1000 && g.frames_done > 0) {
+		for (int s = 0; s < gpu_sections; s++) { g.avg[s] = g.sum[s] / g.frames_done; g.sum[s] = 0; }
+		g.frames_done = 0;
+		g.window_ms = 0;
+	}
+}
+
 // the occlusion runs in real time (outside glamour mode, which has its own
 // way in, and not under the miniature, whose blur reads the scene directly)
 bool renderAoLive(render_ctx_t &ctx) {
@@ -399,6 +475,7 @@ void renderAoEnsure(render_ctx_t &ctx, int w, int h) {
 }
 
 void renderFrameBegin(render_ctx_t &ctx, void *window, int width, int height, int sky) {
+	gpuSection(ctx, gpu_scene);
 	// the scene goes to the offscreen target whenever a pass reads it back
 	auto offscreen = ctx.dof.on || ctx.accum.on || renderAoLive(ctx);
 	if (offscreen) renderDofEnsure(ctx, width, height);
@@ -683,6 +760,7 @@ void renderAccumInit(render_ctx_t &ctx) {
 void aoCompute(render_ctx_t &ctx) {
 	auto &a = ctx.accum;
 	auto &d = ctx.dof;
+	gpuSection(ctx, gpu_occlusion);
 	renderAoEnsure(ctx, d.w, d.h);
 	glBindFramebuffer(GL_FRAMEBUFFER, a.ao_fbo);
 	glViewport(0, 0, a.ao_w, a.ao_h);
@@ -716,6 +794,7 @@ void aoComposite(render_ctx_t &ctx, bool blur) {
 	glUniform3f(a.comp_planes_loc, a.near, a.far, a.ortho ? 1.0f : 0.0f);
 	glUniform3f(a.comp_params_loc, ao_debug ? -a.ao_strength : a.ao_strength, blur ? 1.0f : 0.0f, 0.0f);
 	glDrawArrays(GL_TRIANGLES, 0, 3);
+	gpuSection(ctx, gpu_post);
 	glActiveTexture(GL_TEXTURE2);
 	glBindTexture(GL_TEXTURE_2D, 0);
 	glActiveTexture(GL_TEXTURE0);
@@ -731,7 +810,8 @@ void renderFrameEnd(render_ctx_t &ctx) {
 	auto &d = ctx.dof;
 	auto &a = ctx.accum;
 	auto ao_live = renderAoLive(ctx);
-	if (!d.on && !a.on && !ao_live) return;
+	if (!d.on && !a.on && !ao_live) { gpuSection(ctx, -1); return; }
+	gpuSection(ctx, gpu_post);
 	glDisable(GL_DEPTH_TEST);
 	// the multisampled scene, resolved into the textures the passes read
 	if (ctx.scene_fbo == ctx.msaa_fbo && ctx.msaa_fbo) {
@@ -799,6 +879,7 @@ void renderFrameEnd(render_ctx_t &ctx) {
 	glActiveTexture(GL_TEXTURE0); // the terrain textures live on unit 0
 	glEnable(GL_DEPTH_TEST);
 	glUseProgram(ctx.program);
+	gpuSection(ctx, -1);
 }
 
 // the miniature's blur pass over the offscreen scene, into whatever
@@ -1197,6 +1278,7 @@ void renderShadowInit(render_ctx_t &ctx) {
 static bool shadow_cull_was = true;
 void renderShadowBegin(render_ctx_t &ctx, int size, const float *box4) {
 	auto &s = ctx.shadow;
+	gpuSection(ctx, gpu_shadow);
 	renderShadowEnsure(ctx, size);
 	glBindFramebuffer(GL_FRAMEBUFFER, s.fbo);
 	glViewport(0, 0, s.size, s.size);
@@ -1224,6 +1306,7 @@ void renderShadowEnd(render_ctx_t &ctx) {
 	glDisable(GL_POLYGON_OFFSET_FILL);
 	glPolygonOffset(0.0f, 0.0f);
 	if (shadow_cull_was) glEnable(GL_CULL_FACE);
+	gpuSection(ctx, gpu_scene);
 	glBindFramebuffer(GL_FRAMEBUFFER, ctx.scene_fbo);
 	glViewport(0, 0, ctx.scene_w, ctx.scene_h);
 	glUseProgram(ctx.program);

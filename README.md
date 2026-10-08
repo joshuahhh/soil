@@ -335,7 +335,15 @@ occlusion measured from that is quantization). For it the scene is drawn
 offscreen into 4× multisampled renderbuffers, resolved into the textures
 the passes read, so the context's antialiasing survives — and the miniature
 and glamour mode, which used to draw straight into textures, got theirs
-back. `?occl=0` turns it off; `?aodebug=1` shows the occlusion alone, which doubles as a clay render.
+back.
+
+It is **off by default**, because it isn't cheap. Measured with the gpu
+timer (below), the occlusion passes take 2.0–2.4 ms a frame at 1280×800 and
+6–8 ms at 2560×1600, and the msaa resolve that rendering offscreen needs
+another 1.2 / 3–5 ms: at retina size, the seattle view goes from 17 ms of
+gpu time to 31 — sixty frames a second to thirty. Glamour mode, which
+renders offscreen anyway, pays only the occlusion pass. `?occl=1` turns it
+on from the url; `?aodebug=1` shows the occlusion alone, which doubles as a clay render.
 `lens blur` is the aperture, in metres of eye travel: off is a pinhole, supersampling only;
 half a metre is a camera; tens of metres is a tilt-shift toy. Part of the
 saved view; `?glamour=1&aperture=m` from the url.
@@ -626,6 +634,17 @@ timing would need `EXT_disjoint_timer_query_webgl2`, which is WebGL2-only.
 
 `capture.mjs` records these into each shot's sidecar json, so the report shows
 them as reference→current alongside the images.
+
+**GPU time** is measured with `EXT_disjoint_timer_query_webgl2` (Chrome on a
+Mac has it, with 64-bit counters). The frame is cut into sections — the
+shadow pass, the scene, the occlusion, the other post passes (the msaa
+resolve, glamour's accumulation, the miniature's blur) — each a run of
+time-elapsed queries, since those can't nest, read back a few frames later
+when the gpu has finished and averaged per frame over a second. They're in
+`getStats()` (`gpuMs`, `gpuShadowMs`, `gpuSceneMs`, `gpuOcclusionMs`,
+`gpuPostMs`; -1 without the extension), on the console's 2-second line, and
+printed by `tools/shot.mjs`. The shadow pass reads 0 for a still camera,
+which reuses the last map.
 
 #### Load profiler
 

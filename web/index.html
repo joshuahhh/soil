@@ -4234,7 +4234,7 @@
   // sun's hour — local solar time at the camera, or null to follow the
   // clock. a fixed afternoon by default: a place is not always wanted at
   // the hour it happens to be there. part of the saved view
-  const SKY_DEFAULT = { sky: true, haze: true, tint: true, vis: 60, hour: 14, shadows: true, shade: 0.45, occl: true, occlAmt: 0.6 };
+  const SKY_DEFAULT = { sky: true, haze: true, tint: true, vis: 60, hour: 14, shadows: true, shade: 0.45, occl: false, occlAmt: 0.6 };
   let sky = { ...SKY_DEFAULT, ...(START.sky || {}) };
   if (QS.get('sky') === '0') sky = { ...sky, sky: false, haze: false, tint: false };
   if (QS.has('shadowdebug')) view.setShadowDebug(+QS.get('shadowdebug'));
