@@ -390,6 +390,11 @@
         <input id="shade" type="range" min="0" max="100" title="how dark the shade is">
         <span class="amt" id="shadeamount"></span>
       </div>
+      <div class="row">
+        <label class="lbl"><input type="checkbox" id="occlon">occlusion</label>
+        <input id="occl" type="range" min="0" max="100" title="ambient occlusion: how much creases, street canyons and the feet of buildings darken">
+        <span class="amt" id="occlamount"></span>
+      </div>
     </div>
     <div id="glamourpanel" class="panel">
       <div class="head"><span>glamour</span><button class="x" id="glamourclose" title="hide (I)">✕</button></div>
@@ -407,11 +412,6 @@
         <span class="lbl">soft sun</span>
         <input id="soft" type="range" min="0" max="100" title="the sun's size: how soft shadow edges are (the real sun is 0.27°)">
         <span class="amt" id="softamount"></span>
-      </div>
-      <div class="row" id="aorow">
-        <span class="lbl">occlusion</span>
-        <input id="glamourao" type="range" min="0" max="100" title="ambient occlusion: how much creases and street canyons darken">
-        <span class="amt" id="aoamount"></span>
       </div>
     </div>
     <div id="tunnelpanel" class="panel">
@@ -4234,13 +4234,14 @@
   // sun's hour — local solar time at the camera, or null to follow the
   // clock. a fixed afternoon by default: a place is not always wanted at
   // the hour it happens to be there. part of the saved view
-  const SKY_DEFAULT = { sky: true, haze: true, tint: true, vis: 60, hour: 14, shadows: true, shade: 0.45 };
+  const SKY_DEFAULT = { sky: true, haze: true, tint: true, vis: 60, hour: 14, shadows: true, shade: 0.45, occl: true, occlAmt: 0.6 };
   let sky = { ...SKY_DEFAULT, ...(START.sky || {}) };
   if (QS.get('sky') === '0') sky = { ...sky, sky: false, haze: false, tint: false };
   if (QS.has('shadowdebug')) view.setShadowDebug(+QS.get('shadowdebug'));
   if (QS.has('aodebug')) view.setAoDebug(QS.get('aodebug') !== '0');
   if (QS.has('vis')) sky.vis = parseFloat(QS.get('vis')) || sky.vis;
   if (QS.has('shadows')) sky.shadows = QS.get('shadows') !== '0';
+  if (QS.has('occl')) sky.occl = QS.get('occl') !== '0';
   const sunPinned = QS.has('sun') ? QS.get('sun').split(',').map(Number)
     : TEST ? [225, 35] : null;
   const updateSun = () => {
@@ -4262,18 +4263,14 @@
   // from points across a lens (thin-lens depth of field, focused on the
   // crosshair). it converges in a second or two and starts over on any
   // move. part of the saved view; ?glamour=1&aperture=m from the url
-  const GLAMOUR_DEFAULT = { on: false, aperture: 0, samples: 256, soft: 0.27, ao: 0.6 };
+  const GLAMOUR_DEFAULT = { on: false, aperture: 0, samples: 256, soft: 0.27 };
   let glamour = { ...GLAMOUR_DEFAULT, ...(START.glamour || {}) };
-  if (typeof glamour.ao !== 'number') glamour.ao = GLAMOUR_DEFAULT.ao; // saved as a flag by an earlier build
   if (QS.has('glamour')) glamour.on = QS.get('glamour') !== '0';
   if (QS.has('aperture')) glamour.aperture = parseFloat(QS.get('aperture')) || 0;
   const apertureFromSlider = (v) => v === 0 ? 0 : Math.round(100 * Math.pow(2, (v - 100) / 100 * 8)) / 100; // 0, then ~0.4..100 m, log
   const sliderFromAperture = (m) => m <= 0 ? 0 : Math.round(100 + Math.log2(m / 100) / 8 * 100);
   const applyGlamour = () => {
-    // the slider's 0..1 is up to three times the occlusion's natural weight
-    view.setGlamour(glamour.on, glamour.aperture, glamour.samples, glamour.soft, glamour.ao * 3);
-    document.getElementById('glamourao').value = Math.round(glamour.ao * 100);
-    document.getElementById('aoamount').textContent = `${Math.round(glamour.ao * 100)}%`;
+    view.setGlamour(glamour.on, glamour.aperture, glamour.samples, glamour.soft);
     document.getElementById('soft').value = Math.round(glamour.soft / 2.7 * 100);
     document.getElementById('softamount').textContent = `${glamour.soft.toFixed(2)}°`;
     document.getElementById('glamouron').checked = glamour.on;
@@ -4282,7 +4279,7 @@
     gateGlamourRows();
     saveView();
   };
-  // the three sliders only act while accumulating, and soft sun only with
+  // the sliders only act while accumulating, and soft sun only with
   // shadows on (the sky panel's switch): locked and dimmed otherwise
   const gateGlamourRows = () => {
     const gate = (row, input, on) => {
@@ -4291,10 +4288,8 @@
     };
     gate('aperturerow', 'aperture', glamour.on);
     gate('softrow', 'soft', glamour.on && sky.shadows);
-    gate('aorow', 'glamourao', glamour.on);
   };
   document.getElementById('glamouron').addEventListener('change', (e) => { glamour.on = e.target.checked; applyGlamour(); });
-  document.getElementById('glamourao').addEventListener('input', (e) => { glamour.ao = +e.target.value / 100; applyGlamour(); });
   document.getElementById('aperture').addEventListener('input', (e) => { glamour.aperture = apertureFromSlider(+e.target.value); applyGlamour(); });
   // 0..2.7 degrees of sun radius, the real one a tenth of the way along
   document.getElementById('soft').addEventListener('input', (e) => { glamour.soft = Math.round(+e.target.value * 2.7) / 100; applyGlamour(); });
@@ -4331,6 +4326,11 @@
   const applySky = () => {
     view.setAtmosphere(sky.sky, sky.haze, sky.tint, sky.vis);
     view.setShadows(sky.shadows, sky.shade);
+    // the slider's 0..1 is up to three times the occlusion's natural weight
+    view.setOcclusion(sky.occl, sky.occlAmt * 3);
+    skyEl('occlon').checked = sky.occl;
+    skyEl('occl').value = Math.round(sky.occlAmt * 100);
+    skyEl('occlamount').textContent = `${Math.round(sky.occlAmt * 100)}%`;
     skyEl('skyon').checked = sky.sky;
     skyEl('tinton').checked = sky.tint;
     skyEl('hazeon').checked = sky.haze;
@@ -4340,7 +4340,8 @@
     skyEl('shade').value = Math.round(sky.shade * 100);
     skyEl('shadeamount').textContent = `${Math.round(sky.shade * 100)}%`;
     // a slider whose switch is off: dimmed and locked, value kept
-    for (const [id, on] of [['vis', sky.haze], ['visamount', sky.haze], ['shade', sky.shadows], ['shadeamount', sky.shadows]]) {
+    for (const [id, on] of [['vis', sky.haze], ['visamount', sky.haze], ['shade', sky.shadows], ['shadeamount', sky.shadows],
+      ['occl', sky.occl], ['occlamount', sky.occl]]) {
       skyEl(id).classList.toggle('off', !on);
       if (skyEl(id).tagName === 'INPUT') skyEl(id).disabled = !on;
     }
@@ -4350,7 +4351,8 @@
     saveView();
   };
   skyEl('shade').addEventListener('input', (e) => { sky.shade = +e.target.value / 100; applySky(); });
-  for (const [id, key] of [['skyon', 'sky'], ['hazeon', 'haze'], ['tinton', 'tint'], ['shadowson', 'shadows']])
+  skyEl('occl').addEventListener('input', (e) => { sky.occlAmt = +e.target.value / 100; applySky(); });
+  for (const [id, key] of [['skyon', 'sky'], ['hazeon', 'haze'], ['tinton', 'tint'], ['shadowson', 'shadows'], ['occlon', 'occl']])
     skyEl(id).addEventListener('change', (e) => { sky[key] = e.target.checked; applySky(); });
   skyEl('vis').addEventListener('input', (e) => { sky.vis = visFromSlider(+e.target.value); applySky(); });
   skyEl('suntime').addEventListener('input', (e) => { sky.hour = +e.target.value / 60; applySky(); });

@@ -118,6 +118,7 @@ struct EarthView {
 			abort();
 		}
 		emscripten_webgl_make_context_current(gl);
+		ctx.msaa_samples = g_antialias ? 4 : 0; // the offscreen passes match the context
 		renderInit(ctx, nullptr);
 		earth.load();
 	}
@@ -523,11 +524,15 @@ struct EarthView {
 	// soft_deg: the angular radius the sun's light comes from, which sets how
 	// soft shadow edges are (the real sun is 0.27; more is an overcast-ish
 	// look)
-	void setGlamour(bool on, double aperture_m, int samples, double soft_deg, double ao) {
+	// ambient occlusion, in real time and in glamour mode alike: on, and
+	// its weight (1 is its natural one)
+	void setOcclusion(bool on, double strength) {
 		auto &acc = ctx.accum;
-		if ((float)ao != acc.ao_strength || acc.ao_on != (ao > 0)) acc.samples = 0;
-		acc.ao_on = ao > 0;
-		acc.ao_strength = (float)fmax(0.0, ao);
+		acc.ao_on = on;
+		acc.ao_strength = (float)fmax(0.0, strength);
+		acc.samples = 0;
+	}
+	void setGlamour(bool on, double aperture_m, int samples, double soft_deg) {
 		auto soft = fmax(0.0, soft_deg) * M_PI / 180.0;
 		if (on != glamour || aperture_m != glamour_aperture || soft != glamour_soft) ctx.accum.samples = 0;
 		glamour = on;
@@ -981,6 +986,7 @@ EMSCRIPTEN_BINDINGS(earth) {
 		.function("setSun", &EarthView::setSun)
 		.function("setAtmosphere", &EarthView::setAtmosphere)
 		.function("setGlamour", &EarthView::setGlamour)
+		.function("setOcclusion", &EarthView::setOcclusion)
 		.function("setShadows", &EarthView::setShadows)
 		.function("setShadowDebug", &EarthView::setShadowDebug)
 		.function("setAoDebug", &EarthView::setAoDebug)

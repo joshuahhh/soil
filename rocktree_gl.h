@@ -66,9 +66,15 @@ struct accum_gl_t {
 	bool ao_on = true;
 	float ao_strength = 1.0f, ao_rotation = 0;
 	float near = 1, far = 1e6, tan_half = 0.414f, aspect = 1.6f;
+	float vis = 0; // the haze's visibility (m), 0 with the haze off
 	bool ortho = false;
-	GLuint ao_program = 0;
-	GLint ao_color_loc, ao_depth_loc, ao_viewport_loc, ao_planes_loc, ao_proj_loc, ao_params_loc;
+	// the occlusion is two passes: computed into a one-channel texture,
+	// then blurred (in real time; a single tap in glamour mode, whose
+	// average does the smoothing) and multiplied onto the scene
+	GLuint ao_fbo = 0, ao_tex = 0, ao_program = 0, ao_comp_program = 0;
+	int ao_w = 0, ao_h = 0;
+	GLint ao_depth_loc, ao_viewport_loc, ao_planes_loc, ao_proj_loc, ao_params_loc;
+	GLint comp_color_loc, comp_ao_loc, comp_depth_loc, comp_planes_loc, comp_params_loc;
 };
 
 // sun shadows: a depth map rendered from the sun (orthographic, fitted by
@@ -91,6 +97,14 @@ struct gl_ctx_t {
 	sky_gl_t sky;
 	accum_gl_t accum;
 	shadow_gl_t shadow;
+	// multisampled stand-ins for the offscreen target's colour and depth,
+	// resolved into its textures at the end of the frame: drawing straight
+	// into textures loses the context's msaa, and every pass that reads the
+	// scene back (occlusion, the miniature, glamour) went jagged with it.
+	// samples set by the shell from the context's antialias attribute
+	int msaa_samples = 0;
+	GLuint msaa_fbo = 0, msaa_color = 0, msaa_depth = 0;
+	int msaa_w = 0, msaa_h = 0;
 	// the framebuffer the scene is being drawn into this frame, and its
 	// size: an offscreen pass (the shadow map) puts it back afterwards
 	GLuint scene_fbo = 0;
@@ -330,11 +344,66 @@ void renderDofEnsure(render_ctx_t &ctx, int w, int h) {
 	d.h = h;
 }
 
+// the occlusion runs in real time (outside glamour mode, which has its own
+// way in, and not under the miniature, whose blur reads the scene directly)
+bool renderAoLive(render_ctx_t &ctx) {
+	auto &a = ctx.accum;
+	return a.ao_on && a.ao_strength > 0 && !a.on && !ctx.dof.on;
+}
+
+void renderMsaaEnsure(render_ctx_t &ctx, int w, int h) {
+	if (ctx.msaa_fbo && ctx.msaa_w == w && ctx.msaa_h == h) return;
+	GLint max_samples = 0;
+	glGetIntegerv(GL_MAX_SAMPLES, &max_samples);
+	auto n = ctx.msaa_samples < max_samples ? ctx.msaa_samples : max_samples;
+	if (!ctx.msaa_fbo) glGenFramebuffers(1, &ctx.msaa_fbo);
+	if (!ctx.msaa_color) glGenRenderbuffers(1, &ctx.msaa_color);
+	if (!ctx.msaa_depth) glGenRenderbuffers(1, &ctx.msaa_depth);
+	glBindRenderbuffer(GL_RENDERBUFFER, ctx.msaa_color);
+	glRenderbufferStorageMultisample(GL_RENDERBUFFER, n, GL_RGBA8, w, h);
+	glBindRenderbuffer(GL_RENDERBUFFER, ctx.msaa_depth);
+	glRenderbufferStorageMultisample(GL_RENDERBUFFER, n, GL_DEPTH_COMPONENT24, w, h);
+	glBindRenderbuffer(GL_RENDERBUFFER, 0);
+	glBindFramebuffer(GL_FRAMEBUFFER, ctx.msaa_fbo);
+	glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_RENDERBUFFER, ctx.msaa_color);
+	glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, ctx.msaa_depth);
+	auto status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+	if (status != GL_FRAMEBUFFER_COMPLETE) {
+		printf("msaa framebuffer incomplete (0x%x); offscreen passes without it\n", status);
+		glDeleteFramebuffers(1, &ctx.msaa_fbo);
+		ctx.msaa_fbo = 0;
+		ctx.msaa_samples = 0;
+	}
+	glBindFramebuffer(GL_FRAMEBUFFER, 0);
+	ctx.msaa_w = w;
+	ctx.msaa_h = h;
+}
+
+void renderAoEnsure(render_ctx_t &ctx, int w, int h) {
+	auto &a = ctx.accum;
+	if (a.ao_fbo && a.ao_w == w && a.ao_h == h) return;
+	if (!a.ao_fbo) glGenFramebuffers(1, &a.ao_fbo);
+	if (!a.ao_tex) glGenTextures(1, &a.ao_tex);
+	glBindTexture(GL_TEXTURE_2D, a.ao_tex);
+	glTexImage2D(GL_TEXTURE_2D, 0, GL_R8, w, h, 0, GL_RED, GL_UNSIGNED_BYTE, NULL);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+	glBindTexture(GL_TEXTURE_2D, 0);
+	glBindFramebuffer(GL_FRAMEBUFFER, a.ao_fbo);
+	glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, a.ao_tex, 0);
+	glBindFramebuffer(GL_FRAMEBUFFER, 0);
+	a.ao_w = w;
+	a.ao_h = h;
+}
+
 void renderFrameBegin(render_ctx_t &ctx, void *window, int width, int height, int sky) {
 	// the scene goes to the offscreen target whenever a pass reads it back
-	auto offscreen = ctx.dof.on || ctx.accum.on;
+	auto offscreen = ctx.dof.on || ctx.accum.on || renderAoLive(ctx);
 	if (offscreen) renderDofEnsure(ctx, width, height);
-	ctx.scene_fbo = offscreen ? ctx.dof.fbo : 0;
+	if (offscreen && ctx.msaa_samples > 1) renderMsaaEnsure(ctx, width, height);
+	ctx.scene_fbo = !offscreen ? 0 : ctx.msaa_samples > 1 && ctx.msaa_fbo ? ctx.msaa_fbo : ctx.dof.fbo;
 	ctx.scene_w = width;
 	ctx.scene_h = height;
 	glBindFramebuffer(GL_FRAMEBUFFER, ctx.scene_fbo);
@@ -495,20 +564,28 @@ void renderAccumInit(render_ctx_t &ctx) {
 	// ambient occlusion from the depth buffer: each pixel's view-space
 	// position and face normal, and a spiral of taps around it out to a
 	// radius in metres (a fraction of the distance, held between half a
-	// metre and thirty); a tap occludes by how far above the surface's
-	// plane it sits, and not at all past the radius, so a building's
-	// silhouette doesn't darken the distant ground behind it. the cap is
-	// high because street canyons are: a 30 m one left every wall of a
-	// manhattan street outside the radius
+	// metre and 150); a tap occludes by how far above the surface's plane
+	// it sits, and not at all past the radius, so a building's silhouette
+	// doesn't darken the distant ground behind it. the cap is high because
+	// street canyons are: a 30 m one left every wall of a manhattan street
+	// outside the radius. the spiral turns per pixel (interleaved gradient
+	// noise) and per glamour sample, so its pattern breaks up into noise
+	// the blur, or the average, removes.
+	//
+	// and it fades out twice with distance: where the haze has taken over
+	// (it is drawn after the haze, and darkening what the haze has washed
+	// out drew dark lace over distant mountains), and where the depth
+	// buffer can no longer resolve the radius — 24 bits over a near plane
+	// of a metre resolve hundreds of metres at 100 km, and occlusion
+	// measured from that is quantization, not geometry
 	a.ao_program = makeShader(fullscreen_vs,
 		"#version 300 es\n"
 		"precision highp float;"
-		"uniform sampler2D color_tex;"
 		"uniform sampler2D depth_tex;"
 		"uniform vec2 viewport;"
 		"uniform vec3 planes;" // near, far, ortho flag
 		"uniform vec2 proj;" // tan(fov/2) (ortho: half height, metres), aspect
-		"uniform vec3 params;" // strength, rotation, radius as a fraction of distance
+		"uniform vec3 params;" // visibility (m, 0 = no haze), rotation, radius as a fraction of distance
 		"in vec2 v_uv;"
 		"out vec4 frag_color;"
 		"float lin(float d) {"
@@ -523,37 +600,125 @@ void renderAccumInit(render_ctx_t &ctx) {
 		"	return vec3(n.x * proj.x * proj.y * z, n.y * proj.x * z, -z);"
 		"}"
 		"void main() {"
-		"	vec3 c = texture(color_tex, v_uv).rgb;"
-		"	if (texture(depth_tex, v_uv).r >= 1.0 || params.x == 0.0) { frag_color = vec4(params.x < 0.0 ? vec3(1.0) : c, 1.0); return; }"
+		"	if (texture(depth_tex, v_uv).r >= 1.0) { frag_color = vec4(0.0); return; }"
 		"	vec3 p = pos(v_uv);"
 		"	vec3 n = normalize(cross(dFdx(p), dFdy(p)));"
 		"	if (dot(n, p) > 0.0) n = -n;" // toward the camera
 		"	float z = -p.z;"
 		"	float R = clamp(params.z * z, 0.5, 150.0);"
+		"	float dz = planes.z > 0.5 ? (planes.y - planes.x) / 16777216.0 : z * z / (planes.x * 16777216.0);"
+		"	float fade = 1.0 - smoothstep(0.03 * R, 0.15 * R, dz);"
+		"	if (params.x > 0.0) fade *= exp(-z / params.x);"
+		"	if (fade < 0.01) { frag_color = vec4(0.0); return; }"
 		"	float rpx = planes.z > 0.5 ? R / (2.0 * proj.x) * viewport.y : R / (z * proj.x) * 0.5 * viewport.y;"
 		"	rpx = min(rpx, 0.08 * viewport.y);"
+		"	float spin = params.y + 6.2832 * fract(52.9829189 * fract(dot(gl_FragCoord.xy, vec2(0.06711056, 0.00583715))));"
 		"	float occ = 0.0;"
 		"	const int N = 16;"
 		"	for (int i = 0; i < N; i++) {"
 		"		float r = sqrt((float(i) + 0.5) / float(N)) * rpx;"
-		"		float a = float(i) * 2.39996 + params.y;"
+		"		float a = float(i) * 2.39996 + spin;"
 		"		vec2 uv = v_uv + vec2(cos(a), sin(a)) * r / viewport;"
 		"		if (uv.x < 0.0 || uv.y < 0.0 || uv.x > 1.0 || uv.y > 1.0) continue;"
 		"		vec3 v = pos(uv) - p;"
 		"		float l = length(v);"
 		"		if (l < 1e-4) continue;"
-		"		occ += max(0.0, dot(v / l, n) - 0.1) * (1.0 - smoothstep(0.7 * R, R, l));"
+		// only what rises more than ~15 degrees above the surface's plane:
+		// a street canyon's walls are far steeper, the photogrammetry's
+		// bumpy water mostly isn't, and at 6 degrees it smudged every bay
+		"		occ += max(0.0, dot(v / l, n) - 0.25) * 1.33 * (1.0 - smoothstep(0.7 * R, R, l));"
 		"	}"
-		"	float ao = clamp(1.0 - abs(params.x) * 1.6 * occ / float(N), 0.0, 1.0);"
-		// a negative strength shows the occlusion alone (?aodebug)
-		"	frag_color = vec4(params.x < 0.0 ? vec3(ao) : c * ao, 1.0);"
+		"	frag_color = vec4(occ / float(N) * fade, 0.0, 0.0, 1.0);"
 		"}");
-	a.ao_color_loc = glGetUniformLocation(a.ao_program, "color_tex");
 	a.ao_depth_loc = glGetUniformLocation(a.ao_program, "depth_tex");
 	a.ao_viewport_loc = glGetUniformLocation(a.ao_program, "viewport");
 	a.ao_planes_loc = glGetUniformLocation(a.ao_program, "planes");
 	a.ao_proj_loc = glGetUniformLocation(a.ao_program, "proj");
 	a.ao_params_loc = glGetUniformLocation(a.ao_program, "params");
+	// the occlusion onto the scene: averaged over a 4x4 block of pixels
+	// (blur > 0) whose depths are near this one's, so the per-pixel spin
+	// smooths out without bleeding across a silhouette
+	a.ao_comp_program = makeShader(fullscreen_vs,
+		"#version 300 es\n"
+		"precision highp float;"
+		"uniform sampler2D color_tex;"
+		"uniform sampler2D ao_tex;"
+		"uniform sampler2D depth_tex;"
+		"uniform vec3 planes;"
+		"uniform vec3 params;" // strength (negative: the occlusion alone), blur on, -
+		"in vec2 v_uv;"
+		"out vec4 frag_color;"
+		"float lin(float d) {"
+		"	if (planes.z > 0.5) return planes.x + d * (planes.y - planes.x);"
+		"	float z = d * 2.0 - 1.0;"
+		"	return 2.0 * planes.x * planes.y / (planes.y + planes.x - z * (planes.y - planes.x));"
+		"}"
+		"void main() {"
+		"	vec3 c = texture(color_tex, v_uv).rgb;"
+		"	float occ = texture(ao_tex, v_uv).r;"
+		"	if (params.y > 0.5) {"
+		"		ivec2 p = ivec2(gl_FragCoord.xy);"
+		"		float z0 = lin(texelFetch(depth_tex, p, 0).r);"
+		"		float s = 0.0, w = 0.0;"
+		"		for (int i = -2; i <= 1; i++)"
+		"			for (int j = -2; j <= 1; j++) {"
+		"				ivec2 q = p + ivec2(i, j);"
+		"				float k = abs(lin(texelFetch(depth_tex, q, 0).r) - z0) < 0.05 * z0 ? 1.0 : 0.0;"
+		"				s += texelFetch(ao_tex, q, 0).r * k;"
+		"				w += k;"
+		"			}"
+		"		occ = w > 0.0 ? s / w : occ;"
+		"	}"
+		"	float ao = clamp(1.0 - abs(params.x) * 1.6 * occ, 0.0, 1.0);"
+		"	frag_color = vec4(params.x < 0.0 ? vec3(ao) : c * ao, 1.0);"
+		"}");
+	a.comp_color_loc = glGetUniformLocation(a.ao_comp_program, "color_tex");
+	a.comp_ao_loc = glGetUniformLocation(a.ao_comp_program, "ao_tex");
+	a.comp_depth_loc = glGetUniformLocation(a.ao_comp_program, "depth_tex");
+	a.comp_planes_loc = glGetUniformLocation(a.ao_comp_program, "planes");
+	a.comp_params_loc = glGetUniformLocation(a.ao_comp_program, "params");
+}
+
+// the occlusion's first pass, into its texture. leaves that fbo bound
+void aoCompute(render_ctx_t &ctx) {
+	auto &a = ctx.accum;
+	auto &d = ctx.dof;
+	renderAoEnsure(ctx, d.w, d.h);
+	glBindFramebuffer(GL_FRAMEBUFFER, a.ao_fbo);
+	glViewport(0, 0, a.ao_w, a.ao_h);
+	glUseProgram(a.ao_program);
+	glBindVertexArray(d.vao);
+	glActiveTexture(GL_TEXTURE1);
+	glBindTexture(GL_TEXTURE_2D, d.depth);
+	glUniform1i(a.ao_depth_loc, 1);
+	glUniform2f(a.ao_viewport_loc, (float)a.ao_w, (float)a.ao_h);
+	glUniform3f(a.ao_planes_loc, a.near, a.far, a.ortho ? 1.0f : 0.0f);
+	glUniform2f(a.ao_proj_loc, a.tan_half, a.aspect);
+	glUniform3f(a.ao_params_loc, a.vis, a.ao_rotation, 0.04f);
+	glDrawArrays(GL_TRIANGLES, 0, 3);
+}
+
+// the second: the scene times the occlusion, into whatever is bound
+void aoComposite(render_ctx_t &ctx, bool blur) {
+	auto &a = ctx.accum;
+	auto &d = ctx.dof;
+	glUseProgram(a.ao_comp_program);
+	glBindVertexArray(d.vao);
+	glActiveTexture(GL_TEXTURE2);
+	glBindTexture(GL_TEXTURE_2D, a.ao_tex);
+	glActiveTexture(GL_TEXTURE1);
+	glBindTexture(GL_TEXTURE_2D, d.depth);
+	glActiveTexture(GL_TEXTURE0);
+	glBindTexture(GL_TEXTURE_2D, d.color);
+	glUniform1i(a.comp_color_loc, 0);
+	glUniform1i(a.comp_depth_loc, 1);
+	glUniform1i(a.comp_ao_loc, 2);
+	glUniform3f(a.comp_planes_loc, a.near, a.far, a.ortho ? 1.0f : 0.0f);
+	glUniform3f(a.comp_params_loc, ao_debug ? -a.ao_strength : a.ao_strength, blur ? 1.0f : 0.0f, 0.0f);
+	glDrawArrays(GL_TRIANGLES, 0, 3);
+	glActiveTexture(GL_TEXTURE2);
+	glBindTexture(GL_TEXTURE_2D, 0);
+	glActiveTexture(GL_TEXTURE0);
 }
 
 void dofDraw(render_ctx_t &ctx);
@@ -565,35 +730,42 @@ void dofDraw(render_ctx_t &ctx);
 void renderFrameEnd(render_ctx_t &ctx) {
 	auto &d = ctx.dof;
 	auto &a = ctx.accum;
-	if (!d.on && !a.on) return;
+	auto ao_live = renderAoLive(ctx);
+	if (!d.on && !a.on && !ao_live) return;
 	glDisable(GL_DEPTH_TEST);
-	if (a.on) {
+	// the multisampled scene, resolved into the textures the passes read
+	if (ctx.scene_fbo == ctx.msaa_fbo && ctx.msaa_fbo) {
+		glBindFramebuffer(GL_READ_FRAMEBUFFER, ctx.msaa_fbo);
+		glBindFramebuffer(GL_DRAW_FRAMEBUFFER, d.fbo);
+		glBlitFramebuffer(0, 0, d.w, d.h, 0, 0, d.w, d.h, GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT, GL_NEAREST);
+		glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
+		glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
+	}
+	if (ao_live) {
+		aoCompute(ctx);
+		glBindFramebuffer(GL_FRAMEBUFFER, 0);
+		glViewport(0, 0, d.w, d.h);
+		aoComposite(ctx, true);
+	} else if (a.on) {
 		renderAccumEnsure(ctx, d.w, d.h);
 		if (a.on) { // (ensure can turn it off)
 			glBindFramebuffer(GL_FRAMEBUFFER, a.fbo);
 			glViewport(0, 0, a.w, a.h);
 			if (!a.hold || a.samples == 0) {
+				auto ao = !d.on && a.ao_on && a.ao_strength > 0;
+				if (ao) {
+					aoCompute(ctx);
+					glBindFramebuffer(GL_FRAMEBUFFER, a.fbo);
+					glViewport(0, 0, a.w, a.h);
+				}
 				// the n-th sample goes in with weight 1/n: the first replaces
 				// whatever was there, and the texture is always the average
 				glEnable(GL_BLEND);
 				glBlendColor(0, 0, 0, 1.0f / (float)(a.samples + 1));
 				glBlendFunc(GL_CONSTANT_ALPHA, GL_ONE_MINUS_CONSTANT_ALPHA);
 				if (d.on) dofDraw(ctx);
-				else if (a.ao_on && a.ao_strength > 0) {
-					glUseProgram(a.ao_program);
-					glBindVertexArray(d.vao);
-					glActiveTexture(GL_TEXTURE1);
-					glBindTexture(GL_TEXTURE_2D, d.depth);
-					glActiveTexture(GL_TEXTURE0);
-					glBindTexture(GL_TEXTURE_2D, d.color);
-					glUniform1i(a.ao_color_loc, 0);
-					glUniform1i(a.ao_depth_loc, 1);
-					glUniform2f(a.ao_viewport_loc, (float)a.w, (float)a.h);
-					glUniform3f(a.ao_planes_loc, a.near, a.far, a.ortho ? 1.0f : 0.0f);
-					glUniform2f(a.ao_proj_loc, a.tan_half, a.aspect);
-					glUniform3f(a.ao_params_loc, ao_debug ? -a.ao_strength : a.ao_strength, a.ao_rotation, 0.04f);
-					glDrawArrays(GL_TRIANGLES, 0, 3);
-				} else {
+				else if (ao) aoComposite(ctx, false);
+				else {
 					glUseProgram(a.blit_program);
 					glBindVertexArray(d.vao);
 					glActiveTexture(GL_TEXTURE0);
@@ -616,7 +788,7 @@ void renderFrameEnd(render_ctx_t &ctx) {
 			glBindVertexArray(0);
 		}
 	}
-	if (!a.on) {
+	if (!a.on && !ao_live) {
 		glBindFramebuffer(GL_FRAMEBUFFER, 0);
 		glViewport(0, 0, d.w, d.h);
 		dofDraw(ctx);

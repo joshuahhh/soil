@@ -1174,6 +1174,7 @@ struct earth_core_t {
 		ctx.accum.near = (float)near; ctx.accum.far = (float)far; ctx.accum.ortho = cam.ortho;
 		ctx.accum.tan_half = (float)(cam.ortho ? ortho_half_extent : tan(cam.fov / 2.0));
 		ctx.accum.aspect = aspect_ratio;
+		ctx.accum.vis = haze_on && !tube_on ? (float)visibility_m : 0.0f;
 
 		Matrix4d key_vp = projection * key_view; // before the jitter
 		// the sub-pixel jitter (glamour mode): a shift of the whole image by

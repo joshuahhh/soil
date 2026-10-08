@@ -253,7 +253,7 @@ time at the camera, or *follow the clock* takes it from the real one (the
 slider then shows where the clock has it, locked); `sky` and `sun tint`
 switch those passes; `haze` switches the aerial perspective, its slider the
 visibility at sea level (5–320 km); `shadows` the sun shadows, its slider how
-dark the shade is. A switch that gates a slider stands in for the slider's
+dark the shade is; `occlusion` the ambient occlusion, its slider its weight. A switch that gates a slider stands in for the slider's
 name, and an off switch dims and locks its slider without losing the value.
 The default is a fixed afternoon, not the clock: a place is not always wanted
 at the hour it happens to be there. It is all part of the saved view, and
@@ -298,9 +298,9 @@ alone, `3` the cast shadows alone.
 
 #### Glamour mode
 
-**I** opens the `glamour` panel. Its three sliders — `lens blur`, `soft
-sun`, `occlusion` — only act while *accumulate* is on, and are locked and
-dimmed otherwise (`soft sun` also while shadows are off). With it on, the engine keeps
+**I** opens the `glamour` panel. Its sliders — `lens blur`, `soft sun` —
+only act while *accumulate* is on, and are locked and dimmed otherwise
+(`soft sun` also while shadows are off). With it on, the engine keeps
 rendering while the camera sits still and averages the frames, each drawn
 through a different sub-pixel offset (a Halton sequence, so the average is a
 proper supersample — edges, crack lines and distant detail all settle) and,
@@ -316,13 +316,26 @@ before anything has accumulated.
 The miniature's blur pass composes with it (the pass is what gets summed).
 Each sample also jitters the sun across its disc (`soft sun`: the real
 one's 0.27°, or larger for an overcast softness) and the shadow map's box
-across a texel, so shadow edges come out as true penumbras, and applies
-**ambient occlusion** from the depth buffer with a different rotation, so
-its noise averages away: a spiral of taps out to a radius in metres (a
+across a texel, so shadow edges come out as true penumbras, and turns the
+ambient occlusion's sampling pattern, so its noise averages away.
+
+**Ambient occlusion** (the sky panel's `occlusion` row) runs in real time
+too: a spiral of taps through the depth buffer out to a radius in metres (a
 twenty-fifth of the distance, 0.5–150 m — street canyons need the top of
-that), each occluding by how far above the surface's plane it sits and not
-at all past the radius, so silhouettes don't halo. `occlusion` sets its weight;
-`?aodebug=1` shows the occlusion alone, which doubles as a clay render.
+that), each occluding by how far it rises above the surface's plane — past
+~15°, so the photogrammetry's bumpy water mostly doesn't count — and not at
+all past the radius, so silhouettes don't halo. The spiral turns per pixel,
+and a depth-aware 4×4 blur removes the pattern; in glamour mode a single tap
+of it per sample, the average doing the smoothing. It fades out with
+distance twice: where the haze has taken over (it is applied after the haze,
+and darkening what the haze had washed out drew dark lace over distant
+mountains), and where the depth buffer can no longer resolve its radius
+(24 bits over a one-metre near plane resolve hundreds of metres at 100 km;
+occlusion measured from that is quantization). For it the scene is drawn
+offscreen into 4× multisampled renderbuffers, resolved into the textures
+the passes read, so the context's antialiasing survives — and the miniature
+and glamour mode, which used to draw straight into textures, got theirs
+back. `?occl=0` turns it off; `?aodebug=1` shows the occlusion alone, which doubles as a clay render.
 `lens blur` is the aperture, in metres of eye travel: off is a pinhole, supersampling only;
 half a metre is a camera; tens of metres is a tilt-shift toy. Part of the
 saved view; `?glamour=1&aperture=m` from the url.
