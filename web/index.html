@@ -4242,6 +4242,9 @@
   if (QS.has('vis')) sky.vis = parseFloat(QS.get('vis')) || sky.vis;
   if (QS.has('shadows')) sky.shadows = QS.get('shadows') !== '0';
   if (QS.has('occl')) sky.occl = QS.get('occl') !== '0';
+  // the occlusion's resolution (1 full, 2 half) and taps, for comparing
+  if (QS.has('occlres') || QS.has('occltaps'))
+    view.setOcclusionQuality(+(QS.get('occlres') || 2), +(QS.get('occltaps') || 16));
   const sunPinned = QS.has('sun') ? QS.get('sun').split(',').map(Number)
     : TEST ? [225, 35] : null;
   const updateSun = () => {

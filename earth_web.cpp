@@ -542,6 +542,12 @@ struct EarthView {
 		acc.ao_strength = (float)fmax(0.0, strength);
 		acc.samples = 0;
 	}
+	// the occlusion's resolution (1 full, 2 half) and taps per pixel
+	void setOcclusionQuality(int scale, int taps) {
+		ctx.accum.ao_scale = scale < 1 ? 1 : scale > 2 ? 2 : scale;
+		ctx.accum.ao_taps = taps < 4 ? 4 : taps > 32 ? 32 : taps;
+		ctx.accum.samples = 0;
+	}
 	void setGlamour(bool on, double aperture_m, int samples, double soft_deg) {
 		auto soft = fmax(0.0, soft_deg) * M_PI / 180.0;
 		if (on != glamour || aperture_m != glamour_aperture || soft != glamour_soft) ctx.accum.samples = 0;
@@ -997,6 +1003,7 @@ EMSCRIPTEN_BINDINGS(earth) {
 		.function("setAtmosphere", &EarthView::setAtmosphere)
 		.function("setGlamour", &EarthView::setGlamour)
 		.function("setOcclusion", &EarthView::setOcclusion)
+		.function("setOcclusionQuality", &EarthView::setOcclusionQuality)
 		.function("setShadows", &EarthView::setShadows)
 		.function("setShadowDebug", &EarthView::setShadowDebug)
 		.function("setAoDebug", &EarthView::setAoDebug)

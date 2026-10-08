@@ -324,9 +324,14 @@ too: a spiral of taps through the depth buffer out to a radius in metres (a
 twenty-fifth of the distance, 0.5–150 m — street canyons need the top of
 that), each occluding by how far it rises above the surface's plane — past
 ~15°, so the photogrammetry's bumpy water mostly doesn't count — and not at
-all past the radius, so silhouettes don't halo. The spiral turns per pixel,
-and a depth-aware 4×4 blur removes the pattern; in glamour mode a single tap
-of it per sample, the average doing the smoothing. It fades out with
+all past the radius, so silhouettes don't halo. It is computed at half
+resolution, storing each texel's depth beside its occlusion; the spiral
+turns per pixel, a depth-aware 5×5 blur at that same resolution removes the
+pattern (a 3×3 one applied at full size left it in as a stipple), and a 2×2
+depth-aware upscale puts it on the scene — falling back to the texel nearest
+in depth where none matches, since falling back to none left white gaps
+along edges. In glamour mode the blur is skipped: the average over samples,
+each spun differently, does the smoothing. It fades out with
 distance twice: where the haze has taken over (it is applied after the haze,
 and darkening what the haze had washed out drew dark lace over distant
 mountains), and where the depth buffer can no longer resolve its radius
@@ -337,11 +342,30 @@ the passes read, so the context's antialiasing survives — and the miniature
 and glamour mode, which used to draw straight into textures, got theirs
 back.
 
-It is **off by default**, because it isn't cheap. Measured with the gpu
-timer (below), the occlusion passes take 2.0–2.4 ms a frame at 1280×800 and
-6–8 ms at 2560×1600, and the msaa resolve that rendering offscreen needs
-another 1.2 / 3–5 ms: at retina size, the seattle view goes from 17 ms of
-gpu time to 31 — sixty frames a second to thirty. Glamour mode, which
+It is **off by default**, because it isn't cheap, and most of what it
+costs isn't the occlusion. `node tools/occlbench.mjs [shot]` measures it
+fairly — gpu timer queries count elapsed gpu time, including whatever else
+the gpu is doing (another tab, another app), so runs minutes apart drifted by
+2× and only interleaved ones compare; it loads a view once and cycles the
+configurations live. At 2560×1600, gpu ms per frame:
+
+| | total | scene | occlusion | resolve |
+| --- | --- | --- | --- | --- |
+| manhattan, off | 6.2 | 6.2 | – | – |
+| full resolution, 16 taps | 19.0 | 9.3 | 6.8 | 2.9 |
+| half resolution, 16 taps | 15.4 | 8.2 | 4.4 | 2.9 |
+| half resolution, 8 taps | 15.0 | 8.1 | 4.0 | 2.9 |
+| seattle, off | 17.3 | 17.3 | – | – |
+| half resolution, 16 taps | 31.2 | 19.5 | 6.5 | 5.2 |
+
+Half resolution (the setting; `?occlres=1` for full, `?occltaps=` for the
+taps) saves 2–2.5 ms of the pass. The rest is structural: the scene gets
+2–3 ms slower drawn into an offscreen multisampled buffer than into the
+canvas, and the resolve costs 3–5 more. That's apple's tile-based gpus: the
+canvas's own msaa resolves on chip for almost nothing, while an offscreen
+multisampled buffer writes all its samples out to memory and resolves them
+in a separate pass (`glInvalidateFramebuffer` after the resolve, the usual
+hint that they can be dropped, changed nothing here). Glamour mode, which
 renders offscreen anyway, pays only the occlusion pass. `?occl=1` turns it
 on from the url; `?aodebug=1` shows the occlusion alone, which doubles as a clay render.
 `lens blur` is the aperture, in metres of eye travel: off is a pinhole, supersampling only;
