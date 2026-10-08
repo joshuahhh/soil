@@ -4228,6 +4228,7 @@
   if (QS.has('shadowdebug')) view.setShadowDebug(+QS.get('shadowdebug'));
   if (QS.has('aodebug')) view.setAoDebug(QS.get('aodebug') !== '0');
   if (QS.has('vis')) sky.vis = parseFloat(QS.get('vis')) || sky.vis;
+  if (QS.has('shadows')) sky.shadows = QS.get('shadows') !== '0';
   const sunPinned = QS.has('sun') ? QS.get('sun').split(',').map(Number)
     : TEST ? [225, 35] : null;
   const updateSun = () => {

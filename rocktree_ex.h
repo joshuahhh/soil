@@ -100,6 +100,35 @@ void populateNode(rocktree_t::node_t *node, std::unique_ptr<NodeData> node_data)
 		//m.indices_len = layer_bounds[3]; // enable
 		if (!getenv("EARTH_FULL_LAYERS")) m.indices.resize(layer_bounds[3]);
 
+		// vertex normals, in the globe frame: each triangle's edges taken
+		// through the mesh's linear transform (its axes are scaled
+		// unequally, so a normal crossed in mesh space would lean) and
+		// crossed there, summed onto its corners. the strip's odd triangles
+		// wind the other way; the shader turns the result toward the camera
+		// anyway, so only consistency within a mesh matters
+		{
+			auto nv = m.vertices.size() / 8;
+			std::vector<Vector3d> acc(nv, Vector3d::Zero());
+			Matrix3d lin = node->matrix_globe_from_mesh.block<3, 3>(0, 0);
+			auto vp = [&](uint16_t i) {
+				auto p = m.vertices.data() + (size_t)i * 8;
+				return Vector3d(p[0], p[1], p[2]);
+			};
+			for (size_t i = 0; i + 2 < m.indices.size(); i++) {
+				auto a = m.indices[i], b = m.indices[i + 1], c = m.indices[i + 2];
+				if (a == b || b == c || a == c || a >= nv || b >= nv || c >= nv) continue;
+				if (i & 1) std::swap(a, b);
+				Vector3d f = (lin * (vp(b) - vp(a))).cross(lin * (vp(c) - vp(a)));
+				acc[a] += f; acc[b] += f; acc[c] += f;
+			}
+			m.normals.resize(nv * 4);
+			for (size_t i = 0; i < nv; i++) {
+				Vector3d n = acc[i].norm() > 0 ? acc[i].normalized() : Vector3d::Zero();
+				for (int k = 0; k < 3; k++) m.normals[i * 4 + k] = (int8_t)lround(n[k] * 127.0);
+				m.normals[i * 4 + 3] = 0;
+			}
+		}
+
 		// collect the mesh's boundary: edges used by exactly one
 		// non-degenerate triangle of the strip. neighboring tiles quantize
 		// their vertices onto different grids, so hairline cracks open along

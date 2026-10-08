@@ -1643,7 +1643,7 @@ struct earth_core_t {
 		auto node_bytes = [](rocktree_t::node_t *n) {
 			auto bytes = sizeof(*n);
 			for (auto &m : n->meshes)
-				bytes += m.vertices.size() + m.indices.size() * sizeof(uint16_t) + m.texture.size();
+				bytes += m.vertices.size() + m.indices.size() * sizeof(uint16_t) + m.texture.size() + m.normals.size();
 			return bytes;
 		};
 
@@ -1958,9 +1958,11 @@ struct earth_core_t {
 		// horizon
 		auto shade = shadow_strength * smooth(0.5 * M_PI / 180.0, 6.0 * M_PI / 180.0, sun_el);
 		Vector3f up_sun = (sun_view.block<3, 3>(0, 0) * local_up).cast<float>();
+		Matrix3f sun_rot = sun_view.block<3, 3>(0, 0).cast<float>();
+		Vector3f eye_sun = (sun_view * Vector4d(eye.x(), eye.y(), eye.z(), 1.0)).head<3>().cast<float>();
 		renderSetShadow(ctx, shadows_live, shadow_box_f, (float)shade,
 			(float)(1.0 / shadow_size), (float)((0.3 + 0.5 * shadow_texel_m) / (shadow_box_f[3] - shadow_box_f[2])),
-			up_sun.data());
+			up_sun.data(), sun_rot.data(), eye_sun.data());
 
 		for (auto &dr : draws) {
 			auto node = dr.node;

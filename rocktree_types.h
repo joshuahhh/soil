@@ -91,6 +91,11 @@ struct rocktree_t {
 			// edges belonging to exactly one triangle, drawn as GL_LINES to
 			// plug the hairline cracks that open along seams between tiles
 			std::vector<uint16_t> boundary_indices;
+			// per-vertex normals in the globe frame, area-weighted over the
+			// triangles each vertex is in, as signed bytes (xyz, pad): the
+			// shading's normal where a primitive has no face of its own —
+			// the crack-fill lines
+			std::vector<int8_t> normals;
 			Vector2f uv_offset;
 			Vector2f uv_scale;
 
@@ -103,6 +108,7 @@ struct rocktree_t {
 			render_handle_t index_buffer;
 			render_handle_t boundary_index_buffer;
 			render_handle_t texture_buffer;
+			render_handle_t normal_buffer;
 			// the vertex setup for a draw, in one bind (see bufferMesh)
 			render_handle_t vao;
 			// the min filter the texture was last given (the M key flips

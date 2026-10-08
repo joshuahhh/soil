@@ -95,7 +95,7 @@ struct gl_ctx_t {
 	// size: an offscreen pass (the shadow map) puts it back afterwards
 	GLuint scene_fbo = 0;
 	int scene_w = 0, scene_h = 0;
-	GLint shadow_mv_loc, shadow_box_loc, shadow_params_loc, shadow_map_loc, shadow_up_loc;
+	GLint shadow_mv_loc, shadow_box_loc, shadow_params_loc, shadow_map_loc, shadow_up_loc, sun_rot_loc, eye_sun_loc;
 	// aerial perspective: see renderSetAtmosphere
 	GLint fog_loc, haze_loc, tint_loc, fog_planes_loc, cam_loc, eye_loc, cam_params_loc, viewport_loc;
 	GLuint program;
@@ -170,6 +170,9 @@ void bufferMesh(rocktree_t::node_t::mesh_t &mesh, const gl_ctx_t &ctx) {
 	glGenBuffers(1, &mesh.boundary_index_buffer);
 	glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, mesh.boundary_index_buffer);
 	glBufferData(GL_ELEMENT_ARRAY_BUFFER, mesh.boundary_indices.size() * sizeof(unsigned short), mesh.boundary_indices.data(), GL_STATIC_DRAW);
+	glGenBuffers(1, &mesh.normal_buffer);
+	glBindBuffer(GL_ARRAY_BUFFER, mesh.normal_buffer);
+	glBufferData(GL_ARRAY_BUFFER, mesh.normals.size(), mesh.normals.data(), GL_STATIC_DRAW);
 
 	// the vertex setup, recorded once here rather than re-issued per draw:
 	// a settled horizon view draws well over a thousand nodes a frame, and
@@ -189,6 +192,9 @@ void bufferMesh(rocktree_t::node_t::mesh_t &mesh, const gl_ctx_t &ctx) {
 	glVertexAttribPointer(ctx.position_loc, 3, GL_UNSIGNED_BYTE, GL_FALSE, 8, (void*)0);
 	glVertexAttribPointer(ctx.octant_loc, 1, GL_UNSIGNED_BYTE, GL_FALSE, 8, (void*)3);
 	glVertexAttribPointer(ctx.texcoords_loc, 2, GL_UNSIGNED_SHORT, GL_FALSE, 8, (void*)4);
+	glBindBuffer(GL_ARRAY_BUFFER, mesh.normal_buffer);
+	glEnableVertexAttribArray(3);
+	glVertexAttribPointer(3, 3, GL_BYTE, GL_TRUE, 4, (void*)0);
 	glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, mesh.index_buffer);
 	glBindVertexArray(0);
 
@@ -271,6 +277,7 @@ void unbufferMesh(rocktree_t::node_t::mesh_t &mesh) {
 	glDeleteTextures(1, &mesh.texture_buffer); // auto: glBindTexture(GL_TEXTURE_2D, 0);
 	glDeleteBuffers(1, &mesh.index_buffer); // auto: glBindBuffer(GL_ARRAY_BUFFER, 0);
 	glDeleteBuffers(1, &mesh.boundary_index_buffer);
+	glDeleteBuffers(1, &mesh.normal_buffer);
 	glDeleteBuffers(1, &mesh.vertex_buffer); // auto: glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
 }
 
@@ -1052,10 +1059,12 @@ void renderShadowEnd(render_ctx_t &ctx) {
 
 // the terrain program's shadow uniforms: per frame, then per node
 void renderSetShadow(render_ctx_t &ctx, bool on, const float *box4, float strength, float texel_uv, float bias,
-		const float *up3) {
+		const float *up3, const float *rot9, const float *eye3) {
 	glUniform4f(ctx.shadow_params_loc, on ? (float)shadow_debug : 0.0f, strength, texel_uv, bias);
 	if (box4) glUniform4fv(ctx.shadow_box_loc, 1, box4);
 	if (up3) glUniform3fv(ctx.shadow_up_loc, 1, up3);
+	if (rot9) glUniformMatrix3fv(ctx.sun_rot_loc, 1, GL_FALSE, rot9);
+	if (eye3) glUniform3fv(ctx.eye_sun_loc, 1, eye3);
 }
 
 void renderSetShadowNode(render_ctx_t &ctx, const float *mv16) {
@@ -1239,11 +1248,14 @@ void renderInit(render_ctx_t &ctx, void *) {
 		// the sun's view of this vertex: metres, in a frame centred on the
 		// shadow map's box with +z toward the sun (see renderShadowBegin)
 		"uniform mat4 shadow_mv;"
+		"uniform mat3 sun_rot;" // the globe frame's axes in the sun's frame
 		"out vec3 v_sunv;"
+		"out vec3 v_nsun;"
 		// fixed locations: the shadow pass's program reads the same vaos
 		"layout(location = 0) in vec3 position;"
 		"layout(location = 1) in float octant;"
 		"layout(location = 2) in vec2 texcoords;"
+		"layout(location = 3) in vec3 normal;"
 		"out vec2 v_texcoords;"
 		"flat out float v_stale;"
 		"out float v_mask;"
@@ -1340,6 +1352,7 @@ void renderInit(render_ctx_t &ctx, void *) {
 		"	p.z += (1.0 - mask) * 0.002 * p.w;"
 		"	gl_Position = p;"
 		"	v_sunv = (shadow_mv * vec4(position, 1.0)).xyz;"
+		"	v_nsun = sun_rot * normal;"
 		// view depth: w in perspective; in ortho w is 1 and ndc z is linear
 		"	v_dist = fog_planes.z > 0.5"
 		"		? fog_planes.x + (p.z / p.w * 0.5 + 0.5) * (fog_planes.y - fog_planes.x) : p.w;"
@@ -1377,7 +1390,9 @@ void renderInit(render_ctx_t &ctx, void *) {
 		"uniform vec4 shadow_params;"
 		"uniform vec4 shadow_box;"
 		"uniform vec3 shadow_up;" // straight up at the eye, in the sun's frame
+		"uniform vec3 eye_sun;" // the eye, in the sun's frame
 		"in vec3 v_sunv;"
+		"in vec3 v_nsun;"
 		"uniform float tube_fade;"
 		"uniform bool body_on;"
 		"in vec2 v_texcoords;"
@@ -1416,21 +1431,44 @@ void renderInit(render_ctx_t &ctx, void *) {
 		// hides. the shade is lit by the sky instead, so it goes a little
 		// blue. 3x3 taps over the hardware's 2x2 comparison filter
 		"	if (shadow_params.x > 0.5 && !tube_on) {"
-		// a crack-fill line has no face: its normal would be nan
-		"		vec3 cr = cross(dFdx(v_sunv), dFdy(v_sunv));"
-		"		vec3 n = dot(cr, cr) > 1e-20 ? normalize(cr) : shadow_up;"
-		// relative to flat ground, so level land is fully lit at any sun
-		// height, and only faces actually turned from the sun darken —
-		// walls, the far side of a ridge. anything gentler is left alone:
-		// the photogrammetry's water is bumpy (reflections defeat the
-		// stereo), and a low sun turned each bump into a hard facet
-		"		float lit = smoothstep(-0.3, 0.1, n.z / max(shadow_up.z, 0.05));"
+		// the face's normal; a crack-fill line has no face, so it takes
+		// the vertices' instead, turned toward the camera like a face's.
+		// a one-pixel line's two screen derivatives both run along it, so
+		// the test is relative — nearly parallel, not merely nonzero — or
+		// the cross of two almost-equal vectors passes for a normal, and
+		// every seam across a shaded wall came out lit
+		"		vec3 ddx = dFdx(v_sunv), ddy = dFdy(v_sunv);"
+		"		vec3 cr = cross(ddx, ddy);"
+		"		vec3 n;"
+		"		if (dot(cr, cr) > 0.0025 * dot(ddx, ddx) * dot(ddy, ddy)) n = normalize(cr);"
+		"		else {"
+		"			n = dot(v_nsun, v_nsun) > 1e-6 ? normalize(v_nsun) : shadow_up;"
+		"			if (dot(n, eye_sun - v_sunv) < 0.0) n = -n;"
+		"		}"
+		// only on steep faces — walls, cliffs, slopes past 25 degrees or
+		// so: the photogrammetry's water is bumpy (reflections defeat the
+		// stereo), and at a low sun every bump turned into a hard facet;
+		// gentler ground gets its shade from the cast shadows, which a
+		// ridge throws across the slope behind it anyway. a plain lambert
+		// ramp, half lit edge-on: measured against flat ground (dividing
+		// by the sun's height) it amplified the tiny differences between
+		// a facade's triangles five times at a low sun, and an edge-on
+		// wall came out streaked along every triangle edge
+		"		float steep = 1.0 - smoothstep(0.75, 0.92, dot(n, shadow_up));"
+		"		float lit = mix(1.0, smoothstep(-0.25, 0.3, n.z), steep);"
 		// debug (?shadowdebug=): 2 the facing term alone, 3 cast shadows alone
 		"		if (shadow_params.x > 2.5) lit = 1.0;"
-		// normal offset: look the map up a texel and a half off the
-		// surface, so a surface at a grazing sun doesn't shadow itself
+		// normal offset: look the map up off the surface, so it doesn't
+		// shadow itself — a texel and a half facing the sun, up to four
+		// times that where the sun only skims it. raising the lookup by h
+		// drops shadows from anything less than h taller than the
+		// receiver, which at a grazing sun is the point: the
+		// photogrammetry's water is bumpy, and a low sun stretched every
+		// bump into a streak, while a building keeps its shadow (shorter
+		// by h / tan(sun) at the far end, still attached at the base)
 		"		float texel_m = shadow_params.z * 2.0 * shadow_box.x;"
-		"		vec3 q = v_sunv + n * (1.5 * texel_m);"
+		"		float graze = 1.0 - clamp(n.z, 0.0, 1.0);"
+		"		vec3 q = v_sunv + n * (1.5 * texel_m * (1.0 + 3.0 * graze * graze));"
 		"		vec2 uv = q.xy / (2.0 * shadow_box.xy) + 0.5;"
 		"		float d = (-q.z - shadow_box.z) / (shadow_box.w - shadow_box.z) - shadow_params.w;"
 		"		if (shadow_params.x < 1.5 || shadow_params.x > 2.5)"
@@ -1509,6 +1547,8 @@ void renderInit(render_ctx_t &ctx, void *) {
 	ctx.shadow_params_loc = glGetUniformLocation(ctx.program, "shadow_params");
 	ctx.shadow_map_loc = glGetUniformLocation(ctx.program, "shadow_map");
 	ctx.shadow_up_loc = glGetUniformLocation(ctx.program, "shadow_up");
+	ctx.sun_rot_loc = glGetUniformLocation(ctx.program, "sun_rot");
+	ctx.eye_sun_loc = glGetUniformLocation(ctx.program, "eye_sun");
 	ctx.body_on_loc = glGetUniformLocation(ctx.program, "body_on");
 	ctx.body_curl_loc = glGetUniformLocation(ctx.program, "body_curl");
 	ctx.body_bands_loc = glGetUniformLocation(ctx.program, "body_bands");
