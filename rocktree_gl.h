@@ -1094,7 +1094,9 @@ void renderSkyInit(render_ctx_t &ctx) {
 		"	float h = el + params.z;"
 		"	vec3 c;"
 		"	float d = max(dot(dir, sun), 0.0);"
-		"	vec3 sunc = vec3(1.0, 0.96, 0.88);"
+		"	float th = acos(clamp(dot(dir, sun), -1.0, 1.0));" // angle from the sun's centre
+		// the sun reddens toward the horizon, through more air
+		"	vec3 sunc = mix(vec3(1.0, 0.55, 0.25), vec3(1.0, 0.96, 0.88), smoothstep(0.0, 0.3, params.w));"
 		"	if (h >= 0.0) {"
 		// haze at the horizon, the zenith colour high up; the hazy band is
 		// thick, as it is, and the gradient slow. the whole of it thins
@@ -1102,10 +1104,16 @@ void renderSkyInit(render_ctx_t &ctx) {
 		// atmosphere seen edge-on just above the horizon line
 		"		c = mix(haze, zenith, pow(clamp(h / 1.3, 0.0, 1.0), 0.5)) * alt_params.x;"
 		"		c += haze * (1.0 - alt_params.x) * exp(-h / alt_params.y);"
-		// the disc (half a degree across), its glow, and a wide forward
-		// scatter that brightens the sky around a low sun
-		"		c += sunc * (0.5 * pow(d, 1400.0) + (0.14 * pow(d, 24.0) + 0.05 * pow(d, 3.0)) * alt_params.x);"
-		"		if (d > 0.99996) c = sunc * 1.4;"
+		// the glow: a tight core a fraction of a degree wide, an aureole a
+		// few degrees, and a wide forward scatter that brightens the sky
+		// around a low sun. then the disc itself, the real 0.53 degrees,
+		// its edge smoothed over a pixel (a hard per-pixel test aliases,
+		// and msaa doesn't reach inside a shader). the core used to be
+		// pow(d, 1400), still at 40% two degrees out: a fuzzy moon ten
+		// times the sun's size
+		"		c += sunc * (0.35 * exp(-th / 0.006) + (0.12 * exp(-th / 0.07) + 0.05 * pow(d, 3.0)) * alt_params.x);"
+		"		float r = 0.00466, w = max(fwidth(th), 1e-5);"
+		"		c = mix(c, sunc * 1.4, 1.0 - smoothstep(r - w, r + w, th));"
 		"	} else {"
 		// below the horizon line nothing is drawn only past the far plane:
 		// the planet's limb from high up. darken toward it
