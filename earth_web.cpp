@@ -711,6 +711,13 @@ struct EarthView {
 			auto g = earth.groundRadiusUnder(camera.eye);
 			if (g > 0) {
 				if (isnan(follow_height)) follow_height = camera.eye.norm() - g;
+				// in the tunnel the hug keeps you inside: the held height
+				// stops a couple of meters under the roof (and the ease
+				// brings you down into it if you were above). the floor's
+				// two meters win where the two meet
+				double ceiling;
+				if (earth.tunnelCeilingRadius(ceiling))
+					follow_height = fmin(follow_height, ceiling - 2.0 - g);
 				follow_height = fmax(2.0, follow_height);
 				// ease onto the target height so rooftop edges read as a
 				// glide, not a bounce
@@ -749,7 +756,9 @@ struct EarthView {
 				Vector3d step = (fwd * horizontal + lat * sideways) * mag;
 				// advance the cylindrical coordinates by the step's tangent
 				// components; the angle moves by arc length over the radius
-				auto x = c.x + step.dot(earth.tube_axis);
+				// kept inside: the walk stops at the tube's mouths
+				auto x_max = fmax(0.0, earth.tube_half_len - 2.0);
+				auto x = fmax(-x_max, fmin(x_max, c.x + step.dot(earth.tube_axis)));
 				Vector3d tangential = earth.tube_axis.cross(c.radial);
 				auto theta = c.theta + step.dot(tangential) / fmax(1.0, c.rho);
 				follow_height = fmax(2.0, follow_height + vert * mag);

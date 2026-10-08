@@ -415,6 +415,20 @@ struct earth_core_t {
 		return true;
 	}
 
+	// the tunnel's roof straight over the camera, as a globe radius: the
+	// camera sits at the tube's bottom (x = 0, theta = 0) and overhead is
+	// the wall at theta = pi — the ground there and whatever hangs from it.
+	// not measurable yet: the roof of flat ground. false until it closes,
+	// when there is no roof to be under
+	bool tunnelCeilingRadius(double &r) {
+		if (!tube_on || !tunnel_on || tube_curl < 0.999) return false;
+		auto R = tube_radius / tube_curl;
+		double rho;
+		if (!tubeWallRho(0, M_PI, rho)) rho = R;
+		r = tube_ground_radius + R + rho;
+		return true;
+	}
+
 	// terrain elevation converges several lod levels before the imagery
 	// does: mesh at this resolution already carries the ground to within a
 	// few meters, so the roll can start ~two orders of magnitude fewer tiles
