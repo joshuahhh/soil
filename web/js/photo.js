@@ -227,8 +227,7 @@ const setLens = (k) => {
   layoutOverlay();
   refreshLens();
 };
-// "fit": the largest scale that keeps the whole photo inside the viewport —
-// the old object-fit: contain behaviour, now just a preset
+// "fit": the largest scale that keeps the whole photo inside the viewport
 const fitOverlay = () => {
   if (!overlayImg.naturalWidth) return;
   const W = rightEl.clientWidth, H = rightEl.clientHeight;

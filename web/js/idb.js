@@ -23,8 +23,8 @@ const warnUsage = () => {
 };
 const dbOpen = new Promise((res) => {
   // an open that neither succeeds nor fails is a real state (a blocked
-  // upgrade, an origin whose storage is wedged) and it used to be a silent
-  // one. the page runs regardless now, so this is a diagnosis, not a bail
+  // upgrade, an origin whose storage is wedged), and without this a silent
+  // one. the page runs regardless, so this is a diagnosis, not a bail
   let settled = false;
   setTimeout(() => {
     if (settled) return;

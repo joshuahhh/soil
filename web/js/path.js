@@ -287,9 +287,8 @@ const loadGpxFile = async (file) => {
 // distances. a fixed window is only ever right at one zoom: 20 m of
 // smoothing is the difference between a steady camera and a shaky one from
 // 60 m out, and nothing at all from 2 km up, where the same track reads as
-// rigidly locked to its marker. the fractions are set so the default
-// standoff reproduces the fixed windows they replace — about 20 m for the
-// aim, 60 m for the heading, a 150 m chord.
+// rigidly locked to its marker. at the default standoff the fractions come
+// to about 20 m for the aim, 60 m for the heading, a 150 m chord.
 //
 // the camera aims down the lighter one: a gps fix wanders a few metres and
 // the camera must not inherit that, but heavy smoothing cuts a switchback's

@@ -59,7 +59,7 @@ const makeSpine = (path) => {
     dAcc += len;
   }
   if (samples.length < 2) return null;
-  // resampled but *unsmoothed*: the smoothing happens per frame now, at
+  // resampled but *unsmoothed*: the smoothing happens per frame, at
   // whatever window the current view scale asks for
   const rx = Float64Array.from(samples, (p) => p.x);
   const ry = Float64Array.from(samples, (p) => p.y);

@@ -10,8 +10,6 @@ import { pasteState } from './session.js';
 export { initDrop };
 
 // --- dropped files --------------------------------------------------------
-// the ✕ that removes the photo lives in the panel head now, and is wired
-// where the rest of that panel is
 // dragover has to be cancelled or the browser navigates to the dropped file.
 // a depth counter keeps the highlight steady as the drag crosses children
 // (dragenter on a child fires before dragleave on its parent)
