@@ -74,13 +74,13 @@ const flyIntoTube = (r) => {
 const flyOntoBody = (r) => {
   const latc = (r[0] + r[2]) / 2, lonc = (r[1] + r[3]) / 2;
   const info = view.getTubeInfo();
-  const S = 2 * info.halfLen; // the figure's height, m
-  const D = 1.4 * S;
+  const h = 2 * info.halfLen; // the figure's height, m
+  const D = 1.4 * h;
   const R = 6371010;
   const dlat = (D / R) * 180 / Math.PI;
   const dlon = (D / (R * Math.cos(latc * Math.PI / 180))) * 180 / Math.PI;
-  if (S.tubeAxisEw) view.setPose(latc + dlat, lonc, info.groundAlt + 0.55 * S, 180, 0);
-  else view.setPose(latc, lonc - dlon, info.groundAlt + 0.55 * S, 90, 0);
+  if (S.tubeAxisEw) view.setPose(latc + dlat, lonc, info.groundAlt + 0.55 * h, 180, 0);
+  else view.setPose(latc, lonc - dlon, info.groundAlt + 0.55 * h, 90, 0);
   S.following = true;
 };
 // back to flat flight over the rect, which stays drawn
