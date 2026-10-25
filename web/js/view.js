@@ -13,44 +13,29 @@ export { initView, mode, inTube, viewName, defineMode, setMode, ortho, hug, setH
   restoreView, keys, miniature, mipmaps, setMipmaps, dragging };
 
 // --- the view's mode -----------------------------------------------------
-// what the camera is doing, exactly one at a time:
-//   fly     free flight over the globe
-//   follow  on rails along the dropped track (path.js)
-//   tunnel  the ground ahead curled up around the camera (tunnel.js)
-//   tube    the drawn rect rolled into a tube (tube.js)
-//   body    the drawn rect wrapped onto the figure (tube.js)
-// setMode is the one place it changes, so whatever asks for a switch — a
-// key, a button, a rect drawn on the map, the saved view coming back — the
-// mode being left is always left properly before the next is entered.
-//
-// what isn't a mode: the projection (ortho, which only fly and follow
-// allow), terrain hug (fly, tube and tunnel), and the rect (tube.js),
-// which stays drawn whether or not it is rolled. and two states that live
-// inside a mode and with its module: the tube's staged load before it
-// rolls (tubePending), and the tunnel's animated way out (tunnelClosing),
-// during which the mode is still tunnel
+// exactly one of: fly, follow (path.js), tunnel, tube, body (tube.js).
+// setMode is the one place it changes, so the old mode is always exited
+// before the new one is entered.
+// not modes: ortho, terrain hug, the rect (drawn whether or not rolled),
+// the tube's staged load (tubePending), and the tunnel's closing animation
+// (tunnelClosing; the mode is still tunnel)
 let mode = 'fly';
 const inTube = () => mode === 'tube' || mode === 'body';
 // the name the hint and the key table go by: fly splits by projection
 const viewName = () => mode === 'fly' ? (ortho ? 'ortho' : 'persp') : mode;
 
-// each mode but fly brings its own { enter(opts), exit() }. two modes may
-// share one: the tube and the body are the same machinery with a different
-// warp, so going from one to the other re-enters without leaving, and so
-// does asking again for the mode already in force (the tube re-rolls when
-// its axis flips)
+// { enter(opts), exit() } per mode but fly. tube and body share theirs, so
+// switching between them, or re-asking for the current mode, re-enters
+// without exiting
 const modes = {};
 const defineMode = (name, hooks) => { modes[name] = hooks; };
 
-// no ortho inside the tube or the tunnel: the ortho extent and zoom are
-// anchored on normal terrain below, and a parallel projection of the tube
-// reads as mush. the hug fights the rails over altitude (they write the
-// pose outright), and the wall hug is the cylinder's, not the body's
+// ortho's extent is anchored on flat terrain, and an ortho tube reads as
+// mush. hug fights the rails over altitude, and has no body version
 const ORTHO_OK = new Set(['fly', 'follow']);
 const HUG_OK = new Set(['fly', 'tube', 'tunnel']);
 
-// by the time either hook runs the mode is already the new one, so an exit
-// that redraws its panel draws it as it now is
+// both hooks see the new mode already
 const setMode = (next, opts = {}) => {
   const from = mode, a = modes[from], b = modes[next];
   mode = next;
@@ -61,8 +46,7 @@ const setMode = (next, opts = {}) => {
   updateHint();
 };
 
-// the two switches the mode constrains. asking for one the mode doesn't
-// allow does nothing; each says whether it changed anything
+// each returns whether it changed anything
 let ortho = false, hug = false;
 const setOrtho = (on) => {
   if (on === ortho || (on && !ORTHO_OK.has(mode))) return false;
@@ -70,8 +54,7 @@ const setOrtho = (on) => {
   view.setOrtho(on);
   return true;
 };
-// terrain hug: cruise at a fixed height above the mesh — over the sphere
-// normally, radially above the wall inside the tube
+// in the tube, the hug is radial, above the wall
 const setHug = (on) => {
   if (on === hug || (on && !HUG_OK.has(mode))) return false;
   hug = on;
@@ -80,9 +63,7 @@ const setHug = (on) => {
 };
 
 // --- the saved view -------------------------------------------------------
-// the camera pose and the view's switches, to localstorage's 'earth-view'
-// (config.js reads it back as START, and restoreView applies it). the tube
-// and the tunnel keep their own parts, next to their state
+// config.js reads 'earth-view' back as START
 const saveView = () => {
   if (TEST) return; // captures never write back over the user's saved view
   if (!view.ready()) return;
@@ -98,9 +79,7 @@ const saveView = () => {
     tunnel: tunnelState(),
   });
 };
-// the same, applied, from the first frame the engine is ready in. the map's
-// centre, zoom and full3d are taken at its creation (map.js), and the sky
-// and glamour settings at load (sky.js)
+// map.js restores its own centre, zoom and full3d, sky.js the sky settings
 const restoreView = () => {
   view.setPose(START.lat, START.lon, START.alt, START.heading, START.tilt);
   view.setFov(START.fov);
@@ -115,15 +94,13 @@ const restoreView = () => {
   if (START.lod) setDebugLod(true);
   applySky();
   applyGlamour();
-  // a banked camera comes back banked. inside the tube the bank belongs to
-  // the airplane frame and is restored after the roll-up instead, because
-  // that is what creates the frame to bank
+  // in the tube, roll is relative to the airplane frame, which only exists
+  // after the roll-up
   const tubeRolled = !!(START.tube && START.tube.on);
   if (START.roll && !tubeRolled) view.setRoll(START.roll);
   if (restoreTube(START.tube) && START.roll) view.setRoll(START.roll);
   restoreTunnel(START.tunnel, tubeRolled);
-  // ?tunnel=<circumference m> (test mode): straight into the tunnel at
-  // the given pose, for the render tests
+  // ?tunnel=<circumference m>, for the render tests
   if (TEST && QS.has('tunnel')) {
     const c = parseFloat(QS.get('tunnel'));
     if (Number.isFinite(c) && c > 0) { S.tunnelC = c; refreshTunnel(); setTunnel(true, false); }
@@ -134,12 +111,8 @@ const initSaveView = () => {
 };
 
 // --- keyboard -> built-in flying controls -----------------------------------
-// ground frame: WASD cruise/truck, Q/E pedestal. hold Space for the view
-// frame: W/S dolly along the view, Q/E boom along view-up. arrows pan/tilt
-// so no mouse is needed. Z/X zoom (fov). -/= sticky speed gain. shift slow.
-// the keys are the page's, not the canvas's: nudging a slider or clicking
-// a button in a panel used to take them away until you clicked the view
-// again. only a field you can type into keeps them for itself
+// on the page, not the canvas, so a panel's slider or button doesn't take
+// the keys away; only a text field does
 const keys = {};
 const typingIn = (t) => !!t && (t.tagName === 'TEXTAREA' || t.isContentEditable
   || t.tagName === 'SELECT'
@@ -149,18 +122,15 @@ const handled = new Set(['KeyW','KeyA','KeyS','KeyD','KeyQ','KeyE','KeyR','KeyF'
 let miniature = false; // the tilt-shift look (N)
 const setMiniature = (on) => { miniature = on; view.setMiniature(on, 0.015, 0.35); updateHint(); };
 let debugLod = false;
-// the overlay and its legend panel go together
 const setDebugLod = (on) => {
   debugLod = on;
   view.setDebugLod(on);
   document.body.classList.toggle('lod', on);
-  saveView(); // part of the view state: a reload comes back with it
+  saveView();
 };
 let mipmaps = true;
 const setMipmaps = (on) => { mipmaps = on; view.setMipmaps(on); updateHint(); };
-// 0 (or Home): back to the default view — the pose/fov/speed the demo
-// opens with, level (no roll), out of ortho and terrain hug, map zoom
-// reset and following again. the tube is left alone: esc clears it
+// leaves the tube alone: esc clears it
 const resetView = () => {
   if (!view.ready()) return;
   if (mode === 'follow') setFollow(false); // else the rails put the camera straight back
@@ -183,7 +153,6 @@ const initInput = () => {
   document.getElementById('lodoff').addEventListener('click', () => { setDebugLod(false); canvas.focus(); });
 
   addEventListener('keydown', (e) => {
-    // browser/os shortcuts (cmd-R reload etc.) pass through untouched
     if (e.metaKey || e.ctrlKey || e.altKey) return;
     if (typingIn(e.target)) return;
     if (handled.has(e.code)) e.preventDefault();
@@ -191,53 +160,41 @@ const initInput = () => {
     if (e.code === 'Minus' && !e.repeat) { S.gain = Math.max(1/128, S.gain/2); updateHint(); }
     if (e.code === 'Equal' && !e.repeat) { S.gain = Math.min(128, S.gain*2); updateHint(); }
     if (e.code === 'KeyN' && !e.repeat) setMiniature(!miniature);
-    // the mode decides whether either is allowed (mode.js)
     if (e.code === 'KeyO' && !e.repeat && setOrtho(!ortho)) updateHint();
     if (e.code === 'KeyG' && !e.repeat && setHug(!hug)) {
       if (hug) stopSolve(); // the two fight over altitude — see startSolve
       updateHint();
     }
     if (e.code === 'KeyC' && !e.repeat) setPickDebug(!pickDebug);
-    // ride the dropped track; does nothing without one
     if (e.code === 'KeyV' && !e.repeat) toggleFollow();
-    // the point-pair panel; only does anything with a photo up, in perspective
     if (e.code === 'KeyP' && !e.repeat) toggleOverlayBlend();
     if (e.code === 'KeyH' && !e.repeat) toggleCutPanel();
     if (e.key === '?' && !e.repeat) toggleKeys();
     if (e.code === 'Escape' && keysOpen) {
       showKeys(false);
-      return; // that is all this esc does
+      return;
     }
     if ((e.code === 'Digit0' || e.code === 'Numpad0' || e.code === 'Home') && !e.repeat) resetView();
-    // like the native app's L key: tint octants red where a finer tile is
-    // wanted but not yet downloaded
+    // as in the native app: red where a finer tile is wanted but not loaded
     if (e.code === 'KeyL' && !e.repeat) setDebugLod(!debugLod);
     if (e.code === 'KeyY' && !e.repeat) document.body.classList.toggle('skypanel');
     if (e.code === 'KeyI' && !e.repeat) document.body.classList.toggle('glamourpanel');
-    // K, its neighbour: draw the smoothed copy of the track the follow camera
-    // actually aims down, dashed on the map beside the track it was made from
+    // the smoothed track the follow camera actually aims down
     if (e.code === 'KeyK' && !e.repeat) setDebugSmooth(!debugSmooth);
-    // mipmap A/B. only bites on the uncompressed texture path, so it's the
-    // ?jpg build where you can see it — and it's motion that shows it, not a
-    // still frame: watch distant ground crawl as you fly
+    // only visible on the uncompressed (?jpg) path, and only in motion
     if (e.code === 'KeyM' && !e.repeat) setMipmaps(!mipmaps);
     if (e.code === 'Escape' && mode === 'follow') setFollow(false);
     if (e.code === 'Escape' && mode === 'tunnel') { setTunnel(false); return; }
-    // T is the tunnel — unless a rect is drawn on the map, when it rolls
-    // that instead (esc clears the rect)
     if (e.code === 'KeyT' && !e.repeat && mode !== 'follow' && (mode === 'tunnel' || !tubeRect)) {
       setTunnel(mode !== 'tunnel' || tunnelClosing);
       return;
     }
-    // clear the tube entirely: unroll, drop the rect, back to normal flight
     if (e.code === 'Escape' && tubeRect) {
       clearRect();
       updateHint();
     }
-    // T rolls the rect into a tube, B wraps it onto the body; each key
-    // undoes its own shape and switches from the other's. rolling up also
-    // flies into the tube mouth — watching the roll from outside mostly
-    // shows the back of the sheet
+    // true: fly into the mouth; from outside, the roll mostly shows the
+    // back of the sheet
     if (e.code === 'KeyT' && !e.repeat && tubeRect && mode !== 'tunnel') {
       if (mode === 'tube') setMode('fly');
       else rollRect('tube', true);
@@ -251,8 +208,7 @@ const initInput = () => {
     if (e.code === 'KeyB' && !e.repeat && !tubeRect && mode !== 'tunnel' && mode !== 'follow')
       toast('shift-drag a rect on the map first, then B wraps it on the body');
   });
-  // the two clicks that mark a pair (photo point, then mesh point); the
-  // pointer handlers above keep the camera still while this is armed
+  // marking a pair: photo point, then mesh point
   canvas.addEventListener('click', (e) => {
     if (!capture) return;
     const r = rightEl.getBoundingClientRect();
@@ -260,14 +216,12 @@ const initInput = () => {
     captureClick(x, y, (x / r.width) * 2 - 1, 1 - (y / r.height) * 2);
   });
   addEventListener('keyup', (e) => { keys[e.code] = false; });
-  // leaving the window (cmd-tab mid-flight) loses the keyups, so let go of
-  // everything rather than cruising on until the next keypress
+  // cmd-tab mid-flight loses the keyups
   addEventListener('blur', () => { for (const k in keys) keys[k] = false; });
 
   canvas.addEventListener('pointerdown', (e) => {
     canvas.focus();
-    // while marking a pair, a click on the view is the mark — don't also
-    // grab the camera and swing it away from what was clicked
+    // the click is the mark; don't swing the camera off it
     if (capture) return;
     if (e.shiftKey && photoShown) {
       ovDragging = true;
@@ -289,11 +243,7 @@ const initInput = () => {
       return;
     }
     if (!dragging) return;
-    // grab-the-world: in perspective, dragging pulls the scene with the
-    // pointer by looking around; in ortho it pans instead (WASD-equivalent
-    // camera translation, so the ground follows the pointer)
-    // ...except on the rails, where the drag swings the standoff in either
-    // projection: a pan would be overwritten by followStep on the same frame
+    // no ortho pan on the rails: followStep would overwrite it that frame
     if (ortho && mode !== 'follow') {
       view.panOrtho(e.movementX, e.movementY, canvas.clientHeight);
       return;
@@ -301,32 +251,20 @@ const initInput = () => {
     S.yaw -= e.movementX * 0.003;
     S.pitch += e.movementY * 0.003;
   });
-  // scroll on the 3d view zooms by narrowing/widening the fov, like the
-  // native app (which uses fov *= 0.9^wheel; setFov clamps to 1..150 deg)
+  // fov zoom as in the native app (setFov clamps to 1..150 deg)
   canvas.addEventListener('wheel', (e) => {
     e.preventDefault();
-    // shift+wheel resizes the reference photo rather than the view, the
-    // companion of shift+drag's reposition
     if (e.shiftKey && photoShown) {
-      // zoom about the pointer: whatever point of the picture is under it
-      // stays under it, so you can wind in on a window frame without chasing
-      // the photo back across the viewport afterwards. the centre is stored
-      // as a fraction of the viewport, so solve for the one that puts that
-      // photo point back where it was at the new size
+      // zoom about the pointer
       const r = rightEl.getBoundingClientRect();
       const x = e.clientX - r.left, y = e.clientY - r.top;
       const held = viewToPhoto(x, y);
-      // a mouse wheel with shift held arrives as a *horizontal* scroll (the
-      // browser's shift-scroll convention), and some wheels count in lines
-      // rather than pixels — a trackpad gives a plain deltaY, so take
-      // whichever axis has the motion and put lines on a pixel scale
+      // a mouse wheel with shift held scrolls in deltaX, and may count lines
       const d = (e.deltaY || e.deltaX) * (e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? 400 : 1);
       ov.scale = clampScale(ov.scale * Math.pow(0.9, d / 200));
       const b = overlayBox();
-      // divide by the same size overlayBox() multiplies by — the rect is
-      // fractional and clientWidth/Height are rounded, and solving against
-      // one while drawing against the other nudges the photo a little the
-      // same way every tick, which reads as a drift while zooming
+      // divide by the same (rounded) clientWidth/Height overlayBox uses; the
+      // fractional rect here makes the photo drift while zooming
       if (held && b) {
         ov.cx = (x + (0.5 - held.u) * b.w) / rightEl.clientWidth;
         ov.cy = (y + (0.5 - held.v) * b.h) / rightEl.clientHeight;
@@ -335,8 +273,7 @@ const initInput = () => {
       saveAlign();
       return;
     }
-    // in ortho, zooming is a dolly (elevation is not a real degree of
-    // freedom there); in perspective it narrows the fov like the native app
+    // in ortho, a dolly: elevation isn't a real degree of freedom there
     if (ortho) { view.zoomOrtho(Math.pow(0.9, e.deltaY / 100)); return; }
     const p = view.getPose();
     view.setFov(p.fov * Math.pow(0.9, -e.deltaY / 100));

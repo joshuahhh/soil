@@ -4,16 +4,11 @@ import { Module } from './engine.js';
 export { idbGet, idbPut, idbPutChecked, idbDel, clearTiles, fetchTile, initTiles };
 
 // --- indexeddb byte cache -------------------------------------------------
-// 'tiles' holds downloaded rocktree bytes, 'tilemeta' their size and last
-// use (see the lru below), and 'app' holds page state too big for
-// localstorage (the reference photo's blob, the dropped gpx)
-// nothing here is allowed to hold up the page. opening this can take
-// arbitrarily long — a version upgrade waits for every other tab still
-// holding the old connection, and the one below has several gigabytes to
-// clear — and the whole app used to sit behind that await, which shows up
-// as two blank panes and an empty console. so the connection arrives when
-// it arrives: until then every helper below sees a null db, fails its
-// try/catch, and the page runs straight off the network
+// 'tiles' rocktree bytes, 'tilemeta' their size and last use, 'app' the
+// page's files too big for localstorage
+// never await the open: an upgrade waits on every other tab, indefinitely.
+// until it lands db is null, every helper fails its try/catch, and tiles
+// come off the network
 let db = null;
 // where the origin's storage stands, for a warning that may be about quota
 const warnUsage = () => {
@@ -23,9 +18,7 @@ const warnUsage = () => {
       + ` of ${Math.round((e.quota || 0) / 1e6)} MB`));
 };
 const dbOpen = new Promise((res) => {
-  // an open that neither succeeds nor fails is a real state (a blocked
-  // upgrade, an origin whose storage is wedged), and without this a silent
-  // one. the page runs regardless, so this is a diagnosis, not a bail
+  // a blocked upgrade or wedged storage never settles, silently
   let settled = false;
   setTimeout(() => {
     if (settled) return;
@@ -42,22 +35,17 @@ const dbOpen = new Promise((res) => {
       if (!d.objectStoreNames.contains('tiles')) d.createObjectStore('tiles');
       if (!d.objectStoreNames.contains('app')) d.createObjectStore('app');
       if (!d.objectStoreNames.contains('tilemeta')) d.createObjectStore('tilemeta');
-      // tiles from before this version have no bookkeeping and no knowable
-      // size, so the budget can't see them and they have to go. that does
-      // NOT happen here: clearing several gigabytes inside a versionchange
-      // transaction holds the whole open() until it finishes, which on a
-      // full cache is minutes of a page that cannot start and says nothing.
-      // purgeUnbookkept below does it in the background instead
+      // older tiles have no size and must go, but not here: clearing
+      // gigabytes in a versionchange transaction holds open() for minutes.
+      // purgeUnbookkept does it in the background
     };
-    // another tab still has the old version open: it has to let go before
-    // this upgrade can run, and until it does nothing happens at all
     r.onblocked = () => console.warn('idb: the upgrade is blocked by another'
       + ' tab with this page open — close it. running without the cache meanwhile');
     r.onsuccess = () => {
       settled = true;
       const d = r.result;
       console.log(`idb: open took ${Math.round(performance.now() - tOpen)} ms`);
-      // and be the tab that lets go, next time it is someone else's upgrade
+      // let another tab's upgrade through
       d.onversionchange = () => { db = null; d.close(); };
       db = d;
       res(d);
@@ -69,11 +57,8 @@ const dbOpen = new Promise((res) => {
     };
   } catch (e) { settled = true; console.warn('idb: open threw', e); res(null); }
 });
-// ?idb=0: run without the tile cache at all (profiling — what the cache
-// itself costs against the network)
+// profiling: ?idb=0 no tile cache, ?idb=ro lookups but no writes
 const IDB_OFF = QS.get('idb') === '0';
-// ?idb=ro: look tiles up but never write them (profiling — how much of the
-// cache's cost is the writes queueing in front of the reads)
 const IDB_RO = QS.get('idb') === 'ro';
 const idbGet = (key, store = 'tiles') => new Promise((res) => {
   if (IDB_OFF) { res(undefined); return; }
@@ -86,15 +71,9 @@ const idbGet = (key, store = 'tiles') => new Promise((res) => {
 const idbPut = (key, bytes, store = 'tiles') => {
   try { db.transaction(store, 'readwrite').objectStore(store).put(bytes, key); } catch (e) {}
 };
-// the same write, but reporting whether it actually landed. the fire-and-
-// forget version above is right for tiles (a lost tile is re-fetched next
-// frame and nobody is worse off) and wrong for the files the page restores
-// itself from: a put that fails silently leaves the *previous* file in the
-// store, so the next reload comes back to it and the page looks like it
-// ignored you rather than like it hit an error. note the try/catch alone
-// can't see this — a rejected request and an aborted transaction are
-// events, not throws. quota is the usual reason, and the tile cache in
-// this same origin is what eats it, so failures say where storage stands
+// for the files the page restores from: a silently failed put leaves the
+// previous file, and the reload looks like it ignored you. the failures are
+// events, not throws, so try/catch alone misses them
 const idbPutChecked = (key, value, store = 'app') => new Promise((res) => {
   const fail = (why, err) => {
     console.warn(`idb: ${why} storing '${key}'`, err || '');
@@ -119,41 +98,22 @@ const idbDel = (key, store = 'tiles') => {
 };
 
 // --- tile cache lru -------------------------------------------------------
-// an unbounded tile cache eventually eats the origin's whole quota (firefox
-// caps a group at 10 GiB), and then *every* write fails — including the
-// dropped gpx and the reference photo, which share this database. that
-// shows up as the page quietly restoring the file before last, which is a
-// miserable thing to debug. so the tiles get a byte budget and the oldest
-// go first.
-//
-// the bookkeeping is one small record per tile rather than a scan: sizes
-// can't be read back from indexeddb without reading the values themselves,
-// which is the thing being avoided. it is held in memory for the session
-// and mirrored to 'tilemeta' so the next session starts knowing the size of
-// the cache rather than having to measure it.
-// a quarter of what the browser offers, held between 512 MiB and 4 GiB.
-// measured rather than guessed: a tile averages about 4 KB, so even the
-// floor is a hundred thousand of them, and past the ceiling the extra hits
-// are places you flew over months ago. what it does NOT do is reason about
-// how full the storage already is — see sizeTileBudget
+// unbounded, the cache fills the quota and the gpx and photo writes in this
+// same database start failing. sizes are kept per tile in memory and in
+// 'tilemeta', since indexeddb can't report them without reading the values.
+// a tile averages ~4 KB, so the 512 MiB floor is ~100k of them
 const TILE_BUDGET_SHARE = 0.25;
 const TILE_BUDGET_MIN = 512 * 1024 * 1024;
 const TILE_BUDGET_MAX = 4 * 1024 * 1024 * 1024;
 let tileBudget = TILE_BUDGET_MIN; // until the estimate comes back
-// no eviction against the provisional floor: a session used to start by
-// evicting a hundred mb because the store held more than the floor and
-// the real budget (five times it) hadn't been read yet — a slow readwrite
-// transaction that every lookup then queued behind
+// never evict against the provisional floor: that evicts real tiles in a
+// slow readwrite transaction every lookup queues behind
 let budgetKnown = false;
 const TILE_LOW_WATER = 0.85;   // an eviction pass clears down to this much
 const TILE_TOUCH_MS = 300000;  // rewrite a tile's last-use at most this often
 const tileMeta = new Map();    // path -> { n: bytes, t: last use, w: last written }
 let tileBytes = 0, evicting = false, quotaWarned = false, purging = false;
 
-// pick up where the last session left off, so the budget spans sessions
-// instead of resetting to zero on every reload. deliberately not awaited:
-// until it lands the cache simply looks empty, which costs an eviction pass
-// that runs a little late, not correctness
 dbOpen.then((d) => {
   if (!d) return;
   try {
@@ -167,26 +127,18 @@ dbOpen.then((d) => {
         tileMeta.set(k[i], { n: v[i].n, t: v[i].t || 0, w: v[i].t || 0 });
         tileBytes += v[i].n;
       }
-      // what the store holds against what the bookkeeping knows about: the
-      // gap is the leftovers, and seeing it stated is the difference
-      // between "there was nothing to purge" and "the purge did nothing"
       try {
         const cq = d.transaction('tiles').objectStore('tiles').count();
         cq.onsuccess = () => console.log(`tile cache: ${cq.result} tiles in the store,`
           + ` ${tileMeta.size} of them accounted for (${Math.round(tileBytes / 1e6)} MB)`);
       } catch (e) {}
-      // deliberately no sizeTileBudget() here: until the purge below has
-      // run, the origin's usage is mostly tiles this bookkeeping cannot see,
-      // and subtracting them as "someone else's" collapses the budget to
-      // its floor. the provisional value stands until the truth is known
+      // no sizeTileBudget() until the purge is done: evicting during it
+      // drops the only tiles the bookkeeping can see
       purgeUnbookkept();
     };
   } catch (e) {}
 });
 
-// oldest-first until the cache is back under the low-water mark. one sort
-// per pass, and a pass only comes round again once the cache has grown all
-// the way back to the budget, so the cost is amortised into nothing.
 // `hard` is the quota-error path: the accounting says there is room but the
 // browser disagrees, and the browser is the one that counts
 const evictTiles = async (hard) => {
@@ -220,10 +172,8 @@ const evictTiles = async (hard) => {
   } finally { evicting = false; }
 };
 
-// a tile was just read or written: it is the most recently used one now.
-// the mirror write is rate-limited — an exact last-use is worth nothing
-// here, and one small write per cache hit would cost more than the eviction
-// order it buys
+// the 'tilemeta' write is rate-limited: one per hit costs more than the
+// eviction order it buys
 const noteTileUse = (path, n) => {
   const now = Date.now();
   const m = tileMeta.get(path);
@@ -240,13 +190,8 @@ const noteTileUse = (path, n) => {
   scheduleFlush();
 };
 
-// delete the tiles the bookkeeping doesn't know about — everything written
-// before the budget existed. a key cursor in chunks, with a gap between
-// transactions, so several gigabytes go away without the page noticing;
-// interrupting it just means the next session picks up where this stopped.
-// a tile cached *during* the purge is spared as soon as its meta record
-// lands, and in the sliver before that it can be deleted again — which
-// costs one re-download and nothing else
+// tiles with no meta record, from before the budget. a tile cached mid-purge
+// can go before its meta lands, which costs one re-download
 const purgeUnbookkept = async () => {
   if (!db) return;
   const CHUNK = 2000;
@@ -277,9 +222,6 @@ const purgeUnbookkept = async () => {
         } catch (e) { console.warn('tile purge: delete threw', e); res(); }
       });
       gone += doomed.length;
-      // this can run for minutes on a cache that filled the origin, and a
-      // silent minutes-long background job is indistinguishable from a
-      // broken one, so it says what it is doing
       if (!said) {
         said = true;
         console.log('tile cache: clearing tiles left over from before the budget…');
@@ -291,24 +233,14 @@ const purgeUnbookkept = async () => {
   }
   purging = false;
   if (gone) console.log(`tile cache: cleared ${gone} leftover tiles`);
-  // only now is the origin's usage a fair description of what is actually
-  // there, so this is where the budget can be sized honestly
   sizeTileBudget();
 };
 
 // --- batched tile i/o -----------------------------------------------------
-// indexeddb runs transactions on a store in the order they were created,
-// and a lookup can't start while a write ahead of it holds the store. one
-// readwrite transaction per downloaded tile (and another for its meta
-// record) put thousands of them in front of the lookups a settling view
-// issues, and the queue grew faster than it drained: lookups that took
-// 100 ms at the start took two seconds a minute in, and every one of the
-// engine's download slots was spent waiting in it. measured on the toronto
-// horizon view (tools/loadprof.mjs): 60–90 s to settle with the cache,
-// 8 s without it. so writes are collected and committed a few hundred ms
-// at a time in one transaction, with relaxed durability (no fsync per
-// commit — a lost tile re-downloads), and the lookups a frame issues go
-// out together in one readonly transaction
+// a lookup queues behind every write transaction created before it. one
+// write per tile took the toronto horizon view (tools/loadprof.mjs) to
+// 60–90 s to settle, against 8 s uncached. so writes commit in batches with
+// relaxed durability, and a frame's lookups share one readonly transaction
 const FLUSH_MS = 300;
 let tileQueue = new Map(), metaQueue = new Map(), flushTimer = null;
 const scheduleFlush = () => {
@@ -318,8 +250,6 @@ const flushWrites = () => {
   flushTimer = null;
   if (!tileQueue.size && !metaQueue.size) return;
   if (!db) {
-    // no connection yet (or none at all): keep the metas, they're small,
-    // but don't let the tiles pile up forever
     if (tileQueue.size > 256) tileQueue.clear();
     scheduleFlush();
     return;
@@ -340,32 +270,22 @@ const flushWrites = () => {
         quotaWarned = true;
         console.warn('tile write failed (quota?)', tx.error || '');
       }
-      // while the purge is running, the room is already on its way: evicting
-      // here would throw away the newly cached tiles — the only ones the
-      // bookkeeping can see — to make space the purge is about to free
+      // mid-purge the room is coming anyway, and evicting would drop the
+      // only tiles the bookkeeping can see
       if (!purging) evictTiles(true);
     };
   } catch (e) {}
 };
-// the tile write, with the accounting and the quota escape hatch attached
 const putTile = (path, bytes) => {
   if (IDB_OFF || IDB_RO) return;
   tileQueue.set(path, bytes);
   scheduleFlush();
 };
-// every lookup issued in the same task — the engine schedules a frame's
-// downloads in one go — is answered from one readonly transaction.
-//
-// with a deadline. a lookup that fails falls through to the network, but
-// one that simply doesn't answer used to hold the engine's request for as
-// long as it took — and the first one of a session took a minute in
-// firefox, which initialises a multi-gigabyte origin before the first
-// transaction runs. the root bulk was in that lookup, and nothing draws
-// without it. so a batch that hasn't answered in LOOKUP_MS is given up on
-// (its tiles come from the network; a late answer is dropped) and the
-// cache is bypassed until that batch does answer. the deadline is loose
-// on purpose: firefox lookups of a few seconds happen while a write batch
-// commits, and giving up on those re-downloads tiles that are in the store
+// one readonly transaction per task's lookups, with a deadline: firefox's
+// first lookup can take a minute (it initialises a multi-GB origin), and the
+// root bulk is in it. past LOOKUP_MS the batch goes to the network and the
+// cache is bypassed until it answers. loose on purpose: lookups of a few
+// seconds happen while a write batch commits
 const LOOKUP_MS = 3000;
 let readQueue = [], stalled = 0;
 const getTile = (path) => new Promise((res) => {
@@ -419,14 +339,8 @@ const clearTiles = () => new Promise((res) => {
   } catch (e) { console.warn('tile cache clear threw', e); res(false); }
 });
 
-// the budget is a share of the quota, and deliberately ignores `usage`.
-// firefox pools storage by group rather than by origin — every localhost
-// port reports the same usage — so on a dev machine `usage` describes
-// whatever else that browser profile has stored under this host, which is
-// nothing this page can see, evict, or reason about. subtracting it once
-// pinned this cache to its floor because an unrelated project was sitting
-// on ten gigabytes. the quota is still worth reading: it is what the
-// browser is willing to offer at all
+// ignores the estimate's usage on purpose: firefox pools it across every
+// localhost port, so it counts other projects' storage
 function sizeTileBudget() {
   if (!navigator.storage || !navigator.storage.estimate) return;
   navigator.storage.estimate().then((e) => {
@@ -446,18 +360,14 @@ function sizeTileBudget() {
 }
 
 // --- the fetch hook -------------------------------------------------------
-// the fetch hook: the renderer asks for a path, we answer with bytes.
 // planetoid metadata ('P...') is not cached, matching the native client
 const stats = window.__stats = {
   issued: 0, delivered: 0, failed: 0, inflight: 0,
   idbHits: 0, netHits: 0, maxMs: 0, log: [],
-  // the same counts split by what was asked for, with the two waits kept
-  // apart: the cache lookup and the network. the engine schedules bulks and
-  // nodes separately and a bulk gates a whole subtree, so when a deep zoom
-  // is slow the question is which of these two queues a bulk is sitting in
+  // per kind, cache and network waits apart: a bulk gates a whole subtree,
+  // so a slow deep zoom means asking which queue the bulk is in
   kinds: {},
-  // ?fetchtrace: one record per request — when it was issued, when the
-  // cache answered, when the network did, when it was handed to the engine
+  // ?fetchtrace: per request, when issued, cached, fetched, delivered
   trace: QS.has('fetchtrace') ? [] : null,
 };
 // 'B' bulk metadata, 'N' node data, 'P' the planetoid header
@@ -480,9 +390,7 @@ const fetchTile = async (path, id) => {
     let bytes = path[0] !== 'P' ? await getTile(path) : undefined;
     k.idbMs += performance.now() - t0;
     if (tr) tr.idb = performance.now();
-    // a hit is a use: it moves the tile to the young end of the lru, and
-    // re-registers one whose bookkeeping went missing (a meta write that
-    // failed, or a store carried over from before the budget existed)
+    // also re-registers a tile whose meta record went missing
     if (bytes) { stats.idbHits++; k.idb++; noteTileUse(path, bytes.length); }
     if (!bytes) {
       const t1 = performance.now();
@@ -513,8 +421,7 @@ const fetchTile = async (path, id) => {
   }
 };
 const initTiles = () => {
-  // alongside the engine's own 2s line, so the two can be read together.
-  // ?fetchlog=0 turns it off
+  // pairs with the engine's own 2s line; ?fetchlog=0 turns it off
   if (QS.get('fetchlog') !== '0') setInterval(() => {
     const parts = [];
     for (const [kind, k] of Object.entries(stats.kinds)) {

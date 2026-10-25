@@ -18,8 +18,6 @@ const resize = () => {
   const dpr = window.devicePixelRatio || 1;
   canvas.width = Math.round(canvas.clientWidth * dpr);
   canvas.height = Math.round(canvas.clientHeight * dpr);
-  // the overlay is placed in viewport-relative terms, so it follows
-  // window resizes and the map pane collapsing/expanding
   layoutOverlay();
 };
 const initEngine = async () => {
@@ -29,17 +27,14 @@ const initEngine = async () => {
   addEventListener('resize', resize);
 
   if (QS.has('jpg')) Module.forceJpgTextures();
-  // multisampling is on by default: mipmaps only fix texture minification,
-  // while the crawl on distant building silhouettes is geometric aliasing,
-  // which needs this instead. ?msaa=0 opts out (for a slow gpu, or to A/B it).
-  // context attribute, so it can't be a live key toggle like M
+  // msaa is on by default: the crawl on distant silhouettes is geometric
+  // aliasing, which mipmaps don't touch. a context attribute, so no live key
   if (QS.has('msaa')) Module.setAntialias(QS.get('msaa') !== '0');
   // per-tile decode timing on the console; a line per node, so off unless asked
   if (QS.has('timing')) Module.setLogTiming(QS.get('timing') !== '0');
 
   view = Module.createView('#globe', fetchTile);
-  // the frame loop's first callback comes after main has run every other
-  // init, which it does synchronously after this resolves
+  // main runs its other inits synchronously before the first tick
   requestAnimationFrame(tick);
 };
 
@@ -58,28 +53,20 @@ const tick = (now) => {
   if (hug && now - speedAt > 100) { speedAt = now; updateSpeed(); }
 
   if (view.ready() && !posed) {
-    // once the planet metadata is in, jump to the start (or saved) pose
     posed = true;
-    // the datum setPose's altitude and every pick are measured from; the
-    // alignment math rebuilds ecef points against it
+    // the datum for setPose's altitude, every pick, and the alignment math
     setPlanetR(view.planetRadius());
     restoreView();
-    // a track dropped (or restored) before the planet metadata arrived is
-    // still sitting in js: its ecef points need the planetoid radius, and
-    // so does the spine's tangent plane
+    // a track loaded before the planet metadata needs the radius too
     pushPath();
     buildSpine();
     updateHint();
   }
 
   const slow = !!(keys.ShiftLeft || keys.ShiftRight);
-  // arrows pan/tilt at fixed angular rates (rad/s), shift-slowed. in
-  // ortho mode all four arrows instead orbit around whatever is at the
-  // center of the screen (raycast into the scene on the wasm side):
-  // left/right around its up axis, up/down in tilt
+  // rad/s. in ortho the arrows orbit whatever is at screen centre (a wasm-side raycast)
   const rot = (slow ? 0.1 : 1) * dt / 1000;
-  // on the rails the arrows swing the camera around the track instead of
-  // aiming it, and W/S run along the track instead of flying
+  // on the rails the arrows swing round the track and W/S run along it
   const railed = mode === 'follow' && spine && view.ready();
   const orbitH = ortho ? ((keys.ArrowRight ? 1 : 0) - (keys.ArrowLeft ? 1 : 0)) : 0;
   const orbitV = ortho ? ((keys.ArrowUp ? 1 : 0) - (keys.ArrowDown ? 1 : 0)) : 0;
@@ -88,9 +75,7 @@ const tick = (now) => {
   if (!ortho && !railed && keys.ArrowLeft) S.yaw -= 1.2 * rot;
   if (!ortho && !railed && keys.ArrowUp) S.pitch += 0.9 * rot;
   if (!ortho && !railed && keys.ArrowDown) S.pitch -= 0.9 * rot;
-  // z/x zoom like the wheel; in ortho R/F join them as zoom too (below),
-  // since a parallel projection has no meaningful elevation to pedestal
-  // along — so the up/down keys would otherwise sit dead there
+  // in ortho R/F zoom too (below): a parallel projection has no pedestal
   if (!!keys.KeyZ !== !!keys.KeyX) {
     if (ortho) {
       view.zoomOrtho(Math.pow(0.9, (dt / 150) * (keys.KeyZ ? 1 : -1)));
@@ -108,11 +93,9 @@ const tick = (now) => {
     || keys.KeyR || keys.KeyF;
   if (flying && !S.following) S.following = true;
 
-  // in tube mode Q/E become the roll axis (airplane style) and R/F boom
-  // along the camera's own up — the body-frame counterpart of A/D
+  // in the tube Q/E roll, and R/F boom along the camera's own up
   const roll = inTube() ? ((keys.KeyE ? 1 : 0) - (keys.KeyQ ? 1 : 0)) * 1.5 * rot : 0;
-  // thrusting steadies the hand: turning (keys and drag alike) drops to
-  // a fifth while W is held, so forward flight curves instead of veers
+  // damped turning under W, so forward flight curves instead of veers
   const turn = keys.KeyW ? 0.2 : 1;
   if (railed) followStep(dt, slow);
   else view.fly(S.yaw * turn, S.pitch * turn, roll * turn,
@@ -122,17 +105,12 @@ const tick = (now) => {
     slow, !!keys.Space, S.gain, dt);
   S.yaw = 0;
   S.pitch = 0;
-  // wall-clock accounting for the load profiler (tools/loadprof.mjs):
-  // time inside the engine's frame, the whole tick, and the gap since the
-  // last one. the engine's own section timer can't see a stalled main
-  // thread; this can
+  // for tools/loadprof.mjs: the engine's own timer can't see a stalled main thread
   const tFrame0 = performance.now();
   view.frame(dt);
   frameTiming.engineMs += performance.now() - tFrame0;
 
   if (view.ready() && posed) {
-    // the tube's staged load (tube.js), and what the tube, the tunnel or
-    // the body is still waiting on
     const tubeInfoEl = document.getElementById('tubeinfo');
     if (inTube()) {
       const ti = advanceTube(now);
@@ -153,12 +131,8 @@ const tick = (now) => {
     } else {
       tubeInfoEl.style.display = 'none';
     }
-    // ease the roll toward closed: the time constant reads as the ground
-    // curling up rather than snapping, ~.7s for the rect tube, ~.3s for
-    // the tunnel. the tunnel's way out is brisker still and cut short:
-    // the flatter the sheet, the more of the rect's edge (and the nothing
-    // past it) is in view, so it goes straight to the ground in ~half a
-    // second rather than easing all the way
+    // the tunnel's way out is brisk and cut short: the flatter the sheet,
+    // the more of the rect's edge (and the nothing past it) is in view
     if ((inTube() && !tubePending || mode === 'tunnel') && S.curl !== curlTarget) {
       const tau = tunnelClosing ? 150 : mode === 'tunnel' ? 300 : 700;
       S.curl += (curlTarget - S.curl) * (1 - Math.exp(-dt / tau));
@@ -167,9 +141,7 @@ const tick = (now) => {
       if (tunnelClosing && S.curl < 0.03) endTunnel();
     }
     const p = view.getPose();
-    // in tube mode the marker shows the camera in unrolled tube
-    // coordinates — the spot on the rect whose imagery is wrapped around
-    // the camera — rather than the now-meaningless ecef point under it
+    // in the tube the marker is the camera's spot on the unrolled rect
     const tp = (inTube() || mode === 'tunnel') ? view.getTubePose() : null;
     const m = tp || p;
     setMarkerHeading(m.heading);
@@ -177,15 +149,11 @@ const tick = (now) => {
       lastSynced = { lat: m.lat, lon: m.lon };
       marker.setLngLat([m.lon, m.lat]);
     }
-    // runs every frame (not just on movement) so the ease finishes
-    // converging even after the camera stops; paused while the pointer is
-    // down on the map so drag gestures aren't cancelled mid-flight
+    // every frame, so the ease converges after the camera stops
     if (S.following && !mapPointerDown) followMarker({ lat: m.lat, lng: m.lon }, dt);
     if (pickDebug) updatePickDebug();
 
-    // point-pair alignment: run the solver (a few steps a frame, so the
-    // camera visibly settles onto the fit instead of snapping to it), then
-    // redraw the pair markers against wherever the camera ended up
+    // a few solver steps a frame, so the camera visibly settles onto the fit
     if (alignOn) {
       if (solving) {
         for (let i = 0; i < 4 && solving; i++) if (solveStep()) stopSolve();
@@ -204,9 +172,8 @@ const tick = (now) => {
   frameTiming.tickMs += performance.now() - tTick0;
   if (frameTiming.lastTick) frameTiming.gapMs += tTick0 - frameTiming.lastTick;
   frameTiming.lastTick = tTick0;
-  // a capture has to read the canvas in the same task that drew it: the
-  // context is created without preserveDrawingBuffer, so the backbuffer is
-  // undefined once the browser composites the frame
+  // a capture must read the canvas in the task that drew it: without
+  // preserveDrawingBuffer it's undefined once composited
   if (S.pendingShot) {
     const f = S.pendingShot;
     S.pendingShot = null;

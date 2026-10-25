@@ -9,16 +9,11 @@ export { logScale, percent, bindRange, bindCheck, gate, updateSpeed, updateHint,
   refreshRoll, initHud, keysOpen, showKeys, toggleKeys, showCut, toggleCutPanel };
 
 // --- panel controls ---------------------------------------------------------
-// the hud's sliders and switches are each bound to one value: dragging the
-// control writes the value and calls the panel's apply, and the panel's
-// refresh puts every value back into its control and readout (after a
-// restore, a __demo call, the solver moving the lens...). a control's
-// binding is one line, so adding one is the markup plus that line
+// a panel's refresh puts values set elsewhere (a restore, __demo, the
+// solver) back into its controls
 
-// a slider that is log across min..max, its track 0..steps: the things on
-// these sliders are felt in ratios. off: the bottom notch means 0 (off), and
-// the scale starts one notch up. dp rounds what the slider sets, so that
-// what is saved and shown is a round number
+// off: the bottom notch is 0 and the scale starts one notch up. dp rounds
+// what the slider sets, so what is saved and shown is round
 const logScale = (min, max, { steps = 1, off = false, dp = null } = {}) => {
   const k = Math.log(max / min);
   const round = dp === null ? (x) => x : (x) => Math.round(x * 10 ** dp) / 10 ** dp;
@@ -31,10 +26,8 @@ const logScale = (min, max, { steps = 1, off = false, dp = null } = {}) => {
 const percent = { from: (v) => v / 100, to: (x) => Math.round(x * 100) };
 const linear = { from: (v) => v, to: (x) => x };
 
-// a range input bound to obj[key] (or to opts.get/opts.set, for a value that
-// lives somewhere else). fmt writes the readout, #<id>amount unless amount
-// names another. on is the event that commits ('input' while dragging, by
-// default). returns the refresh
+// fmt writes the readout, #<id>amount unless amount names another.
+// returns the refresh
 const bindRange = (id, obj, key, { scale = linear, fmt, amount = id + 'amount', on = 'input',
   get = () => obj[key], set = (v) => { obj[key] = v; }, apply }) => {
   const el = document.getElementById(id), out = fmt && document.getElementById(amount);
@@ -50,9 +43,7 @@ const bindCheck = (id, obj, key, apply) => {
   return () => { el.checked = obj[key]; };
 };
 
-// what a switch (or another panel's) has turned off is dimmed and locked,
-// its value kept: .off on each element, and every input in or among them
-// disabled
+// dimmed and locked, value kept
 const gate = (on, ...els) => {
   for (const el of els) {
     el.classList.toggle('off', !on);
@@ -62,10 +53,6 @@ const gate = (on, ...els) => {
 };
 
 // --- the hud ---------------------------------------------------------------
-// the status chips, the panels' heads, the toast and the roll readout
-
-// the hint line names the mode the view is in and any switch that is
-// not at its default; the keys themselves are in the ? table
 const HINTS = {
   persp: '',
   ortho: 'orthographic',
@@ -74,8 +61,7 @@ const HINTS = {
   body: 'on the body',
   tunnel: '', // its panel says so
 };
-// the speed chip, and the hug chip with the height it is holding — which
-// moves with R/F, so the frame loop refreshes this while hugging
+// R/F move the hug height, so the frame loop calls this while hugging
 const updateSpeed = () => {
   document.getElementById('speed').textContent =
     `speed ${S.gain >= 1 ? S.gain : '1/' + (1/S.gain)}`;
@@ -90,13 +76,11 @@ const updateHint = () => {
     HINTS[viewName()],
     mipmaps ? '' : 'mipmaps off',
     miniature ? 'miniature' : '',
-    // T and B only do anything once a rect exists
     !inTube() && tubeRect ? 'rect drawn (T rolls it into a tube, B wraps it on a body)' : '',
   ].filter(Boolean).join(' · ');
   updateSpeed();
   refreshKeys();
-  // point-pair alignment is perspective-only, so every mode switch has to
-  // re-decide whether its panel and markers belong on screen
+  // alignment is perspective-only, so every mode switch re-decides its panel
   alignRefresh();
 };
 
@@ -109,10 +93,8 @@ const toast = (msg, ms = 2600) => {
   toastTimer = setTimeout(() => el.classList.remove('on'), ms);
 };
 
-// roll is the one part of the pose with no other sign in the hud, and it can
-// arrive from the solver or from banking the tube, so the panel is driven by
-// what the camera actually reports rather than by whoever set it. inside the
-// tube a bank is the normal way to fly and needs no announcing
+// read from the camera, since the solver and the tube's bank set roll too.
+// in the tube, banking is normal and not shown
 const rollAmountEl = document.getElementById('rollamount');
 let shownRoll = null;
 const refreshRoll = () => {
@@ -127,9 +109,6 @@ const refreshRoll = () => {
 document.getElementById('hint').textContent = HINTS.persp;
 document.getElementById('speed').textContent = 'speed 1';
 const initPanels = () => {
-  // a panel's head is its minimize switch: click anywhere on it (except its
-  // other buttons, like ✕) and the panel shrinks to that line; the –/+ in
-  // it says which way the next click goes
   for (const panel of document.querySelectorAll('.panel')) {
     const head = panel.querySelector('.head');
     const btn = document.createElement('button');
@@ -157,10 +136,7 @@ const initRoll = () => {
 };
 
 // --- the key table (?) ----------------------------------------------------
-// what every key does *in the current mode* — a key that does nothing here
-// isn't listed, and one that does something different (arrows orbit in
-// ortho, look around in perspective) says what it does here. rebuilt by
-// updateHint on every mode switch
+// only what each key does in the current mode
 const K = (t) => t.split(' ').map((k) => `<kbd>${k}</kbd>`).join(' ');
 const keysFor = () => {
   const mode = viewName();
@@ -226,10 +202,6 @@ const keysFor = () => {
     ['drop a file', 'image → photo · .gpx → path · .obj → body · session .json → restore'], [K('?'), 'this']]]);
   return g;
 };
-// the table is a pure function of the view's state. it is re-derived,
-// while it is open, whenever updateHint runs — which is whenever the mode,
-// a view switch, the photo, the track or the rect changes — and only
-// touches the dom when the result differs
 let keysOpen = false, keysHtml = '';
 const renderKeys = () => {
   const html = keysFor().map(([title, rows]) =>
@@ -254,9 +226,7 @@ const initKeyTable = () => {
 };
 
 // --- near cut (H) ---------------------------------------------------------
-// the slider is log across 0.5m..2km, with the bottom notch meaning off: a
-// window is a metre or two away and a courtyard wall fifty, and both need
-// to be settable on the same track
+// a window is a metre or two away, a courtyard wall fifty: both on one track
 const CUT = logScale(0.5, 2000, { steps: 1000, off: true });
 let cutShown = false;
 let refreshCut = () => {}; // bound in initNearCut
@@ -269,8 +239,7 @@ const hideCut = () => {
   cutShown = false;
   document.body.classList.remove('cut');
 };
-// H shows the panel (with whatever cut is set); H again hides the panel
-// but leaves the cut alone — ✕ is what turns it off
+// H hides the panel but keeps the cut; ✕ turns it off
 const toggleCutPanel = () => cutShown ? hideCut() : showCut();
 const initNearCut = () => {
   refreshCut = bindRange('cutdist', null, null, { scale: CUT, amount: 'cutamount',

@@ -7,22 +7,15 @@ import { logScale, percent, bindRange, bindCheck, gate } from './hud.js';
 export { sky, glamour, applyGlamour, applySky, initSky };
 
 // --- the sky ------------------------------------------------------------
-// where the sun is at the camera, from the clock and the place (noaa's
-// low-precision solar position, good to a fraction of a degree). the
-// engine's sky and aerial perspective follow it. ?sun=az,el pins it, as
-// captures need (test mode pins it by default — a golden can't depend on
-// the time of day); ?sky=0 turns the atmosphere off; ?vis=km sets the
-// visibility. __demo.sky({ hour: 19 }) and friends from the console
-// the atmosphere's state: the three passes, the visibility (km), and the
-// sun's hour — local solar time at the camera, or null to follow the
-// clock. a fixed afternoon by default: a place is not always wanted at
-// the hour it happens to be there. part of the saved view
+// hour: local solar time at the camera, or null to follow the clock.
+// a fixed afternoon by default, not the hour it happens to be there
 const SKY_DEFAULT = { sky: true, haze: true, tint: true, vis: 60, hour: 14, shadows: true, shade: 0.45, occl: false, occlAmt: 0.6 };
 let sky = { ...SKY_DEFAULT, ...(START.sky || {}) };
 if (QS.get('sky') === '0') sky = { ...sky, sky: false, haze: false, tint: false };
 if (QS.has('vis')) sky.vis = parseFloat(QS.get('vis')) || sky.vis;
 if (QS.has('shadows')) sky.shadows = QS.get('shadows') !== '0';
 if (QS.has('occl')) sky.occl = QS.get('occl') !== '0';
+// test mode pins the sun: a golden can't depend on the time of day
 const sunPinned = QS.has('sun') ? QS.get('sun').split(',').map(Number)
   : TEST ? [225, 35] : null;
 const updateSun = () => {
@@ -31,26 +24,20 @@ const updateSun = () => {
   const p = view.getPose();
   let date = new Date();
   if (sky.hour != null) {
-    // today, at that solar hour here: utc is solar time less the
-    // longitude's share of the day
+    // today at that solar hour: utc = solar time - lon / 15
     date = new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate())
       + (sky.hour - p.lon / 15) * 3600000);
   }
   const s = sunPosition(date, p.lat, p.lon);
   view.setSun(s.az, s.el);
 };
-// glamour mode: while the camera sits still the engine averages frames
-// drawn through sub-pixel offsets (supersampling) and, with an aperture,
-// from points across a lens (thin-lens depth of field, focused on the
-// crosshair). it converges in a second or two and starts over on any
-// move. part of the saved view; ?glamour=1&aperture=m from the url
+// glamour: while still, the engine accumulates supersampled frames and, with
+// an aperture, thin-lens depth of field focused on the crosshair
 const GLAMOUR_DEFAULT = { on: false, aperture: 0, samples: 256, soft: 0.27 };
 let glamour = { ...GLAMOUR_DEFAULT, ...(START.glamour || {}) };
 if (QS.has('glamour')) glamour.on = QS.get('glamour') !== '0';
 if (QS.has('aperture')) glamour.aperture = parseFloat(QS.get('aperture')) || 0;
 const $ = (id) => document.getElementById(id);
-// local solar time at the camera now, in hours: what the time slider
-// shows while following the clock
 const solarHourNow = () => {
   const p = view.getPose(), d = new Date();
   const utc = d.getUTCHours() + d.getUTCMinutes() / 60;
@@ -70,8 +57,7 @@ const applyGlamour = () => {
   gateGlamourRows();
   saveView();
 };
-// the sliders only act while accumulating, and soft sun only with
-// shadows on (the sky panel's switch)
+// soft sun also needs shadows on (the sky panel's switch)
 const gateGlamourRows = () => {
   gate(glamour.on, $('aperturerow'));
   gate(glamour.on && sky.shadows, $('softrow'));
@@ -148,9 +134,8 @@ const initSky = () => {
   $('skyclose').addEventListener('click', () => { document.body.classList.remove('skypanel'); canvas.focus(); });
   setInterval(() => { updateSun(); if (sky.hour == null) refreshSunTime(); }, 5000);
 
-  // ?lod=2 draws half as fine, which is a quarter of the tiles — the volume
-  // of data a view asks for is what decides whether a deep zoom ever finishes,
-  // and this is the only lever on it. live from the console too, via __demo
+  // ?lod=2 draws half as fine, a quarter of the tiles: the only lever on the
+  // data volume that decides whether a deep zoom ever finishes
   if (QS.has('lod')) {
     const v = parseFloat(QS.get('lod'));
     if (Number.isFinite(v) && v > 0) view.setLodScale(v);

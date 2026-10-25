@@ -1,14 +1,6 @@
 <!doctype html>
-<!-- split-screen demo: maplibre gl slippy map on the left, the earth renderer on
-     an ordinary canvas on the right, two-way synced. tiles are cached in
-     indexeddb via the js fetch hook.
-
-     serve this directory (from the repo root):
-       ./build.sh && ./serve.py
-     coi-serviceworker injects the cross-origin-isolation headers the pthread
-     build needs (expect one automatic reload on first visit).
-     the code is in js/ (main.js brings it up, in order) and the look in
-     style.css. -->
+<!-- coi-serviceworker supplies the cross-origin isolation the pthread build
+     needs (expect one automatic reload on first visit) -->
 <meta charset="utf-8">
 <title>soil</title>
 <script>window.coi = { coepCredentialless: () => true };</script>
@@ -50,7 +42,6 @@
         <input id="overlayblend" type="range" min="0" max="100" value="50" title="overlay opacity">
       </div>
       <div id="appairsblock">
-        <!-- the pairs: what ties the photo to the ground -->
         <div class="group">
           <div class="row">
             <button id="apadd">+ add pair</button>
@@ -58,7 +49,6 @@
           </div>
           <div id="aplist"></div>
         </div>
-        <!-- the solver: what it may move, and how it is doing -->
         <div class="group">
           <div class="row"><button id="apsolve" class="primary">solve</button></div>
           <div>solve for:

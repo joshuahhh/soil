@@ -11,13 +11,9 @@ import { loadGpxFile, savePath } from './path.js';
 export { initIO, copyState, saveState, pasteState };
 
 // --- dropped files --------------------------------------------------------
-// dragover has to be cancelled or the browser navigates to the dropped file.
-// a depth counter keeps the highlight steady as the drag crosses children
-// (dragenter on a child fires before dragleave on its parent)
+// counted: dragenter on a child fires before dragleave on its parent
 let dragDepth = 0;
-// a drag only exposes item types, not names, and a .gpx usually arrives
-// with no type at all — so anything typeless is let through and sorted out
-// on the drop, where the filename is finally visible
+// a drag shows types, not names, and a .gpx usually has no type: let typeless through
 const isFileDrag = (e) => [...(e.dataTransfer ? e.dataTransfer.items : [])]
   .some((it) => it.kind === 'file'
     && (!it.type || it.type.startsWith('image/') || it.type.includes('xml')
@@ -36,14 +32,12 @@ const initDrop = () => {
     dragDepth = 0;
     document.body.classList.remove('dropping');
     const dropped = [...(e.dataTransfer ? e.dataTransfer.files : [])];
-    // a track goes to the path overlay, everything else is a reference photo
     const gpx = dropped.find((f) => /\.gpx$/i.test(f.name));
     if (gpx) {
       e.preventDefault();
       loadGpxFile(gpx);
       return;
     }
-    // a mesh replaces the figure the body mode wraps the rect onto
     const obj = dropped.find((f) => /\.obj$/i.test(f.name));
     if (obj) {
       e.preventDefault();
@@ -53,7 +47,7 @@ const initDrop = () => {
       });
       return;
     }
-    // a session file (the thing ⌘S writes) is the drop-shaped twin of ⌘V
+    // a session file, as ⌘S writes it
     const json = dropped.find((f) => /\.json$/i.test(f.name) || f.type.includes('json'));
     if (json) {
       e.preventDefault();
@@ -65,16 +59,12 @@ const initDrop = () => {
     const file = dropped.find((f) => f.type.startsWith('image/'));
     if (!file) return;
     e.preventDefault();
-    // pairs are anchored to points of a particular photo, so a different
-    // photo drops them — but re-dropping the same file (same name and size)
-    // is a reload, not a new subject, and keeps them
+    // the same name and size is a reload of the same photo: it keeps its pairs
     const key = file.name + ':' + file.size;
     const same = key === S.refImageKey;
     S.refImageKey = key;
     if (!same) {
       clearPairs();
-      // a new subject starts fully visible: you look at the photo first and
-      // fade it once you're lining the view up
       overlayBlend.value = 100;
       applyOverlayBlend();
     }
@@ -85,19 +75,9 @@ const initDrop = () => {
 };
 
 // --- move a session between origins ---------------------------------------
-// the deployed page and localhost are two origins, and nothing is shared
-// across them: separate localstorages, separate indexeddbs. so the
-// clipboard carries it. cmd-C anywhere on the page bundles the whole
-// session — view, path settings and the two dropped files — into one json
-// blob; cmd-V on the other build unpacks it and reloads into exactly that
-// session. cmd-S writes the same blob to a .json, and dropping that file on
-// the page reads it back. the tile cache is deliberately left out: it is megabytes of
-// bytes that re-download themselves, and the only cost of leaving it
-// behind is that the first minute over the same ground is slower
+// ⌘C / ⌘V, ⌘S / drop: the whole session as one json blob. the tile cache is
+// left out: megabytes that re-download themselves
 const STATE_TAG = 'soil-session-v1';
-// files go over as data urls: json is the only thing the clipboard carries
-// between two pages, and this is the one encoding of a blob that comes back
-// through fetch() without a byte of parsing here
 const fileToJson = (f) => new Promise((res) => {
   const r = new FileReader();
   r.onload = () => res({ name: f.name || '', type: f.type || '', data: r.result });
@@ -109,14 +89,11 @@ const jsonToFile = async (j, fallbackName) => {
   return new File([blob], j.name || fallbackName, { type: j.type || blob.type });
 };
 const collectState = async () => {
-  // the three savers write on their own schedule (beforeunload, on change),
-  // so run them first or the copy carries the state as of some earlier moment
+  // the savers run on their own schedule; flush them first
   saveView();
   savePath();
   saveAlign();
-  // localstorage holds strings, but the file is for reading and diffing
-  // too, so each entry goes in as the object it is — not a json string
-  // escaped inside the json. (a value that isn't json stays a string)
+  // parsed, so the file reads and diffs as json, not escaped strings
   const ls = {};
   for (const k of STORES) {
     const v = localStorage.getItem(k);
@@ -140,17 +117,12 @@ const copyState = async () => {
     await navigator.clipboard.writeText(text);
     toast(`session copied (${mb} MB) — ⌘V it into the other build`);
   } catch (e) {
-    // writeText wants a focused document and the clipboard permission; when
-    // it says no there is still a perfectly good string to hand over
     console.warn('session: clipboard write failed', e);
     console.log(text);
     toast('could not reach the clipboard — the session json is in the console');
   }
   return text;
 };
-// ⌘S writes the same bundle to a file — for keeping a session around, or
-// moving it somewhere a clipboard doesn't reach. dropping it back on the
-// page is the other half
 const fileStamp = () => new Date().toISOString().slice(0, 19).replace(/[T:]/g, '-');
 const saveFile = (blob, name) => {
   const url = URL.createObjectURL(blob);
@@ -167,14 +139,11 @@ const saveState = async () => {
   saveFile(new Blob([text], { type: 'application/json' }), `soil-session-${fileStamp()}.json`);
   toast(`session saved (${(text.length / 1e6).toFixed(1)} MB) — drop the file on the page to restore it`);
 };
-// applying is destructive on purpose: a key the incoming session doesn't
-// have is a key it doesn't want, so it goes. half-pasting one session over
-// another leaves a mix that belongs to neither
+// destructive on purpose: a key the session lacks is removed, not left to mix in
 const applyState = async (s) => {
   freezeStorage(); // before the first write: nothing may save over it now
   for (const k of STORES) {
-    // objects from the current format, strings from files written before
-    // it stored them parsed
+    // strings come from files written before entries were stored parsed
     if (s.ls && s.ls[k] != null)
       localStorage.setItem(k, typeof s.ls[k] === 'string' ? s.ls[k] : JSON.stringify(s.ls[k]));
     else localStorage.removeItem(k);
@@ -198,11 +167,8 @@ const pasteState = async (text) => {
   if (!s || s.tag !== STATE_TAG) return false;
   const failed = await applyState(s);
   if (failed.length) {
-    // the localstorage half landed and the files didn't, so reloading now
-    // would show a session missing its photo or track and say nothing. the
-    // savers stay off for the rest of this page's life either way: what is
-    // in storage is the pasted session, and flying around now shouldn't
-    // quietly edit it
+    // no reload: it would show the session without its files and say nothing.
+    // the savers stay frozen either way
     toast(`pasted, but ${failed.join(' and ')} did not fit in storage — see the console`);
     return true;
   }
@@ -213,13 +179,11 @@ const pasteState = async (text) => {
 const initSession = () => {
   addEventListener('keydown', (e) => {
     if (e.code !== 'KeyS' || !(e.metaKey || e.ctrlKey) || e.shiftKey || e.altKey) return;
-    e.preventDefault(); // or the browser offers to save the html
+    e.preventDefault();
     saveState();
   });
 
   addEventListener('copy', (e) => {
-    // a real selection, or a cursor in a field, means the copy is about text
-    // on the page and not about the session
     const t = e.target;
     if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
     const sel = getSelection();
@@ -231,8 +195,6 @@ const initSession = () => {
     const t = e.target;
     if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
     const text = e.clipboardData && e.clipboardData.getData('text/plain');
-    // anything that isn't one of our bundles is left to whatever else on the
-    // page might want it
     if (!text || text.indexOf(STATE_TAG) < 0) return;
     e.preventDefault();
     pasteState(text);
@@ -240,15 +202,10 @@ const initSession = () => {
 };
 
 // --- screenshot ------------------------------------------------------------
-// the 3d view as it is on screen, at the canvas's own pixel size: the render,
-// then whatever is drawn over it and showing — the photo (plain, or through
-// the lens), the pair markers, the reticle — at its place and opacity.
-// panels and readouts are left out. the gl canvas is copied inside the frame
-// that drew it; the rest is composited afterwards
+// runs as S.pendingShot, inside the frame that drew the gl canvas (the only
+// time it can be read); the overlays are composited on top
 const shotLayers = () => [overlayImg, warpEl, svgEl, document.getElementById('cross')];
-// an svg from the page as a bitmap. its look comes from the stylesheet,
-// which an <img> of it can't see, so the copy carries each element's
-// computed style inline
+// an <img> of an svg can't see the stylesheet: inline each element's computed style
 const SVG_PROPS = ['display', 'visibility', 'opacity', 'fill', 'stroke', 'stroke-width',
   'stroke-dasharray', 'stroke-linecap', 'font-size', 'font-weight', 'font-family'];
 const rasterSvg = (el, w, h) => new Promise((resolve, reject) => {
@@ -303,11 +260,7 @@ const takeShot = () => {
 };
 
 // --- photo ⇄ render gif ---------------------------------------------------
-// a loop that holds on the photo, fades to the render it was aligned
-// against, holds, and fades back. cropped to the photo's box (as much of it
-// as is on screen), so it is the picture and the landscape behind it and
-// nothing else: no pair markers, no reticle, and the photo at full opacity
-// whatever the slider says. the encoder is fetched the first time it's used
+// cropped to the photo's visible box; no markers, photo at full opacity
 const GIF_MAX = 800;   // the longer side, px
 const GIF_STEPS = 12;  // frames per fade
 const GIF_HOLD = 1200, GIF_STEP_MS = 60;
@@ -338,8 +291,7 @@ const takeGif = () => {
       render.fillStyle = '#fff';
       render.fillRect(0, 0, w, h);
       render.drawImage(canvas, x0 * s, y0 * s, (x1 - x0) * s, (y1 - y0) * s, 0, 0, w, h);
-      // the photo as displayed — through the lens if it has one — over the
-      // render, which fills in wherever the warp leaves the box uncovered
+      // the photo as displayed, over the render where the warp leaves gaps
       const photo = layer();
       photo.drawImage(render.canvas, 0, 0);
       const el = document.body.classList.contains('distorted') ? warpEl : overlayImg;
@@ -349,8 +301,6 @@ const takeGif = () => {
       toast('making gif…');
       gifenc ??= await import('https://cdn.jsdelivr.net/npm/gifenc@1.0.3/dist/gifenc.esm.js');
       const { GIFEncoder, quantize, applyPalette } = gifenc;
-      // one quantized frame per step of the fade, eased; the way back
-      // reuses them in reverse
       const mix = layer();
       const frames = [];
       for (let i = 0; i <= GIF_STEPS; i++) {

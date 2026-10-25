@@ -2,13 +2,9 @@ export { D2R, planetR, setPlanetR, vsub, vmul, vadd, vdot, vcross, vnorm, geoUpV
   ecefOf, poseBasis, projectWith, sunPosition, smoothSpine, makeSpine, spineAt, rawAt,
   spineLatLon, spineHeading, nearestS, paramSpecs, lmStep };
 
-// vector helpers and the camera projection, in ecef metres. no dom, no engine:
-// the alignment solver and the follow camera both work in these terms
-//
-// the camera projection is reimplemented here rather than called through the
-// engine, so a solver iteration costs no wasm round trips — it mirrors
-// earth_camera.h's poseToCamera and rocktree_math.h's lookAt/perspective,
-// and pickNdc on the wasm side is built from the same basis
+// ecef metres. no dom, no engine. the projection mirrors earth_camera.h's
+// poseToCamera and rocktree_math.h's lookAt/perspective (as does pickNdc), so
+// the solver needs no wasm round trips: change them together
 const D2R = Math.PI / 180;
 let planetR = 6371010; // refreshed from the engine as soon as it's ready
 const setPlanetR = (r) => { planetR = r; };
@@ -27,8 +23,7 @@ const geoUpV = (lat, lon) => [Math.cos(lat) * Math.cos(lon),
   Math.cos(lat) * Math.sin(lon), Math.sin(lat)]; // radians
 const geoNorthV = (lat, lon) => [-Math.sin(lat) * Math.cos(lon),
   -Math.sin(lat) * Math.sin(lon), Math.cos(lat)];
-// a pair's mesh anchor as ecef meters. pickNdc reports the hit in spherical
-// terms against the same radius, so this rebuilds the exact point
+// exact: pickNdc reports the hit against the same radius
 const ecefOf = (pr) => vmul(geoUpV(pr.lat * D2R, pr.lon * D2R), planetR + pr.alt);
 
 // the basis lookAt builds for a pose: eye, boresight, screen-right, view-up
@@ -46,9 +41,7 @@ const poseBasis = (p) => {
   if (!right) return null;
   const vup = vcross(right, dir);
   const eye = vmul(up, planetR + p.alt);
-  // the camera's bank turns the screen axes about the boresight — the same
-  // rotation the engine applies to gravity when it builds the view matrix,
-  // so a pair drawn from this basis stays on its feature in a rolled view
+  // roll turns the screen axes about the boresight, as the engine's view matrix does
   const r = (p.roll || 0) * D2R;
   if (!r) return { eye, dir, right, vup };
   const c = Math.cos(r), sn = Math.sin(r);
@@ -68,8 +61,7 @@ const projectWith = (b, fovDeg, P, W, H) => {
 };
 
 // --- the sun ------------------------------------------------------------
-// where the sun is, from the clock and the place: noaa's low-precision
-// solar position, good to a fraction of a degree. no dom, no engine
+// noaa's low-precision solar position, good to a fraction of a degree
 const sunPosition = (date, lat, lon) => {
   const rad = Math.PI / 180;
   const jd = date.getTime() / 86400000 + 2440587.5;
@@ -90,13 +82,10 @@ const sunPosition = (date, lat, lon) => {
 };
 
 // --- the spine ------------------------------------------------------------
-// the track as the follow camera sees it (path.js): one line resampled at a
-// fixed step on a local tangent plane, the smoothed copies of it the camera
-// steers off, and the lookups along it. no dom, no engine
+// the track as the follow camera (path.js) sees it, on a local tangent plane
 const SPINE_STEP = 10;       // m between resampled points
 
-// box filter by prefix sum, O(n) whatever the window; the window shrinks at
-// the ends rather than the values being clamped into it
+// box filter by prefix sum; the window shrinks at the ends
 const boxcar = (a, half) => {
   const n = a.length, pre = new Float64Array(n + 1), out = new Float64Array(n);
   for (let i = 0; i < n; i++) pre[i + 1] = pre[i] + a[i];
@@ -117,21 +106,16 @@ const smoothSpine = (spine, win) => {
 
 const makeSpine = (path) => {
   if (!path) return null;
-  // one line to follow: the gaps between track segments are crossed rather
-  // than jumped, since the camera has to travel through them somehow
+  // segment gaps are crossed, not jumped: the camera has to travel through them
   const raw = [];
   for (const seg of path.segs) for (const p of seg) raw.push(p);
   if (raw.length < 2) return null;
-  // one local tangent plane for the whole track: meters east/north of its
-  // mean latitude. the east scale drifts with cos(lat) away from that — a
-  // percent over a degree — which is nothing against a camera standoff, and
-  // it keeps resampling and smoothing to plain 2d arithmetic
+  // one plane for the whole track; the east scale drifts ~1% per degree of latitude
   const lat0 = raw.reduce((t, p) => t + p.lat, 0) / raw.length;
   const lon0 = raw[0].lon;
   const mLat = D2R * planetR, mLon = mLat * Math.cos(lat0 * D2R);
   const xy = raw.map((p) => [(p.lon - lon0) * mLon, (p.lat - lat0) * mLat]);
-  // resample at a fixed step, remembering which original point each sample
-  // came from — the engine's altitudes are indexed by that
+  // each sample keeps its source point: the engine's altitudes are indexed by it
   const samples = [{ x: xy[0][0], y: xy[0][1], i: 0 }];
   let dAcc = 0, dNext = SPINE_STEP;
   for (let i = 1; i < xy.length; i++) {
@@ -146,13 +130,11 @@ const makeSpine = (path) => {
     dAcc += len;
   }
   if (samples.length < 2) return null;
-  // resampled but *unsmoothed*: the smoothing happens per frame, at
-  // whatever window the current view scale asks for
+  // unsmoothed: smoothing happens per frame, at the view's window
   const rx = Float64Array.from(samples, (p) => p.x);
   const ry = Float64Array.from(samples, (p) => p.y);
-  // arc length along the *raw* points, which is what the ribbon is drawn
-  // through and therefore what the cursor and the progress readout have to
-  // speak. the spine is only ever consulted for which way the track heads
+  // arc length along the raw points, which the ribbon is drawn through: the
+  // cursor and progress readout speak this, not the spine's length
   const cum = new Float64Array(xy.length);
   for (let i = 1; i < xy.length; i++)
     cum[i] = cum[i - 1] + Math.hypot(xy[i][0] - xy[i - 1][0], xy[i][1] - xy[i - 1][1]);
@@ -161,11 +143,7 @@ const makeSpine = (path) => {
     lat0, lon0, mLat, mLon };
 };
 
-// the smoothing leaves the samples very slightly unevenly spaced, so s/step
-// is an approximation of arc length — by well under a percent, and nothing
-// here needs it to be exact
-// a point on one of the smoothed copies, interpolated between the samples
-// either side so it doesn't step as s crosses one
+// s/step is arc length on a smoothed copy to well under a percent
 const spineAt = (spine, s, sm) => {
   const n = sm.xs.length;
   const u = Math.min(n - 1, Math.max(0, s / spine.step));
@@ -173,9 +151,8 @@ const spineAt = (spine, s, sm) => {
   return [sm.xs[i] + (sm.xs[i + 1] - sm.xs[i]) * f,
     sm.ys[i] + (sm.ys[i + 1] - sm.ys[i]) * f];
 };
-// metres along the raw track -> fractional point index, and the point
-// itself. this is the number the ribbon is built from, so a cursor placed
-// with it sits on the drawn line by construction
+// metres along the raw track -> fractional point index (what the ribbon is
+// built from, so a cursor placed by it sits on the line) and the point
 const rawAt = (spine, s) => {
   const cum = spine.cum;
   let lo = 0, hi = cum.length - 1;
@@ -193,16 +170,13 @@ const rawAt = (spine, s) => {
 };
 const spineLatLon = (spine, xy) => ({ lat: spine.lat0 + xy[1] / spine.mLat,
   lon: spine.lon0 + xy[0] / spine.mLon });
-// which way the track heads at s, degrees clockwise from north, over a
-// chord rather than a segment (this is the anti-jitter measurement)
+// degrees clockwise from north, over a chord rather than one segment
 const spineHeading = (spine, s, sm, chord) => {
   const a = spineAt(spine, Math.max(0, s - chord), sm);
   const b = spineAt(spine, Math.min(spine.len, s + chord), sm);
   const dx = b[0] - a[0], dy = b[1] - a[1];
   return Math.hypot(dx, dy) < 1e-6 ? null : Math.atan2(dx, dy) / D2R;
 };
-// where on the spine a camera at p is standing, so V picks you up where
-// you are rather than teleporting to the trailhead
 const nearestS = (spine, p) => {
   const x = (p.lon - spine.lon0) * spine.mLon, y = (p.lat - spine.lat0) * spine.mLat;
   let best = 0, bd = Infinity;
@@ -216,30 +190,17 @@ const nearestS = (spine, p) => {
 };
 
 // --- the solver -----------------------------------------------------------
-// levenberg–marquardt on the pose: gauss-newton where the local model is
-// trusted, gradient descent where it isn't, with a numeric jacobian (the
-// projection is six cheap parameters, so finite differences cost nothing).
-// it's a local method by design — this is for fine-tuning a view that is
-// already roughly right, not for solving the pose from scratch.
-//
-// the parameters are local deltas rather than the pose itself: metres east /
-// north / up instead of degrees of latitude and longitude, so every column
-// of the jacobian has comparable scale and the normal equations stay
-// conditioned wherever on the globe you are
+// levenberg–marquardt with a numeric jacobian. local by design: it refines a
+// roughly right view. parameters are metres e/n/u rather than degrees, so the
+// jacobian's columns have comparable scale anywhere on the globe
 const paramSpecs = (freeFlags) => {
   const s = [];
   if (freeFlags.pos) s.push('e', 'n', 'u');
   if (freeFlags.aim) s.push('h', 't');
   if (freeFlags.fov) s.push('f');
-  // off by default: a hand-held photo is usually a little banked, but so is
-  // a fit that has gone wrong, and a free roll will happily take a bad
-  // solution the rest of the way. tick it when the horizon in the picture
-  // isn't level
+  // opt-in: a free roll will happily take a bad fit the rest of the way
   if (freeFlags.roll) s.push('r');
-  // off by default for the same reason, and one more: it is the twin of
-  // fov (a barrel lens looks like a wider field at the edges), and pairs
-  // near the centre of the picture say nothing about it at all. tick it
-  // when the pairs at the edges won't settle while the middle has
+  // opt-in too: it trades off against fov, and central pairs say nothing about it
   if (freeFlags.dist) s.push('k');
   return s;
 };
@@ -264,8 +225,7 @@ const applyDelta = (base, specs, d, clampK) => {
     else if (s === 'k') p.k += x;
   });
   p.k = clampK(p.k); // see photo.js lensLimits
-  // the same limits the engine enforces, so an accepted step survives
-  // being handed to setPose/setFov unchanged
+  // the engine's limits, so an accepted step survives setPose/setFov unchanged
   p.lat = Math.max(-89.9, Math.min(89.9, p.lat));
   p.alt = Math.max(1, p.alt);
   p.tilt = Math.max(-89.5, Math.min(89.5, p.tilt));
@@ -293,12 +253,8 @@ const solveLinear = (A, b) => {
   for (let i = 0; i < k; i++) x.push(M[i][k] / M[i][i]);
   return x.every(Number.isFinite) ? x : null;
 };
-// one levenberg–marquardt step from pose base over the parameters specs:
-// resid(pose) is the residual vector there (null where it can't be
-// measured), clampK the lens's limits, and lm the damping and the progress
-// so far ({ lambda, iters, stalls }), which this updates. returns { cand,
-// done }: cand the accepted pose if a step was taken, done when there's
-// nothing left to do
+// resid(pose) -> residuals, null where unmeasurable. lm = { lambda, iters,
+// stalls }, updated in place. returns { cand (if a step was taken), done }
 const lmStep = (base, specs, resid, clampK, lm) => {
   const k = specs.length;
   const r0 = resid(base);
@@ -334,8 +290,7 @@ const lmStep = (base, specs, resid, clampK, lm) => {
     for (let i = 0; i < n; i++) s += J[a][i] * J[b][i];
     A[a][b] = A[b][a] = s;
   }
-  // raise the damping until a step actually improves the fit; each failure
-  // pulls the step shorter and more gradient-like
+  // raise the damping until a step improves the fit
   for (let attempt = 0; attempt < 8; attempt++) {
     const Ad = A.map((row, a) => row.map((x, b) =>
       a === b ? x * (1 + lm.lambda) + 1e-9 : x));

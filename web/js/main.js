@@ -14,7 +14,6 @@ import { sky, glamour, applyGlamour, applySky, initSky } from './sky.js';
 // window.__demo, window.__test (and window.__stats, in tiles.js) are an api:
 // tools/*.mjs drive the page through them
 const initTestApi = () => {
-  // for devtools poking and automated testing
   window.__demo = { view, map, marker, isFollowing: () => S.following,
     sky: (patch) => { Object.assign(sky, patch); applySky(); return { ...sky }; },
     glamour: (patch) => { Object.assign(glamour, patch); applyGlamour(); return { ...glamour }; },
@@ -28,42 +27,32 @@ const initTestApi = () => {
     solve: startSolve,
     copyState, pasteState, saveState };
 
-  // --- headless capture api -------------------------------------------------
-  // the driver (tools/capture.mjs) talks to the page through this. kept out of
-  // the TEST guard so it's also usable by hand from the devtools console
+  // not behind TEST, so it works from the devtools console too
   window.__test = {
     stats: () => view.ready() ? view.getStats() : null,
     drawnNodes: () => view.ready() ? view.getDrawnNodes() : [],
     pendingNodes: () => view.ready() ? view.getPendingNodes() : [],
-    // wall-clock ms accumulated by the tick loop since the last call: inside
-    // view.frame, in the whole tick, and between ticks
+    // ms accumulated since the last call; reading resets it
     frameTiming: () => {
       const r = { engineMs: frameTiming.engineMs, tickMs: frameTiming.tickMs, gapMs: frameTiming.gapMs, frames: frameCount };
       frameTiming.engineMs = frameTiming.tickMs = frameTiming.gapMs = 0;
       return r;
     },
-    // the page's own fetch counters (window.__stats), for the load profiler
     fetchStats: () => JSON.parse(JSON.stringify(window.__stats)),
     frameCount: () => frameCount,
-    // shimmer measurement (tools/shimmer.mjs) drives these: toggle the texture
-    // filtering, then move the camera a fixed sub-degree amount and see how
-    // much the image churns
+    // for tools/shimmer.mjs
     setMipmaps,
     nudgeHeading: (deg) => {
       const p = view.getPose();
       view.setPose(p.lat, p.lon, p.alt, p.heading + deg, p.tilt);
     },
-    // resolves with a png data url, captured at the end of the next frame
+    // captured at the end of the next frame
     shot: () => new Promise((resolve) => {
       S.pendingShot = () => resolve(canvas.toDataURL('image/png'));
     }),
-    // settle until the scene reports itself fully loaded for `stable`
-    // consecutive frames, or `timeoutMs` elapses. sceneComplete alone is not
-    // enough to wait on: a download that keeps failing resets its node to a
-    // stub rather than to a failed state (see rocktree_types.h
-    // setFailedDownloading), so it is retried forever and the flag can stay
-    // false indefinitely. the timeout is therefore load-bearing, and the
-    // caller is told which way it ended rather than it being papered over
+    // the timeout is load-bearing: a download that keeps failing is reset to
+    // a stub and retried forever (rocktree_types.h setFailedDownloading), so
+    // sceneComplete can stay false indefinitely
     settle: async ({ timeoutMs = 120000, stable = 5 } = {}) => {
       const t0 = performance.now();
       let run = 0;
@@ -79,12 +68,10 @@ const initTestApi = () => {
   };
 };
 
-// the page, brought up in order. a module's top level only declares things
-// (reading config.js at most); whatever touches the page, the engine or the
-// map waits for its init, called below. that is what lets the modules import
-// each other in circles. the order still decides which keydown listener
-// hears a key first (view, then photo, then io) and how the map's layers
-// stack (tube under path)
+// module top levels only declare things (reading config.js at most), which is
+// what lets the modules import each other in circles. the init order still
+// decides which keydown listener hears a key first (view, photo, io) and how
+// the map's layers stack (tube under path)
 await initEngine();
 initTiles();
 initMap();

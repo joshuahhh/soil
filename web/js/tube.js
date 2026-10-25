@@ -9,22 +9,11 @@ export { initTube, bodyPromise, setBodyMesh, refreshTunnel, tunnelClosing, curlT
   advanceTube, tubeState, restoreTube };
 
 // --- the body's geometry image -------------------------------------------
-// the figure body mode wraps the rect onto (body.js), baked into the
-// geometry image the engine samples: a grid over
-// (u around the figure, v feet to head) of skin positions and normals.
-// each texel is a ray cast outward at that height and angle from the
-// centre of the figure's cross-section there (not one fixed spine: the
-// head and neck lean forward of the hips, and a ray from the wrong
-// centre grazes the skin instead of crossing it), and the outermost hit
-// is the skin. one loop per height would web the legs into a gown and
-// stretch a wing from torso to fingertip, so the rows are banded (see
-// bakeBody): below the crotch the rect's width is split between the
-// two legs, and where the arms hang free its outer fifths wrap the
-// arms, each part with rays from its own centre. rays that still miss
-// are bridged by interpolating the radius across the gap within the
-// loop. the shader keeps its samples and the terrain's triangles
-// within one loop, so the parts don't smear into each other.
-// no dom, no engine
+// a grid (u around the figure, v feet to head) of skin positions and
+// normals. each texel is a ray cast outward from the centre of that row's
+// cross-section, not from a fixed spine: the head leans forward of the hips,
+// and an off-centre ray grazes the skin. the outermost hit is the skin.
+// rows are banded so legs and arms get loops of their own (see bakeBody)
 const parseObj = (text) => {
   const v = [], f = [];
   for (const line of text.split('\n')) {
@@ -32,8 +21,7 @@ const parseObj = (text) => {
       const p = line.slice(2).trim().split(/\s+/);
       v.push(+p[0], +p[1], +p[2]);
     } else if (line.charCodeAt(0) === 102 && line.charCodeAt(1) === 32) { // 'f '
-      // v, v/vt, v//vn, v/vt/vn: parseInt stops at the slash. negative
-      // (relative) indices are rare and not handled
+      // parseInt stops at the slash; negative (relative) indices unhandled
       const idx = line.slice(2).trim().split(/\s+/).map((t) => parseInt(t, 10) - 1);
       for (let i = 1; i + 1 < idx.length; i++) f.push(idx[0], idx[i], idx[i + 1]);
     }
@@ -43,8 +31,7 @@ const parseObj = (text) => {
 const bakeBody = (mesh, W = 256, H = 256) => {
   const { v, f } = mesh;
   const n = v.length / 3;
-  // body units: feet at 0, height 1, the vertex mean at x = z = 0 (a
-  // rough centring; the rays below find their own origin per row)
+  // feet at 0, height 1, the vertex mean at x = z = 0
   let ymin = Infinity, ymax = -Infinity, sx = 0, sz = 0;
   for (let i = 0; i < n; i++) {
     const y = v[3 * i + 1];
@@ -69,13 +56,10 @@ const bakeBody = (mesh, W = 256, H = 256) => {
     const hi = Math.min(H - 1, Math.ceil(Math.max(y0, y1, y2) * H - 0.5));
     for (let j = lo; j <= hi; j++) rows[j].push(t);
   }
-  // the mesh's cross-section at each row's height: one segment per
-  // triangle the plane cuts, in (x, z); and each segment's class, by
-  // the closed loop it belongs to (segments sharing an endpoint): the
-  // longest loop is the torso (0), any other loop off to a side is an
-  // arm (+1 toward +x, -1 toward -x), anything else stray (2). a fixed
-  // width cutoff can't tell the underside of an arm at the armpit from
-  // the torso's own side, and taking it as torso put a ledge there
+  // each row's cross-section as (x, z) segments, classed by closed loop: the
+  // longest is the torso (0), one off to a side an arm (+1/-1 by x), else
+  // stray (2). not a width cutoff: that took the arm's underside at the
+  // armpit for torso and put a ledge there
   const secs = [], classes = [];
   for (let j = 0; j < H; j++) {
     const y = (j + 0.5) / H;
@@ -101,8 +85,7 @@ const bakeBody = (mesh, W = 256, H = 256) => {
     const byPt = new Map();
     for (let k = 0; k < ns; k++) {
       for (const e of [0, 2]) {
-        // shared mesh edges give the same cut point from either
-        // triangle up to rounding; key on a coarse grid
+        // a shared edge cuts to the same point up to rounding
         const key = Math.round(seg[4 * k + e] * 1e3) + ',' + Math.round(seg[4 * k + e + 1] * 1e3);
         const other = byPt.get(key);
         if (other === undefined) byPt.set(key, k);
@@ -129,8 +112,7 @@ const bakeBody = (mesh, W = 256, H = 256) => {
     }
     classes.push(cls);
   }
-  // the length-weighted centre of a section's pieces passing a filter on
-  // their midpoint x and class, the origin its rays are cast from
+  // length-weighted centre of the pieces passing filt: a loop's ray origin
   const centre = (j, filt) => {
     const seg = secs[j], cls = classes[j];
     let wsum = 0, mx = 0, mz = 0;
@@ -144,8 +126,7 @@ const bakeBody = (mesh, W = 256, H = 256) => {
     }
     return wsum > 0 ? [mx / wsum, mz / wsum] : null;
   };
-  // the outermost hit of the ray from (ox, oz) in direction (dx, dz)
-  // among the pieces passing the filter; 0 if none
+  // outermost hit among the pieces passing filt; 0 if none
   const cast = (j, ox, oz, dx, dz, filt) => {
     const seg = secs[j], cls = classes[j];
     let best = 0;
@@ -164,22 +145,13 @@ const bakeBody = (mesh, W = 256, H = 256) => {
   const ALL = () => true;
   const TORSO = (x, c) => c === 0;
   const ARM = (side) => (x, c) => c === side;
-  // one loop per height can't make two legs: a rectangle with its long
-  // edges glued is a cylinder, and rays cast from between the legs miss
-  // front and back and web the two into a gown. so the rows are in
-  // bands, and a band's loops split the rect's width between the
-  // parts of the figure at that height, each part with rays from its own
-  // centre:
-  //   torso  (band 0): one loop, u = 0 at the back, the seam down the spine
-  //   legs   (band 1): below the crotch; the u < 0.5 half wraps the +x leg
-  //          (the one beneath the torso's u < 0.5 side), the rest the other
-  //   arms   (band 2): where the arms hang free of the torso; the outer
-  //          fifths of the width wrap the arms, the middle the torso
-  // the crotch is the highest row below the hips where rays straight
-  // forward and back from the section's centre both miss — the gap
-  // between the legs. the arm rows are those above it where both arms
-  // are loops of their own (the base mesh stands in an a-pose, so that
-  // is from the fingertips to the armpits), taken as one contiguous range
+  // one loop per row webs the legs into a gown and the arms into wings, so
+  // each band splits the width between parts, each with its own ray origin:
+  //   torso (0): one loop, u = 0 at the back, the seam down the spine
+  //   legs  (1): below the crotch; u < 0.5 wraps the +x leg
+  //   arms  (2): where the arms hang free; the outer fifths wrap the arms
+  // the crotch: the highest row below the hips where rays forward and back
+  // both miss. arm rows: above it, both arms loops of their own (a-pose)
   let crotch = -1;
   for (let j = Math.floor(0.6 * H); j >= 0; j--) {
     const c = centre(j, ALL);
@@ -194,10 +166,7 @@ const bakeBody = (mesh, W = 256, H = 256) => {
   }
   const aW = Math.round(0.2 * W);
   const bandOf = (j) => j <= crotch ? 1 : j >= armLo && j <= armHi ? 2 : 0;
-  // a loop: its texel range, which pieces of the section it sees, and
-  // its ray direction by angle. the legs and arms start at the inner
-  // side (facing the torso) and go inner -> front -> outer -> back,
-  // mirror images of each other
+  // limbs go inner -> front -> outer -> back, mirrored side to side
   const mirror = (side) => (th) => [-side * Math.cos(th), Math.sin(th)];
   const around = (th) => [Math.sin(th), -Math.cos(th)];
   const LOOPS = [
@@ -209,8 +178,7 @@ const bakeBody = (mesh, W = 256, H = 256) => {
       { i0: W - aW, i1: W, filt: ARM(-1), dir: mirror(-1) }],
   ];
   const loopAt = (i, j) => { const ls = LOOPS[bandOf(j)]; for (const l of ls) if (i < l.i1) return l; return ls[ls.length - 1]; };
-  // per-row ray origins (one per loop), smoothed over a few rows within
-  // the band so the origin slides up the figure rather than jumping
+  // ray origins, smoothed over a few rows within the band so they don't jump
   const ox = new Float32Array(3 * H), oz = new Float32Array(3 * H);
   for (let j = 0; j < H; j++) {
     LOOPS[bandOf(j)].forEach((l, k) => {
@@ -245,8 +213,7 @@ const bakeBody = (mesh, W = 256, H = 256) => {
         const best = cast(j, cxj, czj, dx, dz, l.filt);
         if (best > 0) { rad[i] = best; hit[i] = 1; }
       }
-      // bridge the misses, linear in radius across each gap, wrapping
-      // within the loop
+      // bridge the misses, linear in radius, wrapping within the loop
       let nh = 0;
       for (let i = l.i0; i < l.i1; i++) nh += hit[i];
       if (nh === 0) for (let i = l.i0; i < l.i1; i++) rad[i] = 0.002;
@@ -271,11 +238,9 @@ const bakeBody = (mesh, W = 256, H = 256) => {
       }
     });
   }
-  // normals from the image itself: central differences, u wrapping
-  // within the texel's own loop, v one-sided at a band's edge (the rows
-  // either side belong to different loops and a difference across them
-  // is a stretch, not a tangent); outward, checked against the radial
-  // from the ray origin, since a webbed gap can fold either way
+  // v is one-sided at a band edge: across it is a stretch, not a tangent.
+  // outward is checked against the radial, since a bridged gap can fold
+  // either way
   const nrm = new Float32Array(W * H * 4);
   const at = (i, j) => 4 * (j * W + i);
   const uN = (i, j, d) => { const l = loopAt(i, j); const L = l.i1 - l.i0; return l.i0 + (i - l.i0 + d + L) % L; };
@@ -296,23 +261,18 @@ const bakeBody = (mesh, W = 256, H = 256) => {
       nrm[k] = nx; nrm[k + 1] = ny; nrm[k + 2] = nz; nrm[k + 3] = 0;
     }
   }
-  // the band edges in (u, v), for the shader to keep its samples and the
-  // terrain's triangles within one loop: v below which the rows are
-  // legs, the v range of the arm rows, and the arms' share of u
+  // for the shader, which keeps samples and triangles within one loop:
+  // legs' top v, the arm rows' v range, the arms' share of u
   const bands = [(crotch + 1) / H, armLo >= 0 ? armLo / H : 0, armLo >= 0 ? (armHi + 1) / H : 0, aW / W];
   return { w: W, h: H, pos, nrm, bands };
 };
 
 // --- body mode ------------------------------------------------------------
-// B wraps the rect onto a figure instead of rolling it into a tube: the
-// same rect, the same load-then-lock-then-roll pipeline, a different warp
-// (earth_core.h tube_body). the figure is web/body.obj — makehuman's base
-// mesh, CC0, see tools/bodymesh.mjs — fetched the first time it's wanted
-// and baked (bodybake.js) into the geometry image the engine samples.
-// dropping an .obj (y up, any scale, any size) swaps the figure
+// the tube's pipeline with a different warp (earth_core.h tube_body).
+// web/body.obj is makehuman's CC0 base mesh (tools/bodymesh.mjs); a dropped
+// .obj (y up, any scale) replaces it
 let bodyPromise = null;
-// parse, bake, and hand the image to the engine; false for a mesh with
-// nothing in it. takes effect on the next frame, mid-flight included
+// false for an empty mesh. takes effect next frame, mid-flight included
 const setBodyMesh = (text) => {
   const mesh = parseObj(text);
   if (!mesh.f.length || mesh.v.length < 9) return false;
@@ -338,28 +298,22 @@ const ensureBody = () => {
 };
 
 // --- tunnel mode ----------------------------------------------------------
-// the tube without the rect: the ground ahead curls up in front of the
-// camera, over it and down behind, whichever way it faces — the camera
-// on the axis, looking along the circle, new land rolling up ahead as
-// you fly (earth_core tunnelUpdate). one parameter, the circumference;
-// T toggles it, the panel's slider sets it
+// the ground ahead curls up over the camera, whichever way it faces, new
+// land rolling up as you fly (earth_core tunnelUpdate)
 const tunnelAxisBtn = document.getElementById('tunnelaxis');
 const tunnelLenRow = document.getElementById('tunnellenrow');
 const fmtM = (m) => m >= 1000 ? `${(m / 1000).toFixed(m >= 10000 ? 0 : 1)} km` : `${Math.round(m)} m`;
-// the length slider runs from 1.5 circumferences (where the other axis
-// sits) to 60, past the tube's node cap — to feel where it gives out
+// 1.5 is where the other axis sits; 60 is past the tube's node cap, to
+// feel where it gives out
 const K_MIN = 1.5, K_MAX = 60;
-// the panel's sliders, bound in initTunnel
 let tunnelControls = [];
 const refreshTunnel = () => {
   for (const refresh of tunnelControls) refresh();
   tunnelAxisBtn.textContent = S.tunnelAcross ? 'forward and backward' : 'left to right';
   tunnelLenRow.style.display = S.tunnelAcross ? 'none' : '';
 };
-// going in, the ground rolls up around you from flat; going out it
-// unrolls back to flat first (tunnelClosing, the tick eases curl to 0)
-// and the machinery goes off once it's there. animate: false skips both —
-// a reload lands straight in the tunnel it left
+// going out, the tick eases curl to 0 before the mode ends. animate: false
+// skips the roll both ways, so a reload lands straight in the tunnel
 let tunnelClosing = false;
 let curlTarget = 1; // 0 only while the tunnel unrolls on its way out
 const tunnelHooks = {
@@ -382,7 +336,7 @@ const tunnelHooks = {
     document.body.classList.remove('tunnel');
   },
 };
-// the end of the way out, once the frame loop has eased the curl down
+// the frame loop calls this once the curl is down
 const endTunnel = () => setMode('fly');
 const setTunnel = (on, animate = true) => {
   if (on) {
@@ -409,8 +363,6 @@ const setTunnel = (on, animate = true) => {
   saveView();
   canvas.focus();
 };
-// the tunnel's part of the saved view: its settings, and whether it was on
-// (not if it was on its way out)
 const tunnelState = () => ({ on: mode === 'tunnel' && !tunnelClosing, c: S.tunnelC,
   across: S.tunnelAcross, lag: S.tunnelLag, k: S.tunnelK });
 // tubeRolled: the saved view also had the rect rolled, which wins
@@ -433,13 +385,11 @@ const initTunnel = () => {
     canvas.focus();
   });
 
-  // each slider hands its own setting to the engine
   const applied = (send) => () => { send(); refreshTunnel(); saveView(); };
   tunnelControls = [
     bindRange('tunnelc', S, 'tunnelC', { scale: logScale(200, 20000),
       apply: applied(() => view.setTunnelCircumference(S.tunnelC)),
       fmt: (c) => `${fmtM(c)} around`, amount: 'tunnelamount' }),
-    // zero at its left end, then a tenth of a second to ten
     bindRange('tunnellag', S, 'tunnelLag', { scale: logScale(0.1, 10, { off: true }),
       apply: applied(() => view.setTunnelLag(S.tunnelLag * 1000)),
       fmt: (t) => t > 0 ? `${t.toFixed(t < 1 ? 2 : 1)} s to turn` : 'turns at once' }),
@@ -451,20 +401,14 @@ const initTunnel = () => {
 };
 
 // --- tube mode ------------------------------------------------------------
-// shift+drag on the map draws a rectangle; that slab of territory is rolled
-// into a tube (the inception effect) and the camera teleports to one end of
-// the tube axis, looking down it. T rolls/unrolls; drawing a new rect
-// replaces the old one. the roll animates via curl (0 flat .. 1 closed)
+// curl: 0 flat .. 1 closed
 let tubeRect = null; // [latMin, lonMin, latMax, lonMax] degrees
-// which way the tube axis runs; the rolled-up (glued) edges are the two
-// edges parallel to it. toggled by the #axisbtn switch
+// the glued edges are the two parallel to the axis
 let tubeAxisEw = true;
 let tubePendingSince = 0;
 const normRect = (a, b) => [Math.min(a.lat, b.lat), Math.min(a.lng, b.lng),
   Math.max(a.lat, b.lat), Math.max(a.lng, b.lng)];
-// the rect plus topology-diagram arrows on the two glued edges (the ones
-// that meet at the overhead seam), same direction on both — the cylinder
-// identification, the way quotient-space diagrams mark it
+// quotient-diagram arrows on the two glued edges, same direction on both
 const rectFC = (r) => {
   if (!r) return { type: 'FeatureCollection', features: [] };
   const feats = [{ type: 'Feature', properties: { kind: 'rect' },
@@ -498,9 +442,6 @@ const axisBtn = document.getElementById('axisbtn');
 const updateAxisBtn = () => {
   axisBtn.textContent = `tube axis: ${tubeAxisEw ? 'E–W' : 'N–S'} (click to flip)`;
 };
-// fly to the near end of the tube axis: the axis runs along the rect's
-// longer dimension at height = tube radius, so spawning at (end, radius)
-// heading along the axis puts you dead center in the pipe, looking down it
 const flyIntoTube = (r) => {
   const latc = (r[0] + r[2]) / 2, lonc = (r[1] + r[3]) / 2;
   const ew = tubeAxisEw;
@@ -515,9 +456,7 @@ const flyIntoTube = (r) => {
   S.following = true;
 };
 // the figure stands on the rect's centre, as tall as the rect is long,
-// facing across it (up × axis: north for an E–W axis, west for N–S).
-// spawn out in front of it at chest height, looking back level, far
-// enough that the whole figure fits the default fov
+// facing up × axis. 1.4 h out fits it in the default fov
 const flyOntoBody = (r) => {
   const latc = (r[0] + r[2]) / 2, lonc = (r[1] + r[3]) / 2;
   const info = view.getTubeInfo();
@@ -530,12 +469,8 @@ const flyOntoBody = (r) => {
   else view.setPose(latc, lonc - dlon, info.groundAlt + 0.55 * h, 90, 0);
   S.following = true;
 };
-// T rolls the rect into a tube, B wraps it onto the body (shape is 'tube'
-// or 'body'). the body's figure is fetched and baked on first use; the roll
-// waits for it (a cylinder standing in meanwhile would be the wrong
-// picture), and falls back to the tube if it can't be had
-// the rect's shape, 'tube' or 'body': the last one it was rolled into,
-// which a new rect drawn over it is rolled into as well
+// the roll waits for the body's bake (a stand-in cylinder would be the
+// wrong picture). a new rect gets the last shape rolled
 let rectShape = 'tube';
 const rollRect = (shape, teleport) => {
   rectShape = shape;
@@ -549,14 +484,9 @@ const rollRect = (shape, teleport) => {
   }
   setMode(shape, { teleport });
 };
-// staged pipeline: the sheet stays flat while the rect's tiles load at
-// full res; once the scene is complete the engine measures ground level
-// off the mesh, and only then does the roll (and camera fly-in) happen.
-// 'fly' also teleports into the tube mouth; 'roll' just rolls in place
+// flat until the engine locks ground level (advanceTube); 'fly' also
+// teleports into the mouth
 let tubePending = null; // null | 'fly' | 'roll'
-// the tube and the body share these: switching between the two re-enters
-// with the other warp, and leaving either goes back to flat flight over
-// the rect, which stays drawn
 const tubeHooks = {
   enter: ({ teleport }) => {
     const r = tubeRect;
@@ -575,11 +505,9 @@ const tubeHooks = {
     view.setAirplane(false);
   },
 };
-// the rect's part of the saved view, null without one
 const tubeState = () => tubeRect
   ? { rect: tubeRect, on: inTube(), ewAxis: tubeAxisEw, body: rectShape === 'body' } : null;
-// and back: a rect that was rolled rolls up again from flat, in place (the
-// camera pose is already wherever it was saved). says whether it did
+// rolls up in place: the pose is already restored. says whether it did
 const restoreTube = (t) => {
   if (!t || !t.rect) return false;
   tubeRect = t.rect;
@@ -591,18 +519,15 @@ const restoreTube = (t) => {
   else view.setTubeRect(tubeRect[0], tubeRect[1], tubeRect[2], tubeRect[3], tubeAxisEw);
   return !!t.on;
 };
-// esc: unroll, drop the rect, back to normal flight
 const clearRect = () => {
   tubeRect = null;
   rectShape = 'tube';
   if (inTube()) setMode('fly');
   setRectData(null);
 };
-// stage 2+3, from the frame loop: the engine locks ground level as soon as
-// the rect is covered at measurement resolution (well before full res),
-// then we fly in and roll while the rest keeps streaming into the rolled
-// tube. after 20s (a download stuck or failed), force the measurement with
-// what's resident. returns the tube's info, for the loading readout
+// ground locks once the rect is covered at measurement resolution, well
+// before full res. after 20 s (a stuck download) force it with what's
+// resident
 const advanceTube = (now) => {
   let ti = view.getTubeInfo();
   if (tubePending) {
