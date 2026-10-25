@@ -567,23 +567,13 @@ struct earth_core_t {
 		return centerDistance(cam, planetoid->radius);
 	}
 
-	// what the frame's setup works out for the phases after it: the camera
-	// as drawn (the eye and direction moved by the lens offset, and its
-	// right and up), the clip range and the matrices
-	struct frame_t {
-		int width, height;
-		Vector3d eye, direction, right, cam_up;
-		double near, far;
-		double ortho_half_extent; // vertical half-extent in meters (ortho only)
-		float aspect_ratio;
-		Matrix4d viewprojection;
-		Matrix4d key_vp; // the unmoved camera, before the jitter: the walk's cache key
-	};
+	// this frame, for the phases and the passes (see frame_t). kept, because
+	// the shell's renderFrameEnd reads it after updateAndDraw returns
+	frame_t frame;
 
 	// the camera for this frame: its up vector and lens offset, the clip
-	// range and projection, the jitter, and the camera the miniature and
-	// occlusion passes read depth back with
-	frame_t setupFrame(render_ctx_t &ctx, const camera_t &cam, int width, int height) {
+	// range and projection, the jitter, and the miniature's focus
+	frame_t setupFrame(const render_ctx_t &ctx, const camera_t &cam, int width, int height) {
 		auto planet_radius = planetRadius();
 		Vector3d eye = cam.eye;
 		Vector3d direction = cam.direction;
@@ -644,14 +634,11 @@ struct earth_core_t {
 			projection = perspective(fov, aspect_ratio, near, far);
 		}
 
-		// the miniature pass needs the clip range to read depth back into
-		// meters, and focuses on the terrain under the crosshair
+		frame_t f;
+		// the miniature pass focuses on the terrain under the crosshair
 		if (ctx.dof.on) {
-			ctx.dof.near = (float)near;
-			ctx.dof.far = (float)far;
-			ctx.dof.ortho = cam.ortho;
 			auto focus = fmax(1.0, centerDistanceMesh(cam));
-			ctx.dof.focus = (float)focus;
+			f.focus = (float)focus;
 			// the host's sharp band is a fraction of the focus distance *at
 			// the default 45-degree fov*. what the eye judges is how much of
 			// the frame is sharp, and the depth a frame spans scales with its
@@ -659,15 +646,8 @@ struct earth_core_t {
 			// keeps the look. in ortho the same quantity is the half-extent
 			// over the focus distance
 			auto half_angle = cam.ortho ? ortho_half_extent / focus : tan(fov / 2.0);
-			ctx.dof.range = ctx.dof.range_host * (float)(half_angle / tan(0.125 * M_PI));
+			f.focus_range = ctx.dof.range_host * (float)(half_angle / tan(0.125 * M_PI));
 		}
-
-		// the glamour pass's ambient occlusion reads depth back into
-		// positions with this camera
-		ctx.accum.near = (float)near; ctx.accum.far = (float)far; ctx.accum.ortho = cam.ortho;
-		ctx.accum.tan_half = (float)(cam.ortho ? ortho_half_extent : tan(cam.fov / 2.0));
-		ctx.accum.aspect = aspect_ratio;
-		ctx.accum.vis = haze_on && !tube.on ? (float)visibility_m : 0.0f;
 
 		Matrix4d key_vp = projection * key_view; // before the jitter
 		// the sub-pixel jitter (glamour mode): a shift of the whole image by
@@ -681,12 +661,14 @@ struct earth_core_t {
 		Vector3d right = direction.cross(up).normalized();
 		Vector3d cam_up = right.cross(direction).normalized();
 
-		frame_t f;
 		f.width = width; f.height = height;
 		f.eye = eye; f.direction = direction; f.right = right; f.cam_up = cam_up;
-		f.near = near; f.far = far; f.ortho_half_extent = ortho_half_extent;
+		f.near = near; f.far = far; f.ortho = cam.ortho; f.ortho_half_extent = ortho_half_extent;
+		f.tan_half = tan(cam.fov / 2.0);
 		f.aspect_ratio = aspect_ratio;
 		f.viewprojection = viewprojection; f.key_vp = key_vp;
+		f.tube = tube.on;
+		f.debug_lod = debug_lod;
 		return f;
 	}
 
@@ -1172,15 +1154,12 @@ struct earth_core_t {
 		}
 	}
 
-	struct atmosphere_t {
-		Vector3d local_up, east, sun_dir; // the eye's local frame, and the sun in it
-		Vector3f zenith, haze; // the sky's colours
-	};
 	static double smooth(double a, double b, double x) { x = fmin(1.0, fmax(0.0, (x - a) / (b - a))); return x * x * (3 - 2 * x); }
 
 	// the atmosphere's colours this frame: the sun in the eye's local
-	// frame, and the haze and the ground's tint from its height
-	atmosphere_t setAtmosphere(render_ctx_t &ctx, const frame_t &f, const camera_t &cam) {
+	// frame, the haze and the ground's tint from its height, and the
+	// horizon and limb the sky pass draws
+	void setAtmosphere(frame_t &f) {
 		auto &eye = f.eye;
 		auto planet_radius = planetRadius();
 		Vector3d local_up = eye.normalized();
@@ -1199,13 +1178,19 @@ struct earth_core_t {
 		Vector3f tint = Vector3f(1, 1, 1) * (float)(1.0 - 0.45 * low) + Vector3f(1.0f, 0.86f, 0.70f) * (float)(0.45 * low);
 		tint *= (float)(0.3 + 0.7 * day);
 		if (!tint_on) tint = Vector3f(1, 1, 1);
-		Matrix3f cam_f;
-		cam_f.col(0) = f.right.cast<float>(); cam_f.col(1) = f.cam_up.cast<float>(); cam_f.col(2) = f.direction.cast<float>();
-		Vector3f eye_f = eye.cast<float>();
-		renderSetAtmosphere(ctx, haze_on, (float)visibility_m, haze.data(), tint.data(),
-			(float)f.near, (float)f.far, cam.ortho, cam_f.data(), eye_f.data(),
-			(float)tan(cam.fov / 2.0), f.aspect_ratio, (float)planet_radius, (float)scale_height_m, f.width, f.height);
-		return { local_up, east, sun_dir, zenith, haze };
+		auto alt = fmax(0.0, eye.norm() - planet_radius);
+		auto dip = acos(planet_radius / (planet_radius + alt));
+		// the sky thins away with altitude; what's left from high up is
+		// the limb, an atmosphere's thickness (a few scale heights)
+		// seen edge-on just above the horizon line
+		auto sky_amount = exp(-alt / (3.0 * scale_height_m));
+		auto limb = asin(fmin(1.0, (planet_radius + 4.0 * scale_height_m) / (planet_radius + alt)))
+			- asin(fmin(1.0, planet_radius / (planet_radius + alt)));
+		f.planet_radius = planet_radius; f.scale_height = scale_height_m;
+		f.haze_on = haze_on; f.visibility_m = visibility_m;
+		f.local_up = local_up; f.east = east; f.sun_dir = sun_dir; f.sun_el = sun_el;
+		f.zenith = zenith; f.haze = haze; f.tint = tint;
+		f.horizon_dip = dip; f.sky_amount = sky_amount; f.limb = fmax(limb, 1e-3);
 	}
 
 	struct draw_t { rocktree_t::node_t *node; uint8_t self_mask; uint32_t stale_mask; };
@@ -1222,8 +1207,6 @@ struct earth_core_t {
 		std::unordered_map<std::string, rocktree_t::node_t *> potential_set;
 		if (debug_lod)
 			for (auto &kv : potential_nodes) potential_set[kv.first] = kv.second;
-
-		renderSetDebugLod(ctx, debug_lod);
 
 		drawn_nodes.clear();
 		std::vector<draw_t> draws;
@@ -1283,7 +1266,15 @@ struct earth_core_t {
 		return draws;
 	}
 
-	struct shadow_t { bool live; Matrix4d sun_view; };
+	// whether the terrain is shadowed this frame, the sun's view, and the
+	// terrain program's shadow uniforms (renderSetShadow)
+	struct shadow_t {
+		bool live;
+		Matrix4d sun_view;
+		float box[4], shade, texel_uv, bias;
+		Vector3f up, eye;
+		Matrix3f rot;
+	};
 
 	// --- sun shadows -------------------------------------------------
 	// a depth map from the sun over what is drawn, fitted to the near
@@ -1295,11 +1286,11 @@ struct earth_core_t {
 	// ridges) to just past the frustum. nothing changed since the last
 	// map (a still camera, no new tiles, the same sun) and it is reused
 	shadow_t shadowPass(render_ctx_t &ctx, const frame_t &f, const camera_t &cam,
-			const atmosphere_t &atm, const std::vector<draw_t> &draws) {
+			const std::vector<draw_t> &draws) {
 		auto &eye = f.eye, &direction = f.direction, &right = f.right, &cam_up = f.cam_up;
 		auto near = f.near, far = f.far, ortho_half_extent = f.ortho_half_extent;
 		auto aspect_ratio = f.aspect_ratio;
-		auto &local_up = atm.local_up, &east = atm.east, &sun_dir = atm.sun_dir;
+		auto &local_up = f.local_up, &east = f.east, &sun_dir = f.sun_dir;
 		auto shadows_live = shadows_on && !tube.on && sun_el > 0.5 * M_PI / 180.0;
 		float shadow_box_f[4] = {1, 1, 0, 1};
 		Matrix4d sun_view = Matrix4d::Identity();
@@ -1369,19 +1360,26 @@ struct earth_core_t {
 		// taken the light down anyway, and a low sun's shadows run to the
 		// horizon
 		auto shade = shadow_strength * smooth(0.5 * M_PI / 180.0, 6.0 * M_PI / 180.0, sun_el);
-		Vector3f up_sun = (sun_view.block<3, 3>(0, 0) * local_up).cast<float>();
-		Matrix3f sun_rot = sun_view.block<3, 3>(0, 0).cast<float>();
-		Vector3f eye_sun = transformPoint(sun_view, eye).cast<float>();
-		renderSetShadow(ctx, shadows_live, shadow_box_f, (float)shade,
-			(float)(1.0 / shadow_size), (float)((0.3 + 0.5 * shadow_texel_m) / (shadow_box_f[3] - shadow_box_f[2])),
-			up_sun.data(), sun_rot.data(), eye_sun.data());
-		return { shadows_live, sun_view };
+		shadow_t sh;
+		sh.live = shadows_live;
+		sh.sun_view = sun_view;
+		std::copy(shadow_box_f, shadow_box_f + 4, sh.box);
+		sh.shade = (float)shade;
+		sh.texel_uv = (float)(1.0 / shadow_size);
+		sh.bias = (float)((0.3 + 0.5 * shadow_texel_m) / (shadow_box_f[3] - shadow_box_f[2]));
+		sh.up = (sun_view.block<3, 3>(0, 0) * local_up).cast<float>();
+		sh.rot = sun_view.block<3, 3>(0, 0).cast<float>();
+		sh.eye = transformPoint(sun_view, eye).cast<float>();
+		return sh;
 	}
 
 	// the terrain: a node's meshes with its octant mask, shadowed, and in
 	// tube mode through the warp
 	void drawTerrain(render_ctx_t &ctx, const frame_t &f, const std::vector<draw_t> &draws,
 			const shadow_t &sh) {
+		renderTerrainBegin(ctx, f);
+		tube.setTubeUniforms(ctx, f.viewprojection);
+		renderSetShadow(ctx, sh.live, sh.box, sh.shade, sh.texel_uv, sh.bias, sh.up.data(), sh.rot.data(), sh.eye.data());
 		for (auto &dr : draws) {
 			auto node = dr.node;
 			auto self_mask = dr.self_mask;
@@ -1407,25 +1405,6 @@ struct earth_core_t {
 			if (tube.on && tube.body) tube.drawBodyNode(ctx, node->obb, draw);
 			else draw();
 		}
-	}
-
-	// the sky, where the terrain left the far plane
-	void drawSky(render_ctx_t &ctx, const frame_t &f, const camera_t &cam, const atmosphere_t &atm) {
-		if (!sky_on) return;
-		auto planet_radius = planetRadius();
-		Vector3f r = f.right.cast<float>(), u = f.cam_up.cast<float>(), fwd = f.direction.cast<float>();
-		Vector3f lu = atm.local_up.cast<float>(), sd = atm.sun_dir.cast<float>();
-		auto alt = fmax(0.0, f.eye.norm() - planet_radius);
-		auto dip = acos(planet_radius / (planet_radius + alt));
-		// the sky thins away with altitude; what's left from high up is
-		// the limb, an atmosphere's thickness (a few scale heights)
-		// seen edge-on just above the horizon line
-		auto sky_amount = exp(-alt / (3.0 * scale_height_m));
-		auto limb = asin(fmin(1.0, (planet_radius + 4.0 * scale_height_m) / (planet_radius + alt)))
-			- asin(fmin(1.0, planet_radius / (planet_radius + alt)));
-		renderSkyDraw(ctx, r.data(), u.data(), fwd.data(), lu.data(), sd.data(),
-			(float)tan(cam.fov / 2.0), f.aspect_ratio, (float)dip, (float)sun_el, atm.zenith.data(), atm.haze.data(),
-			(float)sky_amount, (float)fmax(limb, 1e-3));
 	}
 
 	// the dropped track, over the terrain it was walked on. after the
@@ -1504,7 +1483,9 @@ struct earth_core_t {
 		else if (tube.on && !tube.ground_locked)
 			tube.tubeLockGround(true);
 		uploads_this_frame = 0;
-		auto f = setupFrame(ctx, cam, width, height);
+		frame = setupFrame(ctx, cam, width, height);
+		setAtmosphere(frame);
+		auto &f = frame;
 
 		auto t0 = ticksMs();
 		// downloaded nodes and bulk metadata are both lru caches with byte
@@ -1523,12 +1504,10 @@ struct earth_core_t {
 		auto t3 = ticksMs();
 		sec.evict += t3 - t2;
 
-		auto atm = setAtmosphere(ctx, f, cam);
-		tube.setTubeUniforms(ctx, f.viewprojection);
 		auto draws = buildDrawList(ctx);
-		auto sh = shadowPass(ctx, f, cam, atm, draws);
+		auto sh = shadowPass(ctx, f, cam, draws);
 		drawTerrain(ctx, f, draws, sh);
-		drawSky(ctx, f, cam, atm);
+		if (sky_on) renderSkyDraw(ctx, f); // where the terrain left the far plane
 		drawPath(ctx, f);
 		sec.draw += ticksMs() - t3;
 		reportStats(ctx, dt_ms);

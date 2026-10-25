@@ -315,7 +315,7 @@ struct EarthView {
 	// path has no mip chain to switch to (crn ships a single level and
 	// glGenerateMipmap rejects compressed textures), so pair this with ?jpg
 	// to actually see the difference
-	void setMipmaps(bool on) { renderSetMipmaps(ctx, on); }
+	void setMipmaps(bool on) { ctx.mipmaps_on = on; }
 
 	// --- test/profiling hooks -------------------------------------------
 	// the engine's own frame accounting, read back rather than only printed
@@ -497,7 +497,7 @@ struct EarthView {
 			// enough: keep showing the average without adding to it
 			a.hold = a.samples >= glamour_samples;
 		}
-		renderFrameEnd(ctx);
+		renderFrameEnd(ctx, earth.frame);
 		auto t2 = earth_core_t::ticksMs();
 		acc_begin_ms += t1 - t0; acc_frame_ms += t2 - t0; acc_frames++;
 	}
@@ -541,8 +541,8 @@ struct EarthView {
 		glamour_samples = samples < 1 ? 1 : samples;
 		glamour_soft = soft;
 	}
-	void setShadowDebug(int mode) { shadow_debug = mode < 1 || mode > 3 ? 1 : mode; ctx.accum.samples = 0; }
-	void setAoDebug(bool on) { ao_debug = on; ctx.accum.samples = 0; }
+	void setShadowDebug(int mode) { ctx.shadow.debug = mode < 1 || mode > 3 ? 1 : mode; ctx.accum.samples = 0; }
+	void setAoDebug(bool on) { ctx.accum.ao_debug = on; ctx.accum.samples = 0; }
 	// sun shadows, and how dark the shade (0..1)
 	void setShadows(bool on, double strength) {
 		earth.shadows_on = on;

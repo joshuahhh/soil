@@ -110,7 +110,7 @@ struct rocktree_t {
 			// the vertex setup for a draw, in one bind (see bufferMesh)
 			GLuint vao;
 			// the min filter the texture was last given (the M key flips
-			// texture_mipmaps_on live; the parameter is re-sent only when it
+			// ctx.mipmaps_on live; the parameter is re-sent only when it
 			// no longer matches, not on every draw)
 			bool mips_on;
 			bool buffered;
