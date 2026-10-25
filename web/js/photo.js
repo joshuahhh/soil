@@ -1,9 +1,10 @@
 import { S } from './state.js';
 import { idbDel } from './idb.js';
 import { canvas, rightEl } from './engine.js';
-import { saveAlign, clearPairs, alignRefresh } from './align.js';
+import { saveAlign, clearPairs } from './align.js';
+import { updateHint } from './hud.js';
 
-export { overlayImg, overlayBlend, ov, clampScale, applyOverlayBlend, overlayBox, layoutOverlay,
+export { overlayImg, overlayBlend, ov, photoShown, clampScale, applyOverlayBlend, overlayBox, layoutOverlay,
   viewToPhoto, clampLens, distortUV, photoToViewK, warpEl, setLens, fitOverlay, setOverlay,
   clearOverlay, toggleOverlayBlend, initPhoto };
 
@@ -17,6 +18,8 @@ export { overlayImg, overlayBlend, ov, clampScale, applyOverlayBlend, overlayBox
 const overlayImg = document.getElementById('overlay');
 const overlayBlend = document.getElementById('overlayblend');
 let overlayUrl = null;
+// up once it has decoded, until the ✕ (P only fades it): what body.overlay shows
+let photoShown = false;
 // where the photo sits over the viewport. scale is its height as a fraction
 // of the viewport's, cx/cy its center as a fraction of the viewport — all
 // relative, so a window resize rescales the photo with the frustum instead
@@ -246,9 +249,10 @@ const setOverlay = (file, keepPlacement) => {
     renderWarp();
     refreshLens();
     layoutOverlay();
+    photoShown = true;
     document.body.classList.add('overlay');
     applyOverlayBlend();
-    alignRefresh();
+    updateHint(); // which re-decides the pairs (alignRefresh)
   };
   overlayImg.onerror = () => {
     overlayUrl = null;
@@ -261,6 +265,7 @@ const setOverlay = (file, keepPlacement) => {
 // pairs, which are anchored to points of that picture and mean nothing
 // without it. the panel's "clear pairs" is the narrower one
 const clearOverlay = () => {
+  photoShown = false;
   document.body.classList.remove('overlay');
   document.body.classList.remove('distorted');
   ov.k = 0;
@@ -270,14 +275,14 @@ const clearOverlay = () => {
   idbDel('ref-image', 'app');
   S.refImageKey = null;
   clearPairs();
-  alignRefresh();
+  updateHint();
   saveAlign();
   canvas.focus();
 };
 // the word "opacity" is a switch: full if the photo is faded at all, off if
 // it's full. quicker than dragging the slider end to end while comparing
 const toggleOverlayBlend = () => {
-  if (!document.body.classList.contains('overlay')) return;
+  if (!photoShown) return;
   overlayBlend.value = +overlayBlend.value >= 100 ? 0 : 100;
   applyOverlayBlend();
   saveAlign();

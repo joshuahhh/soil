@@ -2,8 +2,10 @@ import { canvas } from './engine.js';
 import { viewName, ortho, hug } from './mode.js';
 import { miniature } from './input.js';
 import { tubeRect } from './tube.js';
+import { photoShown } from './photo.js';
+import { path } from './path.js';
 
-export { refreshKeys, toggleKeys, initKeyTable };
+export { keysOpen, refreshKeys, showKeys, toggleKeys, initKeyTable };
 
 // --- the key table (?) ----------------------------------------------------
 // what every key does *in the current mode* — a key that does nothing here
@@ -55,7 +57,7 @@ const keysFor = () => {
   viewRows.push([K('I'), 'glamour: refine a still frame']);
   viewRows.push([K('C L K M'), 'debug: pick · lod · smoothing · mipmaps']);
   g.push(['view', viewRows]);
-  if (document.body.classList.contains('overlay')) {
+  if (photoShown) {
     const rows = [[K('P'), 'photo on / off'], [K('shift') + ' drag', 'move the photo'],
       [K('shift') + ' wheel', 'size it about the pointer']];
     if (mode === 'persp') rows.push(['drag', 'either end of a pair, to adjust it'],
@@ -67,7 +69,7 @@ const keysFor = () => {
   if (mode !== 'tube' && tubeRect) mapRows.push([K('T'), 'roll the tube up']);
   if (mode !== 'body' && tubeRect) mapRows.push([K('B'), 'wrap it on a body']);
   if (mode !== 'tube' && mode !== 'body' && tubeRect) mapRows.push([K('esc'), 'clear the rect']);
-  if (mode !== 'follow' && mode !== 'tube' && mode !== 'body' && document.body.classList.contains('path'))
+  if (mode !== 'follow' && mode !== 'tube' && mode !== 'body' && path)
     mapRows.push([K('V'), 'follow the path']);
   g.push(['map', mapRows]);
   g.push(['session', [[K('⌘C ⌘V'), 'copy / paste the whole session'],
@@ -75,13 +77,11 @@ const keysFor = () => {
     ['drop a file', 'image → photo · .gpx → path · .obj → body · session .json → restore'], [K('?'), 'this']]]);
   return g;
 };
-// the table is a pure function of the view's state, and that state changes
-// from a dozen places (a key, a drop, a rect on the map). rather than have
-// each of them remember to redraw it, the frame loop re-derives it a few
-// times a second while it is open and only touches the dom when the
-// result differs — poor man's react, at the cost of building a short
-// string every 250ms
-let keysHtml = '', keysAt = 0;
+// the table is a pure function of the view's state. it is re-derived,
+// while it is open, whenever updateHint runs — which is whenever the mode,
+// a view switch, the photo, the track or the rect changes — and only
+// touches the dom when the result differs
+let keysOpen = false, keysHtml = '';
 const renderKeys = () => {
   const html = keysFor().map(([title, rows]) =>
     `<section><h4>${title}</h4><table>${rows.map(([k, what]) =>
@@ -90,14 +90,14 @@ const renderKeys = () => {
   keysHtml = html;
   document.getElementById('keys').innerHTML = html;
 };
-const refreshKeys = (now) => {
-  if (!document.body.classList.contains('keys') || now - keysAt < 250) return;
-  keysAt = now;
-  renderKeys();
+const refreshKeys = () => { if (keysOpen) renderKeys(); };
+const showKeys = (on) => {
+  keysOpen = on;
+  if (on) renderKeys();
+  document.body.classList.toggle('keys', on);
 };
 const toggleKeys = () => {
-  if (!document.body.classList.contains('keys')) renderKeys();
-  document.body.classList.toggle('keys');
+  showKeys(!keysOpen);
   canvas.focus();
 };
 const initKeyTable = () => {

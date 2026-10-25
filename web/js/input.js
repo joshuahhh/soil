@@ -3,10 +3,10 @@ import { S } from './state.js';
 import { view, canvas, rightEl } from './engine.js';
 import { saveView } from './saveview.js';
 import { map, pickDebug, setPickDebug } from './map.js';
-import { ov, clampScale, overlayBox, layoutOverlay, viewToPhoto,
+import { ov, photoShown, clampScale, overlayBox, layoutOverlay, viewToPhoto,
   toggleOverlayBlend } from './photo.js';
 import { updateHint, toast } from './hud.js';
-import { toggleKeys } from './keytable.js';
+import { keysOpen, showKeys, toggleKeys } from './keytable.js';
 import { toggleCutPanel } from './nearcut.js';
 import { mode, setMode, ortho, setOrtho, hug, setHug } from './mode.js';
 import { tunnelClosing, setTunnel } from './tunnel.js';
@@ -88,8 +88,8 @@ const initInput = () => {
     if (e.code === 'KeyP' && !e.repeat) toggleOverlayBlend();
     if (e.code === 'KeyH' && !e.repeat) toggleCutPanel();
     if (e.key === '?' && !e.repeat) toggleKeys();
-    if (e.code === 'Escape' && document.body.classList.contains('keys')) {
-      document.body.classList.remove('keys');
+    if (e.code === 'Escape' && keysOpen) {
+      showKeys(false);
       return; // that is all this esc does
     }
     if ((e.code === 'Digit0' || e.code === 'Numpad0' || e.code === 'Home') && !e.repeat) resetView();
@@ -153,7 +153,7 @@ const initInput = () => {
     // while marking a pair, a click on the view is the mark — don't also
     // grab the camera and swing it away from what was clicked
     if (capture) return;
-    if (e.shiftKey && document.body.classList.contains('overlay')) {
+    if (e.shiftKey && photoShown) {
       ovDragging = true;
       canvas.setPointerCapture(e.pointerId);
       return;
@@ -191,7 +191,7 @@ const initInput = () => {
     e.preventDefault();
     // shift+wheel resizes the reference photo rather than the view, the
     // companion of shift+drag's reposition
-    if (e.shiftKey && document.body.classList.contains('overlay')) {
+    if (e.shiftKey && photoShown) {
       // zoom about the pointer: whatever point of the picture is under it
       // stays under it, so you can wind in on a window frame without chasing
       // the photo back across the viewport afterwards. the centre is stored

@@ -5,6 +5,7 @@ import { miniature, mipmaps } from './input.js';
 import { mode, inTube, viewName, ortho, hug } from './mode.js';
 import { tubeRect } from './tube.js';
 import { alignRefresh } from './align.js';
+import { refreshKeys } from './keytable.js';
 
 export { updateSpeed, updateHint, toast, refreshRoll, initHud, initPanels, initRoll };
 
@@ -41,6 +42,7 @@ const updateHint = () => {
     !inTube() && tubeRect ? 'rect drawn (T rolls it into a tube, B wraps it on a body)' : '',
   ].filter(Boolean).join(' · ');
   updateSpeed();
+  refreshKeys();
   // point-pair alignment is perspective-only, so every mode switch has to
   // re-decide whether its panel and markers belong on screen
   alignRefresh();

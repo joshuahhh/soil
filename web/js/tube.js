@@ -1,7 +1,7 @@
 import { S } from './state.js';
 import { view } from './engine.js';
 import { map } from './map.js';
-import { toast } from './hud.js';
+import { updateHint, toast } from './hud.js';
 import { mode, inTube, defineMode, setMode } from './mode.js';
 import { ensureBody } from './body.js';
 
@@ -223,6 +223,7 @@ const initTube = () => {
     if (r[2] - r[0] < 3e-4 && r[3] - r[1] < 3e-4) { setRectData(tubeRect); return; }
     tubeRect = r;
     setRectData(r);
+    updateHint(); // T and B mean something now
     if (view.ready()) rollRect(rectShape, true);
   });
 };

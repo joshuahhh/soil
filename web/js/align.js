@@ -4,12 +4,12 @@ import { paramSpecs, lmStep } from './solver.js';
 import { loadStore, saveStore } from './persist.js';
 import { idbGet } from './idb.js';
 import { view, canvas, rightEl } from './engine.js';
-import { overlayBlend, ov, applyOverlayBlend, viewToPhoto, clampLens, distortUV, photoToViewK,
+import { overlayBlend, ov, photoShown, applyOverlayBlend, viewToPhoto, clampLens, distortUV, photoToViewK,
   setLens, fitOverlay, setOverlay, clearOverlay } from './photo.js';
 import { updateHint } from './hud.js';
 import { mode, ortho, setHug } from './mode.js';
 
-export { pairs, svgEl, saveAlign, clearPairs, alignRefresh, lastErrs, updateMarkers, updateStatus,
+export { alignOn, pairs, svgEl, saveAlign, clearPairs, alignRefresh, lastErrs, updateMarkers, updateStatus,
   dofCount, capture, captureClick, solving, solveStep, stopSolve, startSolve, initAlign };
 
 // --- point-pair alignment -------------------------------------------------
@@ -76,13 +76,14 @@ function clearPairs() {
 // alignment is off in ortho and in the tube (see the note above), and
 // pointless without a photo. called from updateHint, so every mode switch
 // re-evaluates it
+let alignOn = false;
 function alignRefresh() {
   // pairs come with the photo, except where they can't (ortho, or inside
   // the tube) — and then the panel says so rather than silently dropping
   // half of itself
-  const on = document.body.classList.contains('overlay') && !ortho && (mode === 'fly' || mode === 'follow');
-  document.body.classList.toggle('align', on);
-  if (!on) { cancelCapture(); stopSolve(); }
+  alignOn = photoShown && !ortho && (mode === 'fly' || mode === 'follow');
+  document.body.classList.toggle('align', alignOn);
+  if (!alignOn) { cancelCapture(); stopSolve(); }
   document.getElementById('apfreepos').checked = freeFlags.pos;
   document.getElementById('apfreeaim').checked = freeFlags.aim;
   document.getElementById('apfreefov').checked = freeFlags.fov;
@@ -90,7 +91,7 @@ function alignRefresh() {
   document.getElementById('apfreedist').checked = freeFlags.dist;
   // the lens panel is also up while the solver is asked to fit it: that is
   // when you want to set it by eye and see whether the pairs agree
-  document.body.classList.toggle('lenswanted', freeFlags.dist && on);
+  document.body.classList.toggle('lenswanted', freeFlags.dist && alignOn);
   buildMarkers();
   renderList();
 }
@@ -305,7 +306,7 @@ let capture = null;
 let blendBeforeCapture = null;
 const setBanner = (t) => { bannerEl.textContent = t; };
 function startCapture() {
-  if (!document.body.classList.contains('align')) return;
+  if (!alignOn) return;
   capture = { stage: 'photo' };
   document.body.classList.add('capturing');
   // the photo is the thing being clicked, so show all of it; the slider

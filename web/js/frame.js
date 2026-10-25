@@ -6,14 +6,13 @@ import { saveView, restoreView } from './saveview.js';
 import { marker, setMarkerHeading, pickDebug, updatePickDebug, mapPointerDown,
   followMarker } from './map.js';
 import { updateSpeed, updateHint, refreshRoll } from './hud.js';
-import { refreshKeys } from './keytable.js';
 import { mode, inTube, ortho, hug } from './mode.js';
 import { keys, dragging } from './input.js';
 import { tunnelClosing, curlTarget, endTunnel } from './tunnel.js';
 import { tubePending, advanceTube } from './tube.js';
 import { bodyPromise } from './body.js';
 import { pushPath, spine, buildSpine, followStep } from './path.js';
-import { updateMarkers, updateStatus, solving, solveStep, stopSolve } from './align.js';
+import { alignOn, updateMarkers, updateStatus, solving, solveStep, stopSolve } from './align.js';
 
 export { frameCount, frameTiming, initFrame };
 
@@ -29,7 +28,6 @@ const tick = (now) => {
   const tTick0 = performance.now();
   const dt = TEST ? TEST.dt : Math.min(100, now - last);
   last = now;
-  refreshKeys(now);
   if (hug && now - speedAt > 100) { speedAt = now; updateSpeed(); }
 
   if (view.ready() && !posed) {
@@ -161,7 +159,7 @@ const tick = (now) => {
     // point-pair alignment: run the solver (a few steps a frame, so the
     // camera visibly settles onto the fit instead of snapping to it), then
     // redraw the pair markers against wherever the camera ended up
-    if (document.body.classList.contains('align')) {
+    if (alignOn) {
       if (solving) {
         for (let i = 0; i < 4 && solving; i++) if (solveStep()) stopSolve();
       }

@@ -3,6 +3,7 @@ import { view, canvas } from './engine.js';
 import { saveView } from './saveview.js';
 import { updateHint } from './hud.js';
 import { mode, defineMode, setMode } from './mode.js';
+import { logScale, bindRange } from './ui.js';
 
 export { refreshTunnel, tunnelClosing, curlTarget, endTunnel, setTunnel, tunnelState,
   restoreTunnel, initTunnel };
@@ -14,36 +15,16 @@ export { refreshTunnel, tunnelClosing, curlTarget, endTunnel, setTunnel, tunnelS
 // you fly (earth_core tunnelUpdate). one parameter, the circumference;
 // T toggles it, the panel's slider sets it
 const tunnelAxisBtn = document.getElementById('tunnelaxis');
-const TUNNEL_MIN = 200, TUNNEL_MAX = 20000;
-const tunnelSlider = document.getElementById('tunnelc');
-const tunnelAmountEl = document.getElementById('tunnelamount');
-// the slider is log across its range: a tunnel is felt in ratios
-const tunnelFromSlider = (v) => TUNNEL_MIN * Math.pow(TUNNEL_MAX / TUNNEL_MIN, v);
-const tunnelToSlider = (c) => Math.log(c / TUNNEL_MIN) / Math.log(TUNNEL_MAX / TUNNEL_MIN);
+const tunnelLenRow = document.getElementById('tunnellenrow');
 const fmtM = (m) => m >= 1000 ? `${(m / 1000).toFixed(m >= 10000 ? 0 : 1)} km` : `${Math.round(m)} m`;
-// the lag slider: zero at its left end, then log from a tenth of a
-// second to ten
-const LAG_MIN = 0.1, LAG_MAX = 10;
-const tunnelLagSlider = document.getElementById('tunnellag');
-const tunnelLagAmountEl = document.getElementById('tunnellagamount');
-const lagFromSlider = (v) => v <= 0 ? 0 : LAG_MIN * Math.pow(LAG_MAX / LAG_MIN, v);
-const lagToSlider = (t) => t <= 0 ? 0 : Math.log(Math.max(LAG_MIN, Math.min(LAG_MAX, t)) / LAG_MIN) / Math.log(LAG_MAX / LAG_MIN);
-// the length slider: log from 1.5 circumferences (where the other axis
+// the length slider runs from 1.5 circumferences (where the other axis
 // sits) to 60, past the tube's node cap — to feel where it gives out
 const K_MIN = 1.5, K_MAX = 60;
-const tunnelLenSlider = document.getElementById('tunnellen');
-const tunnelLenAmountEl = document.getElementById('tunnellenamount');
-const tunnelLenRow = document.getElementById('tunnellenrow');
-const kFromSlider = (v) => K_MIN * Math.pow(K_MAX / K_MIN, v);
-const kToSlider = (k) => Math.log(Math.max(K_MIN, Math.min(K_MAX, k)) / K_MIN) / Math.log(K_MAX / K_MIN);
+// the panel's sliders, bound in initTunnel
+let tunnelControls = [];
 const refreshTunnel = () => {
-  tunnelSlider.value = tunnelToSlider(Math.max(TUNNEL_MIN, Math.min(TUNNEL_MAX, S.tunnelC)));
-  tunnelAmountEl.textContent = `${fmtM(S.tunnelC)} around`;
-  tunnelLagSlider.value = lagToSlider(S.tunnelLag);
-  tunnelLagAmountEl.textContent = S.tunnelLag > 0 ? `${S.tunnelLag.toFixed(S.tunnelLag < 1 ? 2 : 1)} s to turn` : 'turns at once';
+  for (const refresh of tunnelControls) refresh();
   tunnelAxisBtn.textContent = S.tunnelAcross ? 'forward and backward' : 'left to right';
-  tunnelLenSlider.value = kToSlider(S.tunnelK);
-  tunnelLenAmountEl.textContent = `${fmtM(S.tunnelK * S.tunnelC)} ahead · ${S.tunnelK.toFixed(S.tunnelK < 10 ? 1 : 0)}×`;
   tunnelLenRow.style.display = S.tunnelAcross ? 'none' : '';
 };
 // going in, the ground rolls up around you from flat; going out it
@@ -123,23 +104,19 @@ const initTunnel = () => {
     canvas.focus();
   });
 
-  tunnelSlider.addEventListener('input', () => {
-    S.tunnelC = tunnelFromSlider(+tunnelSlider.value);
-    view.setTunnelCircumference(S.tunnelC);
-    refreshTunnel();
-    saveView();
-  });
-  tunnelLagSlider.addEventListener('input', () => {
-    S.tunnelLag = lagFromSlider(+tunnelLagSlider.value);
-    view.setTunnelLag(S.tunnelLag * 1000);
-    refreshTunnel();
-    saveView();
-  });
-  tunnelLenSlider.addEventListener('input', () => {
-    S.tunnelK = kFromSlider(+tunnelLenSlider.value);
-    view.setTunnelLength(S.tunnelK);
-    refreshTunnel();
-    saveView();
-  });
+  // each slider hands its own setting to the engine
+  const applied = (send) => () => { send(); refreshTunnel(); saveView(); };
+  tunnelControls = [
+    bindRange('tunnelc', S, 'tunnelC', { scale: logScale(200, 20000),
+      apply: applied(() => view.setTunnelCircumference(S.tunnelC)),
+      fmt: (c) => `${fmtM(c)} around`, amount: 'tunnelamount' }),
+    // zero at its left end, then a tenth of a second to ten
+    bindRange('tunnellag', S, 'tunnelLag', { scale: logScale(0.1, 10, { off: true }),
+      apply: applied(() => view.setTunnelLag(S.tunnelLag * 1000)),
+      fmt: (t) => t > 0 ? `${t.toFixed(t < 1 ? 2 : 1)} s to turn` : 'turns at once' }),
+    bindRange('tunnellen', S, 'tunnelK', { scale: logScale(K_MIN, K_MAX),
+      apply: applied(() => view.setTunnelLength(S.tunnelK)),
+      fmt: (k) => `${fmtM(k * S.tunnelC)} ahead · ${k.toFixed(k < 10 ? 1 : 0)}×` }),
+  ];
   document.getElementById('tunneloff').addEventListener('click', () => setTunnel(false));
 };

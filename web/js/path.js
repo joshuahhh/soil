@@ -7,8 +7,10 @@ import { loadStore, saveStore } from './persist.js';
 import { idbGet, idbPutChecked, idbDel } from './idb.js';
 import { view, canvas } from './engine.js';
 import { map } from './map.js';
+import { updateHint } from './hud.js';
 import { keys } from './input.js';
 import { mode, ortho, defineMode, setMode } from './mode.js';
+import { percent, bindRange, bindCheck } from './ui.js';
 
 export { path, parseGpx, pushPath, savePath, setPath, loadGpxFile, spine, buildSpine,
   debugSmooth, setDebugSmooth, setFollow, toggleFollow, followStep, initPath };
@@ -180,14 +182,13 @@ const flyToPathStart = () => {
   canvas.focus();
 };
 
+let styleControls = []; // bound in initPath
 const refreshPathPanel = () => {
   document.body.classList.toggle('path', !!path);
   pathEls.color.value = pathStyle.color;
-  pathEls.opacity.value = Math.round(pathStyle.opacity * 100);
-  pathEls.width.value = pathStyle.width;
+  for (const refresh of styleControls) refresh();
   // no elevations in the file means no alternative to draping: show it on
   // and locked rather than offering a switch that would bury the track
-  pathEls.drape.checked = pathStyle.drape;
   pathEls.drape.disabled = !!path && !path.hasEle;
   pathEls.drape.parentElement.title = pathEls.drape.disabled
     ? 'this file records no elevations, so the track has to be laid on the mesh'
@@ -237,6 +238,7 @@ const setPath = (parsed, fresh) => {
   pushPath();
   refreshPathPanel();
   savePath();
+  updateHint(); // V comes and goes with the track
 };
 const clearPath = () => {
   setFollow(false);
@@ -555,26 +557,14 @@ const initPath = () => {
   });
 
   pathEls.close.addEventListener('click', clearPath);
-  pathEls.color.addEventListener('input', () => {
-    pathStyle.color = pathEls.color.value;
-    applyPathStyle();
-    savePath();
-  });
-  pathEls.opacity.addEventListener('input', () => {
-    pathStyle.opacity = +pathEls.opacity.value / 100;
-    applyPathStyle();
-    savePath();
-  });
-  pathEls.width.addEventListener('input', () => {
-    pathStyle.width = +pathEls.width.value;
-    applyPathStyle();
-    savePath();
-  });
-  pathEls.drape.addEventListener('change', () => {
-    pathStyle.drape = pathEls.drape.checked;
-    applyPathStyle();
-    savePath();
-  });
+  const restyle = () => { applyPathStyle(); savePath(); };
+  // the swatch is a string, not a number: bound by hand
+  pathEls.color.addEventListener('input', () => { pathStyle.color = pathEls.color.value; restyle(); });
+  styleControls = [
+    bindRange('pathopacity', pathStyle, 'opacity', { scale: percent, apply: restyle }),
+    bindRange('pathwidth', pathStyle, 'width', { apply: restyle }),
+    bindCheck('pathdrape', pathStyle, 'drape', restyle),
+  ];
   pathEls.fit.addEventListener('click', fitPath);
   pathEls.go.addEventListener('click', flyToPathStart);
   pathEls.follow.addEventListener('click', toggleFollow);
