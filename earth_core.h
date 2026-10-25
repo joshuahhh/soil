@@ -667,7 +667,7 @@ struct earth_core_t {
 		ctx.accum.near = (float)near; ctx.accum.far = (float)far; ctx.accum.ortho = cam.ortho;
 		ctx.accum.tan_half = (float)(cam.ortho ? ortho_half_extent : tan(cam.fov / 2.0));
 		ctx.accum.aspect = aspect_ratio;
-		ctx.accum.vis = haze_on && !tube.tube_on ? (float)visibility_m : 0.0f;
+		ctx.accum.vis = haze_on && !tube.on ? (float)visibility_m : 0.0f;
 
 		Matrix4d key_vp = projection * key_view; // before the jitter
 		// the sub-pixel jitter (glamour mode): a shift of the whole image by
@@ -760,7 +760,7 @@ struct earth_core_t {
 
 		// is last frame's walk still the answer? (see the members)
 		auto epoch = g_tree_epoch.load();
-		auto cacheable = !tube.tube_on && !tube.tunnel_on;
+		auto cacheable = !tube.on && !tube.tunnel_on;
 		walk_key_t key = { f.key_vp, cam.eye, width, height, epoch, lod_scale, ground_column_on };
 		auto reuse = cacheable && walk_cache_valid && walk_key == key;
 		walk_reused = reuse;
@@ -868,7 +868,7 @@ struct earth_core_t {
 					// drawn both ways
 					auto in_view = false;
 					if (in_column) {
-					} else if (tube.tube_on && !tube.tube_body) {
+					} else if (tube.on && !tube.body) {
 						if (!tn.in_rect) continue;
 					} else {
 						in_view = obb_frustum_outside != classifyObbFrustum(&node->obb, frustum_planes)
@@ -932,18 +932,18 @@ struct earth_core_t {
 					}
 
 					next_valid.push_back(std::make_pair(nxt, bulk));
-					if (tube.tube_on) next_want.push_back(tube_want);
+					if (tube.on) next_want.push_back(tube_want);
 
 					if (node->can_have_data) {
 						if (node->last_wanted_ms != prev_walk_ms) node->first_wanted_ms = now_ms;
 						node->last_wanted_ms = now_ms;
 						potential_nodes.emplace_back(std::move(nxt), node);
-						if (tube.tube_on) potential_want.push_back(tube_want);
+						if (tube.on) potential_want.push_back(tube_want);
 					}
 				}
 			}
 			if (next_valid.size() == 0) break;
-			if (tube.tube_on) {
+			if (tube.on) {
 				tubeNodeBackstop(level_pot_start, next_valid, next_want);
 				if (next_valid.size() == 0) break;
 			}
@@ -1028,7 +1028,7 @@ struct earth_core_t {
 			auto dist = fmax(0.0, (node->obb.center - eye).norm() - radius);
 			// (in tube mode the walk measured the distance through the
 			// roll, which is what proximity means there)
-			to_download.push_back({ tube.tube_on ? node->sched_pri : dist / (2 * radius), kv.first.size(), node });
+			to_download.push_back({ tube.on ? node->sched_pri : dist / (2 * radius), kv.first.size(), node });
 		}
 		std::sort(to_download.begin(), to_download.end(), [](const candidate_t &a, const candidate_t &b) {
 			// tiles containing the camera all have priority 0; coarse first there
@@ -1300,7 +1300,7 @@ struct earth_core_t {
 		auto near = f.near, far = f.far, ortho_half_extent = f.ortho_half_extent;
 		auto aspect_ratio = f.aspect_ratio;
 		auto &local_up = atm.local_up, &east = atm.east, &sun_dir = atm.sun_dir;
-		auto shadows_live = shadows_on && !tube.tube_on && sun_el > 0.5 * M_PI / 180.0;
+		auto shadows_live = shadows_on && !tube.on && sun_el > 0.5 * M_PI / 180.0;
 		float shadow_box_f[4] = {1, 1, 0, 1};
 		Matrix4d sun_view = Matrix4d::Identity();
 		double shadow_texel_m = 1;
@@ -1404,7 +1404,7 @@ struct earth_core_t {
 					bindAndDrawMesh(mesh, self_mask, stale_mask, ctx);
 				}
 			};
-			if (tube.tube_on && tube.tube_body) tube.drawBodyNode(ctx, node->obb, draw);
+			if (tube.on && tube.body) tube.drawBodyNode(ctx, node->obb, draw);
 			else draw();
 		}
 	}
@@ -1434,7 +1434,7 @@ struct earth_core_t {
 	// and a track drawn in globe space would hang in the air where the
 	// terrain used to be
 	void drawPath(render_ctx_t &ctx, const frame_t &f) {
-		if (path_up.empty() || tube.tube_on || path_rgba[3] <= 0) return;
+		if (path_up.empty() || tube.on || path_rgba[3] <= 0) return;
 		pathProbeGround(); // against this frame's drawn set
 		// draping keeps arriving for seconds after a drop, and rebuilding
 		// a long track's ribbon every frame to show one more measured
@@ -1501,7 +1501,7 @@ struct earth_core_t {
 		// long before full res. the host watches groundLocked, rolls the
 		// tube up, and the remaining detail streams into the rolled tube
 		if (tube.tunnel_on) tube.tunnelUpdate(cam, dt_ms);
-		else if (tube.tube_on && !tube.tube_ground_locked)
+		else if (tube.on && !tube.ground_locked)
 			tube.tubeLockGround(true);
 		uploads_this_frame = 0;
 		auto f = setupFrame(ctx, cam, width, height);

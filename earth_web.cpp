@@ -137,11 +137,11 @@ struct EarthView {
 	}
 	// rolling or unrolling switches the hug datum (sphere radius vs tube
 	// radial), so a locked gap from the other mode is meaningless: re-lock
-	void setTubeEnabled(bool on) { earth.tube.tube_on = on; follow_height = NAN; }
+	void setTubeEnabled(bool on) { earth.tube.on = on; follow_height = NAN; }
 	// force the ground measurement with whatever mesh is resident — the
 	// host's escape hatch when a stuck download keeps coverage incomplete
 	void lockTubeGround() { earth.tube.tubeLockGround(false); }
-	void setTubeCurl(double c) { earth.tube.tube_curl = fmax(0.0, fmin(c, 1.0)); }
+	void setTubeCurl(double c) { earth.tube.curl = fmax(0.0, fmin(c, 1.0)); }
 
 	// body mode (see earth_tube.h): the rect wrapped onto a figure rather
 	// than rolled into a cylinder. the host bakes the figure's geometry
@@ -173,7 +173,7 @@ struct EarthView {
 	}
 	bool bodyReady() { return earth.tube.body_w > 1 && earth.tube.body_h > 1; }
 	// which shape the rect's roll goes to; takes effect with the next frame
-	void setTubeBody(bool on) { earth.tube.tube_body = on; follow_height = NAN; }
+	void setTubeBody(bool on) { earth.tube.body = on; follow_height = NAN; }
 
 	// tunnel mode (see earth_tube tunnelUpdate): the tube that follows the
 	// camera. flight is the ordinary ground-frame kind; the shader's roll
@@ -182,8 +182,8 @@ struct EarthView {
 		earth.tube.tunnel_circumference = fmax(50.0, circumference);
 		if (on && !earth.tube.tunnel_on) { earth.tube.tunnel_ground_measured = false; earth.tube.tunnel_heading_set = false; }
 		earth.tube.tunnel_on = on;
-		earth.tube.tube_on = on;
-		earth.tube.tube_ground_locked = on;
+		earth.tube.on = on;
+		earth.tube.ground_locked = on;
 		camera.airplane = false;
 		follow_height = NAN;
 		if (on) earth.tube.tunnelUpdate(camera, 0);
@@ -225,7 +225,7 @@ struct EarthView {
 	// null outside tube mode — hosts fall back to getPose for the marker
 	val getTubePose() {
 		double lat, lon, heading;
-		auto ok = earth.tube.tube_body
+		auto ok = earth.tube.body
 			? earth.tube.bodyPose(camera.eye, camera.direction, lat, lon, heading)
 			: earth.tube.tubePose(camera.eye, camera.direction, lat, lon, heading);
 		if (!ok) return val::null();
@@ -238,15 +238,15 @@ struct EarthView {
 
 	val getTubeInfo() {
 		val o = val::object();
-		o.set("radius", earth.tube.tube_radius);
-		o.set("halfLen", earth.tube.tube_half_len);
-		o.set("halfWid", earth.tube.tube_half_wid);
+		o.set("radius", earth.tube.radius);
+		o.set("halfLen", earth.tube.half_len);
+		o.set("halfWid", earth.tube.half_wid);
 		// ground level at the rect center in the same terms as setPose's alt
 		// (meters above the planetoid sphere) — spawn heights add onto this.
 		// only meaningful once groundLocked (measured off the loaded mesh)
-		o.set("groundAlt", earth.tube.tube_ground_radius - planetRadius());
-		o.set("groundLocked", earth.tube.tube_ground_locked);
-		o.set("body", earth.tube.tube_body);
+		o.set("groundAlt", earth.tube.ground_radius - planetRadius());
+		o.set("groundLocked", earth.tube.ground_locked);
+		o.set("body", earth.tube.body);
 		// last walk's want/have node counts — in tube mode that's exactly
 		// the rect's download progress
 		o.set("nodesWanted", earth.stat.nodes_wanted);
@@ -740,7 +740,7 @@ struct EarthView {
 	// the rolled tube's warp is one. the reported lat/lon/alt is spherical, so
 	// the host can rebuild the exact ecef point as geoUp(lat,lon)*(R+alt)
 	val pickNdc(double nx, double ny) {
-		if (!earth.ready() || camera.ortho || earth.tube.tube_on) return val::null();
+		if (!earth.ready() || camera.ortho || earth.tube.on) return val::null();
 		int w, h;
 		emscripten_webgl_get_drawing_buffer_size(gl, &w, &h);
 		if (w <= 0 || h <= 0) return val::null();
@@ -798,7 +798,7 @@ struct EarthView {
 		// branch only turns the head. the tunnel is not this: it flies
 		// ground-frame, and its hug is the ordinary one over the unrolled
 		// ground, which the roll leaves in place at the tube's bottom
-		auto tube_hugging = terrain_follow && earth.tube.tube_on && !earth.tube.tube_body && camera.airplane;
+		auto tube_hugging = terrain_follow && earth.tube.on && !earth.tube.body && camera.airplane;
 		// until the gap locks (wall below measurable), tube G flies as a
 		// plain airplane — never strand the camera unable to move
 		auto tube_locked = tube_hugging && !isnan(follow_height);
@@ -858,16 +858,16 @@ struct EarthView {
 				Vector3d sideways = camera.direction.cross(up);
 				// looking straight at the wall or the axis: any horizontal
 				// will do, take the axial one
-				if (sideways.norm() < 1e-9) sideways = earth.tube.tube_axis;
+				if (sideways.norm() < 1e-9) sideways = earth.tube.axis;
 				sideways.normalize();
 				Vector3d horizontal = up.cross(sideways).normalized();
 				Vector3d step = (fwd * horizontal + lat * sideways) * mag;
 				// advance the cylindrical coordinates by the step's tangent
 				// components; the angle moves by arc length over the radius
 				// kept inside: the walk stops at the tube's mouths
-				auto x_max = fmax(0.0, earth.tube.tube_half_len - 2.0);
-				auto x = fmax(-x_max, fmin(x_max, c.x + step.dot(earth.tube.tube_axis)));
-				Vector3d tangential = earth.tube.tube_axis.cross(c.radial);
+				auto x_max = fmax(0.0, earth.tube.half_len - 2.0);
+				auto x = fmax(-x_max, fmin(x_max, c.x + step.dot(earth.tube.axis)));
+				Vector3d tangential = earth.tube.axis.cross(c.radial);
 				auto theta = c.theta + step.dot(tangential) / fmax(1.0, c.rho);
 				follow_height = fmax(2.0, follow_height + vert * mag);
 				// glue: remeasure the wall under the new footprint and ease
@@ -882,7 +882,7 @@ struct EarthView {
 				// traveled, so a horizontal gaze stays horizontal all the
 				// way around the loop (walking the full circumference is one
 				// 2*pi rotation about the axis, as it should be)
-				AngleAxisd turn(theta - c.theta, earth.tube.tube_axis);
+				AngleAxisd turn(theta - c.theta, earth.tube.axis);
 				camera.direction = (turn * camera.direction).normalized();
 				camera.body_up = (turn * camera.body_up).normalized();
 				// level to the cylinder: up is inward radial, eased so
