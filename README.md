@@ -460,7 +460,7 @@ tiles under and behind the camera that weren't on screen, and turning the
 tunnel on went blurry for seconds (the lod overlay showed it: everything in
 view yellow, *not yet requested*). Now the view in front resolves first.
 
-`earth_core::bodyWarp` is the CPU twin the lod walk measures distances
+`tube_t::bodyWarp` is the CPU twin the lod walk measures distances
 through, and the map marker is placed by the nearest skin cell to the camera,
 unwrapped to its spot on the rect.
 

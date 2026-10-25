@@ -132,18 +132,18 @@ struct EarthView {
 	// slab -> closed tube. getTubeInfo reports the derived geometry so the
 	// host can place the camera (radius = tube axis height)
 	void setTubeRect(double lat0, double lon0, double lat1, double lon1, bool ewAxis) {
-		earth.setTubeRect(lat0 * M_PI / 180.0, lon0 * M_PI / 180.0,
+		earth.tube.setTubeRect(lat0 * M_PI / 180.0, lon0 * M_PI / 180.0,
 			lat1 * M_PI / 180.0, lon1 * M_PI / 180.0, ewAxis);
 	}
 	// rolling or unrolling switches the hug datum (sphere radius vs tube
 	// radial), so a locked gap from the other mode is meaningless: re-lock
-	void setTubeEnabled(bool on) { earth.tube_on = on; follow_height = NAN; }
+	void setTubeEnabled(bool on) { earth.tube.tube_on = on; follow_height = NAN; }
 	// force the ground measurement with whatever mesh is resident — the
 	// host's escape hatch when a stuck download keeps coverage incomplete
-	void lockTubeGround() { earth.tubeLockGround(false); }
-	void setTubeCurl(double c) { earth.tube_curl = fmax(0.0, fmin(c, 1.0)); }
+	void lockTubeGround() { earth.tube.tubeLockGround(false); }
+	void setTubeCurl(double c) { earth.tube.tube_curl = fmax(0.0, fmin(c, 1.0)); }
 
-	// body mode (see earth_core.h): the rect wrapped onto a figure rather
+	// body mode (see earth_tube.h): the rect wrapped onto a figure rather
 	// than rolled into a cylinder. the host bakes the figure's geometry
 	// image and hands it over through these: bodyBuffer allocates a w×h
 	// image and returns views onto both planes (positions, normals; four
@@ -153,81 +153,81 @@ struct EarthView {
 	val bodyBuffer(int w, int h) {
 		w = std::max(2, std::min(w, 4096));
 		h = std::max(2, std::min(h, 4096));
-		earth.body_w = w;
-		earth.body_h = h;
-		earth.body_pos.assign((size_t)w * h * 4, 0.0f);
-		earth.body_nrm.assign((size_t)w * h * 4, 0.0f);
+		earth.tube.body_w = w;
+		earth.tube.body_h = h;
+		earth.tube.body_pos.assign((size_t)w * h * 4, 0.0f);
+		earth.tube.body_nrm.assign((size_t)w * h * 4, 0.0f);
 		val o = val::object();
-		o.set("pos", val(emscripten::typed_memory_view(earth.body_pos.size(), earth.body_pos.data())));
-		o.set("nrm", val(emscripten::typed_memory_view(earth.body_nrm.size(), earth.body_nrm.data())));
+		o.set("pos", val(emscripten::typed_memory_view(earth.tube.body_pos.size(), earth.tube.body_pos.data())));
+		o.set("nrm", val(emscripten::typed_memory_view(earth.tube.body_nrm.size(), earth.tube.body_nrm.data())));
 		return o;
 	}
-	// the loop bands, see earth_core body_bands: legs below v = split, arm
+	// the loop bands, see earth_tube body_bands: legs below v = split, arm
 	// rows v in [arm_lo, arm_hi), the arms' share of u
 	void bodyCommit(double split, double arm_lo, double arm_hi, double arm_u) {
-		earth.body_bands[0] = split;
-		earth.body_bands[1] = arm_lo;
-		earth.body_bands[2] = arm_hi;
-		earth.body_bands[3] = arm_u;
-		earth.body_dirty = true;
+		earth.tube.body_bands[0] = split;
+		earth.tube.body_bands[1] = arm_lo;
+		earth.tube.body_bands[2] = arm_hi;
+		earth.tube.body_bands[3] = arm_u;
+		earth.tube.body_dirty = true;
 	}
-	bool bodyReady() { return earth.body_w > 1 && earth.body_h > 1; }
+	bool bodyReady() { return earth.tube.body_w > 1 && earth.tube.body_h > 1; }
 	// which shape the rect's roll goes to; takes effect with the next frame
-	void setTubeBody(bool on) { earth.tube_body = on; follow_height = NAN; }
+	void setTubeBody(bool on) { earth.tube.tube_body = on; follow_height = NAN; }
 
-	// tunnel mode (see earth_core tunnelUpdate): the tube that follows the
+	// tunnel mode (see earth_tube tunnelUpdate): the tube that follows the
 	// camera. flight is the ordinary ground-frame kind; the shader's roll
 	// and the rect-driven node selection are the tube's
 	void setTunnel(bool on, double circumference) {
-		earth.tunnel_circumference = fmax(50.0, circumference);
-		if (on && !earth.tunnel_on) { earth.tunnel_ground_measured = false; earth.tunnel_heading_set = false; }
-		earth.tunnel_on = on;
-		earth.tube_on = on;
-		earth.tube_ground_locked = on;
+		earth.tube.tunnel_circumference = fmax(50.0, circumference);
+		if (on && !earth.tube.tunnel_on) { earth.tube.tunnel_ground_measured = false; earth.tube.tunnel_heading_set = false; }
+		earth.tube.tunnel_on = on;
+		earth.tube.tube_on = on;
+		earth.tube.tube_ground_locked = on;
 		camera.airplane = false;
 		follow_height = NAN;
-		if (on) earth.tunnelUpdate(camera, 0);
+		if (on) earth.tube.tunnelUpdate(camera, 0);
 	}
 	void setTunnelCircumference(double c) {
-		earth.tunnel_circumference = fmax(50.0, c);
+		earth.tube.tunnel_circumference = fmax(50.0, c);
 	}
 	// which way the roll goes: across the heading (the ground ahead curls
 	// up in front of you) or around it (you look down the pipe)
 	void setTunnelAcross(bool across) {
-		earth.tunnel_across = across;
-		if (earth.tunnel_on) earth.tunnelUpdate(camera, 0);
+		earth.tube.tunnel_across = across;
+		if (earth.tube.tunnel_on) earth.tube.tunnelUpdate(camera, 0);
 	}
 	// how far the pipe runs each way when looking down it, in circumferences
 	void setTunnelLength(double k) {
-		earth.tunnel_length = fmax(1.0, k);
-		if (earth.tunnel_on) earth.tunnelUpdate(camera, 0);
+		earth.tube.tunnel_length = fmax(1.0, k);
+		if (earth.tube.tunnel_on) earth.tube.tunnelUpdate(camera, 0);
 	}
 	// how slowly the tube's heading follows the camera's (ms; 0 at once)
 	void setTunnelLag(double ms) {
-		earth.tunnel_lag_ms = fmax(0.0, ms);
+		earth.tube.tunnel_lag_ms = fmax(0.0, ms);
 	}
 	val getTunnelInfo() {
 		val o = val::object();
-		o.set("on", earth.tunnel_on);
-		o.set("circumference", earth.tunnel_circumference);
-		o.set("across", earth.tunnel_across);
-		o.set("lagMs", earth.tunnel_lag_ms);
-		o.set("length", earth.tunnel_length);
-		o.set("radius", earth.tunnel_circumference / (2.0 * M_PI));
-		o.set("groundAlt", earth.tunnel_ground_radius - planetRadius());
-		o.set("groundMeasured", earth.tunnel_ground_measured);
+		o.set("on", earth.tube.tunnel_on);
+		o.set("circumference", earth.tube.tunnel_circumference);
+		o.set("across", earth.tube.tunnel_across);
+		o.set("lagMs", earth.tube.tunnel_lag_ms);
+		o.set("length", earth.tube.tunnel_length);
+		o.set("radius", earth.tube.tunnel_circumference / (2.0 * M_PI));
+		o.set("groundAlt", earth.tube.tunnel_ground_radius - planetRadius());
+		o.set("groundMeasured", earth.tube.tunnel_ground_measured);
 		o.set("nodesWanted", earth.stat.nodes_wanted);
 		o.set("nodesLoaded", earth.stat.nodes_loaded);
 		return o;
 	}
-	// the camera in unrolled tube coordinates (see earth_core::tubePose):
+	// the camera in unrolled tube coordinates (see tube_t::tubePose):
 	// where on the original rect the imagery around the camera came from.
 	// null outside tube mode — hosts fall back to getPose for the marker
 	val getTubePose() {
 		double lat, lon, heading;
-		auto ok = earth.tube_body
-			? earth.bodyPose(camera.eye, camera.direction, lat, lon, heading)
-			: earth.tubePose(camera.eye, camera.direction, lat, lon, heading);
+		auto ok = earth.tube.tube_body
+			? earth.tube.bodyPose(camera.eye, camera.direction, lat, lon, heading)
+			: earth.tube.tubePose(camera.eye, camera.direction, lat, lon, heading);
 		if (!ok) return val::null();
 		val o = val::object();
 		o.set("lat", lat * 180.0 / M_PI);
@@ -238,15 +238,15 @@ struct EarthView {
 
 	val getTubeInfo() {
 		val o = val::object();
-		o.set("radius", earth.tube_radius);
-		o.set("halfLen", earth.tube_half_len);
-		o.set("halfWid", earth.tube_half_wid);
+		o.set("radius", earth.tube.tube_radius);
+		o.set("halfLen", earth.tube.tube_half_len);
+		o.set("halfWid", earth.tube.tube_half_wid);
 		// ground level at the rect center in the same terms as setPose's alt
 		// (meters above the planetoid sphere) — spawn heights add onto this.
 		// only meaningful once groundLocked (measured off the loaded mesh)
-		o.set("groundAlt", earth.tube_ground_radius - planetRadius());
-		o.set("groundLocked", earth.tube_ground_locked);
-		o.set("body", earth.tube_body);
+		o.set("groundAlt", earth.tube.tube_ground_radius - planetRadius());
+		o.set("groundLocked", earth.tube.tube_ground_locked);
+		o.set("body", earth.tube.tube_body);
 		// last walk's want/have node counts — in tube mode that's exactly
 		// the rect's download progress
 		o.set("nodesWanted", earth.stat.nodes_wanted);
@@ -438,7 +438,7 @@ struct EarthView {
 		earth.ground_column_on = terrain_follow && !camera.ortho && !camera.airplane;
 		earth.ground_column_point = camera.eye;
 		// the clear colour (the tunnel down the heading dims it to black: see tunnelSkyDark)
-		auto dark = earth.tunnelSkyDark(camera.eye);
+		auto dark = earth.tube.tunnelSkyDark(camera.eye);
 		auto sky = sky_color;
 		if (dark > 0) {
 			auto k = 1.0 - dark;
@@ -740,7 +740,7 @@ struct EarthView {
 	// the rolled tube's warp is one. the reported lat/lon/alt is spherical, so
 	// the host can rebuild the exact ecef point as geoUp(lat,lon)*(R+alt)
 	val pickNdc(double nx, double ny) {
-		if (!earth.ready() || camera.ortho || earth.tube_on) return val::null();
+		if (!earth.ready() || camera.ortho || earth.tube.tube_on) return val::null();
 		int w, h;
 		emscripten_webgl_get_drawing_buffer_size(gl, &w, &h);
 		if (w <= 0 || h <= 0) return val::null();
@@ -798,7 +798,7 @@ struct EarthView {
 		// branch only turns the head. the tunnel is not this: it flies
 		// ground-frame, and its hug is the ordinary one over the unrolled
 		// ground, which the roll leaves in place at the tube's bottom
-		auto tube_hugging = terrain_follow && earth.tube_on && !earth.tube_body && camera.airplane;
+		auto tube_hugging = terrain_follow && earth.tube.tube_on && !earth.tube.tube_body && camera.airplane;
 		// until the gap locks (wall below measurable), tube G flies as a
 		// plain airplane — never strand the camera unable to move
 		auto tube_locked = tube_hugging && !isnan(follow_height);
@@ -824,7 +824,7 @@ struct EarthView {
 				// brings you down into it if you were above). the floor's
 				// two meters win where the two meet
 				double ceiling;
-				if (earth.tunnelCeilingRadius(ceiling))
+				if (earth.tube.tunnelCeilingRadius(ceiling))
 					follow_height = fmin(follow_height, ceiling - 2.0 - g);
 				follow_height = fmax(2.0, follow_height);
 				// ease onto the target height so rooftop edges read as a
@@ -835,13 +835,13 @@ struct EarthView {
 			}
 		}
 		if (tube_hugging) {
-			auto c = earth.tubeCyl(camera.eye);
+			auto c = earth.tube.tubeCyl(camera.eye);
 			double rho_wall;
 			if (!tube_locked) {
 				// the gap locks to the current height above the wall on the
 				// first frame that can measure it; the walker takes over
 				// next frame
-				if (earth.tubeWallRho(c.x, c.theta, rho_wall))
+				if (earth.tube.tubeWallRho(c.x, c.theta, rho_wall))
 					follow_height = fmax(2.0, rho_wall - c.rho);
 			} else {
 				// ground-frame cruise, transposed: forward/strafe slide along
@@ -858,16 +858,16 @@ struct EarthView {
 				Vector3d sideways = camera.direction.cross(up);
 				// looking straight at the wall or the axis: any horizontal
 				// will do, take the axial one
-				if (sideways.norm() < 1e-9) sideways = earth.tube_axis;
+				if (sideways.norm() < 1e-9) sideways = earth.tube.tube_axis;
 				sideways.normalize();
 				Vector3d horizontal = up.cross(sideways).normalized();
 				Vector3d step = (fwd * horizontal + lat * sideways) * mag;
 				// advance the cylindrical coordinates by the step's tangent
 				// components; the angle moves by arc length over the radius
 				// kept inside: the walk stops at the tube's mouths
-				auto x_max = fmax(0.0, earth.tube_half_len - 2.0);
-				auto x = fmax(-x_max, fmin(x_max, c.x + step.dot(earth.tube_axis)));
-				Vector3d tangential = earth.tube_axis.cross(c.radial);
+				auto x_max = fmax(0.0, earth.tube.tube_half_len - 2.0);
+				auto x = fmax(-x_max, fmin(x_max, c.x + step.dot(earth.tube.tube_axis)));
+				Vector3d tangential = earth.tube.tube_axis.cross(c.radial);
 				auto theta = c.theta + step.dot(tangential) / fmax(1.0, c.rho);
 				follow_height = fmax(2.0, follow_height + vert * mag);
 				// glue: remeasure the wall under the new footprint and ease
@@ -875,14 +875,14 @@ struct EarthView {
 				// not a bounce. no measurement -> hold the current radius
 				auto k = 1.0 - exp(-dt_ms / 250.0);
 				auto rho = c.rho;
-				if (earth.tubeWallRho(x, theta, rho_wall))
+				if (earth.tube.tubeWallRho(x, theta, rho_wall))
 					rho += (fmax(1.0, rho_wall - follow_height) - rho) * k;
-				camera.eye = earth.tubeCylPoint(x, theta, rho);
+				camera.eye = earth.tube.tubeCylPoint(x, theta, rho);
 				// parallel transport: the frame turns with the angle it
 				// traveled, so a horizontal gaze stays horizontal all the
 				// way around the loop (walking the full circumference is one
 				// 2*pi rotation about the axis, as it should be)
-				AngleAxisd turn(theta - c.theta, earth.tube_axis);
+				AngleAxisd turn(theta - c.theta, earth.tube.tube_axis);
 				camera.direction = (turn * camera.direction).normalized();
 				camera.body_up = (turn * camera.body_up).normalized();
 				// level to the cylinder: up is inward radial, eased so
@@ -890,7 +890,7 @@ struct EarthView {
 				// hug owns the roll axis). the blend only degenerates with
 				// body up pointing straight at the wall; skip that frame
 				// rather than normalize a near-zero vector
-				Vector3d radial_new = earth.tubeCyl(camera.eye).radial;
+				Vector3d radial_new = earth.tube.tubeCyl(camera.eye).radial;
 				Vector3d bu = camera.body_up - (radial_new + camera.body_up) * k;
 				if (bu.norm() > 1e-6) camera.body_up = bu.normalized();
 			}

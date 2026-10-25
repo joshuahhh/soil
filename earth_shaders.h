@@ -406,7 +406,7 @@ uniform mediump int tube_pass; // 1 warped, 2 flat with the rect cut out
 // (u wraps, v clamps; float textures don't filter in webgl2) and
 // scaled so the rect's length is the figure's height. the terrain
 // height rides out along the normal, and body_curl eases the sheet
-// from flat to wrapped. the cpu twin is earth_core's bodyWarp
+// from flat to wrapped. the cpu twin is earth_tube's bodyWarp
 uniform bool body_on;
 uniform float body_curl;
 uniform vec4 body_bands; // (legs below v, arm rows v lo, v hi, arms' share of u)

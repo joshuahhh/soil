@@ -22,6 +22,7 @@
 #include <vector>
 #include "rocktree_util.h"
 #include "earth_camera.h"
+#include "earth_tube.h"
 
 struct earth_core_t {
 	rocktree_t *planetoid = nullptr;
@@ -103,431 +104,15 @@ struct earth_core_t {
 	bool ground_column_on = false;
 	Vector3d ground_column_point = Vector3d::Zero();
 
-	// tube mode: a geodetic rectangle of terrain is rolled into a cylinder in
-	// the vertex shader (the inception effect). selection switches from
-	// frustum culling + camera-driven lod to "every node whose obb touches
-	// the rect, finest resolution available" — the rect is fixed, so there is
-	// no point chasing the camera. curl animates flat slab (0) to fully
-	// closed tube (1); the roll radius is chosen so the rect's width is
-	// exactly the closed tube's circumference
-	bool tube_on = false;
-	double tube_curl = 1.0;
-	double tube_radius = 0; // fully-curled tube radius (m)
-	double tube_half_len = 0, tube_half_wid = 0; // rect half extents (m)
-	// where the wrapped range sits across the axis: the rect spans y in
-	// [offset - half_wid, offset + half_wid]. zero for a drawn rect (the
-	// seam straight up over its centre line); the tunnel's across mode
-	// sets a quarter circumference, which puts the seam level behind you
-	double tube_wid_offset = 0;
-	double tube_ground_radius = 0; // ecef radius of the ground at the rect center
-	bool tube_ground_locked = false; // true once measured from the loaded mesh
-	bool tube_ew_axis = true; // tube axis east-west (else north-south)
-	Vector3d tube_up = Vector3d::UnitZ(), tube_axis = Vector3d::UnitX();
-	Matrix4d tube_globe_from_local = Matrix4d::Identity();
-	Matrix4d tube_local_from_globe = Matrix4d::Identity();
-
-	// tunnel mode: the tube again, but the rect is not drawn on a map — it
-	// is wherever the camera is, and it turns with the heading. the camera
-	// flies as it does on the ground, at whatever height it likes, and the
-	// ground rolls up around it: with tunnel_across (the default) the ground
-	// ahead curls up in front of you, passes overhead — the seam, straight
-	// up — and comes down behind, so flying forward rolls the land past you
-	// and moves the seam's place on the ground along; without it the tube's
-	// axis runs along the heading instead, and you look down the pipe. one
-	// parameter, the circumference; the roll's radius is what puts the
-	// camera on the axis (height R above ground) or on the floor (low)
-	bool tunnel_on = false;
-	bool tunnel_across = true;
-	double tunnel_circumference = 2000;
-	// looking down the pipe: how far it runs each way, in circumferences
-	double tunnel_length = 10;
-	// the ground under the camera, eased: the rect's zero-point has to be
-	// the terrain surface (see setTubeRect), and here the rect moves every
-	// frame, so the lock is a continuous measurement rather than a one-off
-	double tunnel_ground_radius = 0;
-	bool tunnel_ground_measured = false;
-	// the heading the tube follows, low-passed: turn the camera and at
-	// first you fly through the old tube, which then swings round to line
-	// up with where you are going. the time constant in ms; 0 is immediate
-	double tunnel_lag_ms = 0;
-	Vector3d tunnel_heading = Vector3d::UnitX();
-	bool tunnel_heading_set = false;
-
-	// body mode: the tube's rect again — same selection, same ground lock,
-	// same curl — but instead of rolling into a cylinder the sheet is
-	// wrapped onto the skin of a figure standing on the rect's centre. the
-	// figure is a geometry image the host bakes (index.html bakeBody): a
-	// w×h grid over (u around the figure, v feet to head) of surface
-	// positions and outward unit normals, in body units — height 1, x
-	// across the figure, y up, z out of its front. the rect's length
-	// (along the tube axis) becomes the figure's height, so a rect-local
-	// point goes: x -> v, y -> u, and its terrain height z is pushed out
-	// along the normal, unscaled. positions and normals stay resident on
-	// the cpu for the lod walk's distances and the map marker
-	bool tube_body = false;
-	int body_w = 0, body_h = 0;
-	std::vector<float> body_pos, body_nrm; // w*h*4 each, row j = v, column i = u
-	bool body_dirty = false; // the gl copy is behind the cpu one
-	// the image's loops (index.html bakeBody): the rows below v = [0] are
-	// the two legs, half the width each; rows in v = [1]..[2] are arms and
-	// torso, the arms taking the outer [3] of the width each. the shader
-	// keeps its samples, and the terrain's triangles, within one loop
-	double body_bands[4] = {0, 0, 0, 0};
-
-	// the tunnel's frame from the camera: up at the eye; the axis sideways
-	// (heading x up, so the rect's across direction — the one that wraps —
-	// is the heading) or along the heading; ground measured under the eye.
-	// every frame, before the walk. the camera's own local position is
-	// then (0, 0, its height above that ground), which the roll leaves at
-	// the tube's bottom: the camera is inside wherever its altitude puts it
-	void tunnelUpdate(const camera_t &cam, double dt_ms) {
-		auto R_p = planetRadius();
-		Vector3d up = cam.eye.normalized();
-		Vector3d h = cam.direction - up * cam.direction.dot(up);
-		if (h.norm() < 1e-6 && tunnel_heading_set) h = tunnel_heading - up * tunnel_heading.dot(up); // straight down: keep the old heading
-		if (h.norm() < 1e-6) h = up.cross(Vector3d::UnitZ());
-		h.normalize();
-		// the low-pass: ease the followed heading toward the camera's,
-		// keeping it in the tangent plane. a 180° turn passes through
-		// zero length, so a vanished vector snaps to the new heading
-		if (tunnel_heading_set && tunnel_lag_ms > 0) {
-			Vector3d hd = tunnel_heading - up * tunnel_heading.dot(up);
-			hd += (h - hd) * (1.0 - exp(-dt_ms / tunnel_lag_ms));
-			h = hd.norm() > 1e-6 ? hd.normalized() : h;
-		}
-		tunnel_heading = h;
-		tunnel_heading_set = true;
-		auto C = fmax(50.0, tunnel_circumference);
-		// the ground: straight down against the drawn meshes (stored
-		// unrolled, so the ray is the same as flat mode's). hold the last
-		// measurement while the mesh under the camera is missing or coarse
-		if (!tunnel_ground_measured) tunnel_ground_radius = R_p;
-		auto g = groundRadiusUnder(cam.eye);
-		if (g > 0) {
-			if (!tunnel_ground_measured) { tunnel_ground_radius = g; tunnel_ground_measured = true; }
-			else tunnel_ground_radius += (g - tunnel_ground_radius) * (1.0 - exp(-dt_ms / 250.0));
-		}
-		Vector3d axis = tunnel_across ? h.cross(up).normalized() : h;
-		tube_up = up;
-		tube_axis = axis;
-		tube_ew_axis = fabs(axis.z()) < 0.7; // roughly east-west, for the map's arrows
-		tube_half_wid = C / 2;                 // across the axis: what wraps
-		// along it. looking down the pipe its far end is in view, so it
-		// runs a long way (tunnel_length) and fades to black (tunnelFade) —
-		// at 1.5 C the open end was a wide disc of sky a quarter of the way
-		// across the view; at 10 C it is a small dark spot
-		tube_half_len = fmax(500.0, (tunnel_across ? 1.5 : fmax(1.0, tunnel_length)) * C);
-		// across mode: the seam level behind you (theta = -90°), so the
-		// wrapped range runs from a quarter circumference behind to three
-		// quarters ahead. along the axis it stays overhead
-		tube_wid_offset = tunnel_across ? C / 4 : 0;
-		tube_radius = fmax(1.0, tube_half_wid / M_PI);
-		tube_ground_radius = tunnel_ground_radius;
-		tube_ground_locked = true;
-		tubeRebuild();
-	}
-
-	// where the walls start going dark, in rect units from the camera
-	// along the axis (the rect is centred on it): only looking down the
-	// pipe, where its ends are what you see
-	double tunnelFade() const {
-		return tube_on && tunnel_on && !tunnel_across ? 0.15 : 0.0;
-	}
-
-	// how far the sky is dimmed to black, 0..1: inside the closed tunnel
-	// down the heading the only sky in view is through the pipe's two
-	// ends, and blue there undoes the fade. eased in with the curl, and
-	// only while the camera is inside (below the roof, 2R above the floor)
-	double tunnelSkyDark(const Vector3d &eye) const {
-		if (tunnelFade() <= 0) return 0;
-		if (eye.norm() - tube_ground_radius > 2 * tube_radius) return 0;
-		auto c = fmax(0.0, fmin(tube_curl, 1.0));
-		return c * c;
-	}
-
-	// the roll's radius at the current curl: the closed tube's, growing as
-	// curl shrinks (flat at curl 0), floored so it stays finite
-	double tubeRollRadius() const { return tube_radius / fmax(tube_curl, 1e-3); }
-
-	void tubeRebuild() {
-		Matrix4d g = Matrix4d::Identity();
-		g.block<3,1>(0,0) = tube_axis;
-		g.block<3,1>(0,1) = tube_up.cross(tube_axis);
-		g.block<3,1>(0,2) = tube_up;
-		g.block<3,1>(0,3) = tube_up * tube_ground_radius;
-		tube_globe_from_local = g;
-		tube_local_from_globe = g.inverse();
-	}
-
-	// corners in radians, any order. the local frame sits on the ground at
-	// the rect center: x along the tube axis (the rect's longer dimension),
-	// y across it, z up. the z zero-point must be the actual terrain surface
-	// — the roll radius ρ = R - z, so a reference even tens of meters off
-	// shifts the whole sheet radially. staged: the sheet stays flat (curl 0,
-	// where the zero-point cancels out and tiles render exactly in place)
-	// while the rect loads, then tubeLockGround() measures the surface and
-	// the host rolls the tube up; the seed here only sets the height to
-	// cast measurement rays down from.
-	// small-rect tangent-plane approximation: over a few km the curvature
-	// drop below the plane is centimeters
-	void setTubeRect(double lat0, double lon0, double lat1, double lon1, bool ew_axis) {
-		auto R_p = planetRadius();
-		auto latc = (lat0 + lat1) / 2, lonc = (lon0 + lon1) / 2;
-		auto ns_half = R_p * fabs(lat1 - lat0) / 2;
-		auto ew_half = R_p * cos(latc) * fabs(lon1 - lon0) / 2;
-		Vector3d up(cos(latc) * cos(lonc), cos(latc) * sin(lonc), sin(latc));
-		Vector3d east(-sin(lonc), cos(lonc), 0);
-		Vector3d north = up.cross(east);
-		tube_ew_axis = ew_axis;
-		tube_up = up;
-		tube_axis = ew_axis ? east : north;
-		tube_half_len = ew_axis ? ew_half : ns_half;
-		tube_half_wid = ew_axis ? ns_half : ew_half;
-		tube_radius = fmax(1.0, tube_half_wid / M_PI); // 2*half_wid = 2*pi*R
-		tube_wid_offset = 0;
-		tube_ground_locked = false;
-		// seed at the sphere radius: measured (straight-down mesh probes at
-		// many levels and latitudes) the mesh datum IS the planetoid sphere,
-		// not the wgs84 ellipsoid — mesh hits come in at sphere + terrain
-		// height. the real zero-point still comes from tubeLockGround()
-		tube_ground_radius = R_p;
-		tubeRebuild();
-	}
-
-	// where the camera is in the rolled tube's own coordinates, unrolled
-	// back onto the rect: cylindrical coordinates around the tube axis
-	// (angle theta, axial x), mapped to the spot on the original rectangle
-	// whose imagery is wrapped there — what a 2d map should show in tube
-	// mode instead of the ecef point under the camera. the view direction
-	// unrolls by -theta the same way for the heading. degenerates smoothly
-	// to the ordinary pose as curl -> 0. angles in radians
-	bool tubePose(const Vector3d &eye, const Vector3d &direction,
-			double &lat, double &lon, double &heading) {
-		if (!tube_on || tube_radius <= 0) return false;
-		auto R_eff = tubeRollRadius();
-		Vector3d l = transformPoint(tube_local_from_globe, eye);
-		Vector3d d = (tube_local_from_globe
-			* Vector4d(direction.x(), direction.y(), direction.z(), 0.0)).head<3>();
-		auto theta = atan2(l.y(), R_eff - l.z());
-		auto y = theta * R_eff; // unrolled across-offset
-		// unrolled across-component of the view direction: its projection on
-		// the tangential direction at angle theta
-		auto dy = d.y() * cos(theta) + d.z() * sin(theta);
-		rectToGeo(l.x(), y, d.x(), dy, lat, lon, heading);
-		return true;
-	}
-
-	// a point on the unrolled rect (x along the axis, y across; a direction
-	// (dx, dy) in the same terms) to lat/lon/heading, for whatever
-	// direction the axis runs (a tunnel's follows the heading)
-	void rectToGeo(double x, double y, double dx, double dy,
-			double &lat, double &lon, double &heading) {
-		auto latc = asin(fmax(-1.0, fmin(1.0, tube_up.z())));
-		auto lonc = atan2(tube_up.y(), tube_up.x());
-		Vector3d east(-sin(lonc), cos(lonc), 0);
-		Vector3d north = tube_up.cross(east);
-		Vector3d across = tube_up.cross(tube_axis);
-		auto dE = x * tube_axis.dot(east) + y * across.dot(east);
-		auto dN = x * tube_axis.dot(north) + y * across.dot(north);
-		auto hE = dx * tube_axis.dot(east) + dy * across.dot(east);
-		auto hN = dx * tube_axis.dot(north) + dy * across.dot(north);
-		auto R_p = planetRadius();
-		lat = latc + dN / R_p;
-		lon = lonc + dE / (R_p * cos(latc));
-		heading = atan2(hE, hN);
-	}
-
-	// the body's geometry image, nearest texel: u wraps (the seam runs down
-	// the figure's back), v clamps (the crown and the soles). the shader
-	// interpolates; a texel is close enough for lod distances and the marker
-	void bodyTexel(int i, int j, Vector3d &p, Vector3d &n) const {
-		i = ((i % body_w) + body_w) % body_w;
-		j = std::max(0, std::min(j, body_h - 1));
-		auto k = (size_t)(j * body_w + i) * 4;
-		p = Vector3d(body_pos[k], body_pos[k + 1], body_pos[k + 2]);
-		n = Vector3d(body_nrm[k], body_nrm[k + 1], body_nrm[k + 2]);
-	}
-	// body units to the rect-local frame: the figure stands on the rect's
-	// centre, as tall as the rect is long, facing across it (+y). the same
-	// axis swap for directions, without the scale
-	Vector3d bodyToLocal(const Vector3d &b) const {
-		auto S = 2.0 * tube_half_len;
-		return Vector3d(S * b.x(), S * b.z(), S * b.y());
-	}
-	static Vector3d bodyDirToLocal(const Vector3d &n) {
-		return Vector3d(n.x(), n.z(), n.y());
-	}
-	// the body's counterpart of tubeWarp: a rect-local point onto the
-	// figure's skin, its terrain height pushed out along the normal, eased
-	// from the flat sheet by curl — the exact warp the shader applies
-	Vector3d bodyWarp(const Vector3d &l) const {
-		if (body_w < 2 || body_h < 2) return l;
-		auto u = (l.y() - tube_wid_offset) / (2.0 * tube_half_wid) + 0.5;
-		auto v = l.x() / (2.0 * tube_half_len) + 0.5;
-		Vector3d p, n;
-		bodyTexel((int)floor(u * body_w), (int)floor(v * body_h), p, n);
-		Vector3d w = bodyToLocal(p) + bodyDirToLocal(n) * l.z();
-		return l + (w - l) * fmax(0.0, fmin(tube_curl, 1.0));
-	}
-	// tubePose for the body: the texel whose skin is nearest the camera,
-	// unwrapped to its spot on the rect. a coarse scan of the image and a
-	// refinement around the best hit; the heading is the camera's own
-	bool bodyPose(const Vector3d &eye, const Vector3d &direction,
-			double &lat, double &lon, double &heading) {
-		if (!tube_on || !tube_body || body_w < 2 || body_h < 2) return false;
-		Vector3d l = transformPoint(tube_local_from_globe, eye);
-		auto best = 1e300;
-		int bi = 0, bj = 0;
-		auto consider = [&](int i, int j) {
-			Vector3d p, n;
-			bodyTexel(i, j, p, n);
-			auto d = (bodyToLocal(p) - l).squaredNorm();
-			if (d < best) { best = d; bi = i; bj = j; }
+	// the tube, tunnel and body modes (earth_tube.h), with the engine
+	// handed in for what they measure against the meshes
+	tube_t tube;
+	earth_core_t() {
+		tube.engine.planet_radius = [this] { return planetRadius(); };
+		tube.engine.mesh_hit = [this](const Vector3d &origin, const Vector3d &dir, Vector3d &hit, double &mpt) {
+			return raycast(origin, dir, hit, &mpt) == raycast_mesh;
 		};
-		auto step = std::max(1, body_w / 64);
-		for (auto j = 0; j < body_h; j += step)
-			for (auto i = 0; i < body_w; i += step) consider(i, j);
-		auto ci = bi, cj = bj;
-		for (auto j = cj - step; j <= cj + step; j++)
-			for (auto i = ci - step; i <= ci + step; i++) consider(i, j);
-		auto u = (((bi % body_w) + body_w) % body_w + 0.5) / body_w;
-		auto v = (std::max(0, std::min(bj, body_h - 1)) + 0.5) / body_h;
-		auto x = (v - 0.5) * 2.0 * tube_half_len;
-		auto y = tube_wid_offset + (u - 0.5) * 2.0 * tube_half_wid;
-		auto latc = asin(fmax(-1.0, fmin(1.0, tube_up.z())));
-		auto lonc = atan2(tube_up.y(), tube_up.x());
-		Vector3d east(-sin(lonc), cos(lonc), 0);
-		Vector3d north = tube_up.cross(east);
-		rectToGeo(x, y, 0, 0, lat, lon, heading);
-		heading = atan2(direction.dot(east), direction.dot(north));
-		return true;
-	}
-
-	// a rect-local point mapped onto the rolled tube, in the same local
-	// frame — the exact warp the vertex shader applies (rocktree_gl.h),
-	// so cpu-side distances match what is actually drawn. used by the lod
-	// walk to measure camera-to-node proximity through the roll: geometry
-	// across the tube's diameter is a couple of radii away (overhead), not
-	// half a circumference
-	Vector3d tubeWarp(const Vector3d &l) const {
-		auto R = tubeRollRadius();
-		auto th = l.y() / R;
-		auto rho = fmax(R - l.z(), 0.05 * R);
-		auto ze = R - rho;
-		auto hs = sin(0.5 * th);
-		return Vector3d(l.x(), rho * sin(th), 2.0 * R * hs * hs + ze * cos(th));
-	}
-
-	// does a node reach the rect? box test in the rect's local frame on
-	// the node's centre c, the obb conservatively widened to its bounding
-	// sphere (margin); z allows terrain heights (everest) plus a little
-	// below sea level. with a negative margin: is it wholly inside
-	bool tubeRectTouches(double margin, const Vector3d &c) const {
-		return !(fabs(c.x()) > tube_half_len + margin
-			|| fabs(c.y() - tube_wid_offset) > tube_half_wid + margin
-			|| c.z() > 9000 + margin || c.z() < -1500 - margin);
-	}
-
-	// the rolled tube's cylindrical coordinate system, for tube terrain hug
-	// (see earth_web fly): axial coordinate x along the tube axis, angle
-	// theta around it (0 at the wall's bottom, radial_l(theta) =
-	// (0, sin, -cos) in the rect-local frame), radial distance rho from the
-	// axis. the frame is right-handed with local +x = tube_axis, so a
-	// rotation by dtheta about tube_axis in globe space is exactly the
-	// transport that carries the frame at theta to the frame at theta+dtheta
-	struct tube_cyl_t {
-		double x, theta, rho;
-		Vector3d radial; // outward (toward the wall) unit radial, globe frame
-	};
-	tube_cyl_t tubeCyl(const Vector3d &p) const {
-		tube_cyl_t c;
-		auto R = tubeRollRadius();
-		Vector3d l = transformPoint(tube_local_from_globe, p);
-		c.x = l.x();
-		c.theta = atan2(l.y(), R - l.z());
-		c.rho = Vector2d(l.y(), l.z() - R).norm();
-		Vector3d radial_l(0.0, sin(c.theta), -cos(c.theta));
-		c.radial = tube_globe_from_local.block<3, 3>(0, 0) * radial_l;
-		return c;
-	}
-
-	// globe position of cylindrical (x, theta, rho)
-	Vector3d tubeCylPoint(double x, double theta, double rho) const {
-		auto R = tubeRollRadius();
-		return transformPoint(tube_globe_from_local, Vector3d(x, rho * sin(theta), R - rho * cos(theta)));
-	}
-
-	// the wall's radial distance at (x, theta): unroll the angle back onto
-	// the rect (the meshes are stored unrolled; only the shader rolls them)
-	// and raycast straight down from above any terrain, like tubeLockGround's
-	// probes. theta wraps so walking around a closed tube's seam continues
-	// seamlessly. false while the mesh there is missing or coarse filler
-	// (same gate as groundRadiusUnder): better to hold and wait than glide
-	// toward a surface that sits tens of meters off
-	bool tubeWallRho(double x, double theta, double &rho_wall) {
-		if (!tube_on || tube_radius <= 0) return false;
-		auto R = tubeRollRadius();
-		auto y = tube_wid_offset + remainder(theta - tube_wid_offset / R, 2.0 * M_PI) * R;
-		Vector3d origin = transformPoint(tube_globe_from_local, Vector3d(x, y, 10000.0));
-		Vector3d hit;
-		double mpt;
-		if (raycast(origin, -tube_up, hit, &mpt) != raycast_mesh) return false;
-		if (mpt > 10.0) return false;
-		auto z_ground = transformPoint(tube_local_from_globe, hit).z();
-		rho_wall = fmax(R - z_ground, 0.05 * R); // the warp's own clamp
-		return true;
-	}
-
-	// the tunnel's roof straight over the camera, as a globe radius: the
-	// camera sits at the tube's bottom (x = 0, theta = 0) and overhead is
-	// the wall at theta = pi — the ground there and whatever hangs from it.
-	// not measurable yet: the roof of flat ground. false until it closes,
-	// when there is no roof to be under
-	bool tunnelCeilingRadius(double &r) {
-		if (!tube_on || !tunnel_on || tube_curl < 0.999) return false;
-		auto R = tubeRollRadius();
-		double rho;
-		if (!tubeWallRho(0, M_PI, rho)) rho = R;
-		r = tube_ground_radius + R + rho;
-		return true;
-	}
-
-	// terrain elevation converges several lod levels before the imagery
-	// does: mesh at this resolution already carries the ground to within a
-	// few meters, so the roll can start ~two orders of magnitude fewer tiles
-	// in, and full res streams into the rolled tube afterwards
-	static constexpr double tube_lock_mpt = 4.0;
-
-	// the elevation analysis: raycast a 7x7 grid over the rect (cpu, against
-	// the resident meshes) and take the median hit radius as the zero-point
-	// — robust to a roof or treetop at any one sample. strict mode (retried
-	// every frame while loading) only locks once every sample hits mesh
-	// finer than tube_lock_mpt — that coverage test needs no download
-	// bookkeeping. non-strict is the host's timeout escape hatch: take the
-	// median of whatever is resident. the 0.9 keeps samples off the edges
-	void tubeLockGround(bool strict) {
-		std::vector<double> rs;
-		Vector3d across = tube_up.cross(tube_axis);
-		for (auto i = 0; i < 7; i++) {
-			for (auto j = 0; j < 7; j++) {
-				Vector3d p = tube_up * (tube_ground_radius + 10000.0)
-					+ tube_axis * ((i / 3.0 - 1.0) * 0.9 * tube_half_len)
-					+ across * (tube_wid_offset + (j / 3.0 - 1.0) * 0.9 * tube_half_wid);
-				Vector3d hit;
-				double mpt;
-				if (raycast(p, -tube_up, hit, &mpt) != raycast_mesh) {
-					if (strict) return; // a sample has no mesh yet
-					continue;
-				}
-				if (strict && mpt > tube_lock_mpt) return; // only coarse mesh here yet
-				rs.push_back(hit.norm());
-			}
-		}
-		if (rs.empty()) return; // nothing resident at all; retried next frame
-		std::nth_element(rs.begin(), rs.begin() + rs.size() / 2, rs.end());
-		tube_ground_radius = rs[rs.size() / 2];
-		tube_ground_locked = true;
-		tubeRebuild();
+		tube.engine.ground_radius_under = [this](const Vector3d &p) { return groundRadiusUnder(p); };
 	}
 
 	// download slots in flight, held from request through decode; the cap
@@ -1082,7 +667,7 @@ struct earth_core_t {
 		ctx.accum.near = (float)near; ctx.accum.far = (float)far; ctx.accum.ortho = cam.ortho;
 		ctx.accum.tan_half = (float)(cam.ortho ? ortho_half_extent : tan(cam.fov / 2.0));
 		ctx.accum.aspect = aspect_ratio;
-		ctx.accum.vis = haze_on && !tube_on ? (float)visibility_m : 0.0f;
+		ctx.accum.vis = haze_on && !tube.tube_on ? (float)visibility_m : 0.0f;
 
 		Matrix4d key_vp = projection * key_view; // before the jitter
 		// the sub-pixel jitter (glamour mode): a shift of the whole image by
@@ -1108,6 +693,52 @@ struct earth_core_t {
 	// a child's path is its parent's plus one of these
 	static inline const std::string octs[8] = { "0", "1", "2", "3", "4", "5", "6", "7" };
 
+	// tube mode's node-budget backstop, between two levels of the walk:
+	// distance lod bounds the set on its own for any sane rect (a floor
+	// level over the rect plus fine rings near the camera), but a
+	// degenerate rect or heavy zoom can overflow it. shed this level's
+	// least-wanted additions instead of breaking off the whole walk: a
+	// uniform break coarsens exactly the tiles with the highest demand (the
+	// zoomed-at building loses its lod as the fov narrows — backwards),
+	// while a want-ordered trim degrades everything evenly relative to its
+	// own target. reordering within one bfs level is fine: the draw loop
+	// only needs whole levels in order (children after parents when read
+	// backwards)
+	static constexpr size_t tube_node_cap = 3000;
+	void tubeNodeBackstop(size_t level_pot_start,
+			std::vector<std::pair<std::string, rocktree_t::bulk_t *>> &next_valid,
+			std::vector<double> &next_want) {
+		if (potential_nodes.size() <= tube_node_cap) return;
+		auto budget = tube_node_cap > level_pot_start
+			? tube_node_cap - level_pot_start : 0;
+		std::vector<size_t> idx(potential_nodes.size() - level_pot_start);
+		for (size_t i = 0; i < idx.size(); i++) idx[i] = level_pot_start + i;
+		std::sort(idx.begin(), idx.end(), [&](size_t a, size_t b) {
+			return potential_want[a] > potential_want[b]; });
+		// the weakest want that stays; nothing below it may descend
+		auto cutoff = budget > 0
+			? potential_want[idx[budget - 1]] : 1e300;
+		decltype(potential_nodes) kept_n(potential_nodes.begin(),
+			potential_nodes.begin() + level_pot_start);
+		std::vector<double> kept_w(potential_want.begin(),
+			potential_want.begin() + level_pot_start);
+		for (size_t i = 0; i < budget && i < idx.size(); i++) {
+			kept_n.push_back(std::move(potential_nodes[idx[i]]));
+			kept_w.push_back(potential_want[idx[i]]);
+		}
+		potential_nodes = std::move(kept_n);
+		potential_want = std::move(kept_w);
+		std::vector<std::pair<std::string, rocktree_t::bulk_t *>> nv;
+		std::vector<double> nw;
+		for (size_t i = 0; i < next_valid.size(); i++)
+			if (next_want[i] >= cutoff) {
+				nv.push_back(std::move(next_valid[i]));
+				nw.push_back(next_want[i]);
+			}
+		next_valid = std::move(nv);
+		next_want = std::move(nw);
+	}
+
 	// node culling and level of detail: a breadth-first walk of the tree
 	// that stamps what the view wants and collects the nodes and bulks it
 	// wants and doesn't have — or, when nothing it depends on has moved,
@@ -1129,7 +760,7 @@ struct earth_core_t {
 
 		// is last frame's walk still the answer? (see the members)
 		auto epoch = g_tree_epoch.load();
-		auto cacheable = !tube_on && !tunnel_on;
+		auto cacheable = !tube.tube_on && !tube.tunnel_on;
 		walk_key_t key = { f.key_vp, cam.eye, width, height, epoch, lod_scale, ground_column_on };
 		auto reuse = cacheable && walk_cache_valid && walk_key == key;
 		walk_reused = reuse;
@@ -1156,16 +787,8 @@ struct earth_core_t {
 			col_dir = -cup;
 		}
 
-		// the camera folded into the rect-local frame, for tube-mode lod
-		// distances (the camera flies inside the rolled tube, so its local
-		// position and view direction are already on the rolled side of
-		// the warp)
-		Vector3d tube_eye_local = Vector3d::Zero();
-		Vector3d tube_dir_local = Vector3d::UnitX();
-		if (tube_on) {
-			tube_eye_local = transformPoint(tube_local_from_globe, eye);
-			tube_dir_local = tube_local_from_globe.block<3, 3>(0, 0) * direction;
-		}
+		// the camera in the rect-local frame, for tube-mode lod distances
+		auto tv = tube.walkView(eye, direction);
 
 		std::vector<std::pair<std::string, rocktree_t::bulk_t *>> valid = { std::make_pair("", planetoid->root_bulk) };
 		decltype(valid) next_valid;
@@ -1235,9 +858,7 @@ struct earth_core_t {
 					// camera regardless of where the view points
 					auto in_column = ground_column_on
 						&& rayHitsObb(col_origin, col_dir, node->obb, INFINITY);
-					Vector3d tube_c = Vector3d::Zero(); // node center in the rect-local frame
-					if (tube_on)
-						tube_c = transformPoint(tube_local_from_globe, node->obb.center);
+					auto tn = tube.walkNode(node->obb);
 					// tube mode culls against the rect, not the view: the
 					// whole slab is drawn wherever the camera looks. body
 					// mode keeps the land around the figure too — the rect
@@ -1245,46 +866,25 @@ struct earth_core_t {
 					// there a node is wanted if it touches the rect (drawn
 					// wrapped) or is in view (drawn flat); a straddler is
 					// drawn both ways
-					auto in_rect = tube_on && tubeRectTouches(node->obb.extents.norm(), tube_c);
 					auto in_view = false;
 					if (in_column) {
-					} else if (tube_on && !tube_body) {
-						if (!in_rect) continue;
+					} else if (tube.tube_on && !tube.tube_body) {
+						if (!tn.in_rect) continue;
 					} else {
 						in_view = obb_frustum_outside != classifyObbFrustum(&node->obb, frustum_planes)
 							&& !obbOccluded(eye, node->obb, planet_radius);
-						if (!in_view && !in_rect) continue;
+						if (!in_view && !tn.in_rect) continue;
 					}
 					sec.lod++;
 
 					// level of detail: the ground column always descends — it
 					// wants the finest mesh there regardless of the camera
 					// view. tube mode descends by distance measured through
-					// the roll (below), with an unconditional floor one level
-					// past tube_lock_mpt so tubeLockGround's strict coverage
-					// test can always be satisfied and the roll animation has
-					// decent imagery over the whole rect
-					// not for the tunnel: it has no lock to cover, and its rect
-					// can be hundreds of km² — at 20 km around the floor alone
-					// was more tiles than the cap allows, and the fine tiles in
-					// front of the camera were what got trimmed. distance
-					// through the roll decides all of it there
-					auto tube_floor = tube_on && !tunnel_on && in_rect
-						&& node->meters_per_texel > tube_lock_mpt * 0.5;
-					// the tunnel has a floor of its own, by size: a tile too
-					// coarse to roll isn't drawn (see the draw loop), so where
-					// distance alone stops at one — down the pipe, a few
-					// circumferences out — the walk keeps going until the
-					// tiles are small enough. children are about half their
-					// parent, so wanting every child over 1.25 R is wanting
-					// the children of anything over ~2.5 R, inside the 3 R
-					// the draw allows with a margin for uneven splits. sized
-					// by the radius, it's a few hundred tiles at any
-					// circumference
-					if (tunnel_on && in_rect && node->obb.extents.norm() > 1.25 * tube_radius)
-						tube_floor = true;
+					// the roll (below), with an unconditional floor (see
+					// walkFloor)
+					auto tube_floor = tube.walkFloor(node, tn);
 					auto tube_want = 1e30; // floor/column: never shed
-					// the download order's default (see sched_pri below)
+					// the download order's default (tube mode sets its own: see walkDistance)
 					node->sched_pri = fmax(0.0, (node->obb.center - eye).norm()
 						- node->obb.extents.norm()) / (2 * node->obb.extents.norm());
 					if (!in_column && !tube_floor) {
@@ -1300,28 +900,13 @@ struct earth_core_t {
 							// needs proportionally finer tiles. 1 at the default fov
 							auto zoom = tan(0.125 * M_PI) / tan(cam.fov / 2.0);
 							// distance to the node: straight-line, or in tube
-							// mode through the warp — both endpoints on the
-							// rolled side, so lod tracks proximity in the tube
-							// as flown (the wall overhead is near, the far end
-							// of the axis is far)
-							// (the land around the figure is flat, so a
-							// straddler takes the nearer of the two)
+							// mode through the warp (see walkDistance, which
+							// also sets the node's download order)
 							double dist = (eye - node->obb.center).norm();
-							if (tube_on && in_rect) {
-								Vector3d w = (tube_body ? bodyWarp(tube_c) : tubeWarp(tube_c)) - tube_eye_local;
-								auto straight = dist;
-								dist = w.norm();
-								// can the node's rolled position be on screen? a
-								// cone test widened by the node's own angular size
-								auto in_cone = true;
-								if (dist > 1e-6) {
-									auto half_diag = atan(tan(cam.fov / 2.0)
-										* sqrt(1.0 + aspect_ratio * aspect_ratio));
-									auto node_ang = asin(fmin(1.0,
-										node->obb.extents.norm() / dist));
-									auto cos_ang = w.dot(tube_dir_local) / dist;
-									in_cone = cos_ang >= cos(fmin(M_PI, half_diag + node_ang));
-								}
+							if (tn.in_rect) {
+								bool in_cone;
+								dist = tube.walkDistance(tv, tn, node, dist, in_view,
+									cam.fov, aspect_ratio, in_cone);
 								// zoom magnifies only what's on screen. tube
 								// lod ignores the view direction on purpose
 								// (the whole slab stays resident), but the
@@ -1332,16 +917,6 @@ struct earth_core_t {
 								// the default-fov target, i.e. unzoomed
 								// tube quality
 								if (zoom > 1.0 && !in_cone) zoom = 1.0;
-								if (in_view) dist = fmin(dist, straight);
-								// and the download order sees the same
-								// distance: ranked by straight-line distance,
-								// the wall in front of the camera — ground a
-								// long way off, flat — queued behind tiles
-								// under and behind it that weren't on screen,
-								// and turning the tunnel on went blurry for
-								// seconds. what can't be on screen goes last
-								node->sched_pri = dist / (2 * node->obb.extents.norm())
-									* (in_cone ? 1.0 : 16.0);
 							}
 							auto t = Affine3d().Identity();
 							t.translate(eye + dist * direction);
@@ -1357,57 +932,19 @@ struct earth_core_t {
 					}
 
 					next_valid.push_back(std::make_pair(nxt, bulk));
-					if (tube_on) next_want.push_back(tube_want);
+					if (tube.tube_on) next_want.push_back(tube_want);
 
 					if (node->can_have_data) {
 						if (node->last_wanted_ms != prev_walk_ms) node->first_wanted_ms = now_ms;
 						node->last_wanted_ms = now_ms;
 						potential_nodes.emplace_back(std::move(nxt), node);
-						if (tube_on) potential_want.push_back(tube_want);
+						if (tube.tube_on) potential_want.push_back(tube_want);
 					}
 				}
 			}
 			if (next_valid.size() == 0) break;
-			// node-budget backstop: distance lod bounds the set on its own for
-			// any sane rect (a floor level over the rect plus fine rings near
-			// the camera), but a degenerate rect or heavy zoom can overflow
-			// it. shed this level's least-wanted additions instead of breaking
-			// off the whole walk: a uniform break coarsens exactly the tiles
-			// with the highest demand (the zoomed-at building loses its lod as
-			// the fov narrows — backwards), while a want-ordered trim degrades
-			// everything evenly relative to its own target. reordering within
-			// one bfs level is fine: the draw loop only needs whole levels in
-			// order (children after parents when read backwards)
-			const size_t tube_node_cap = 3000;
-			if (tube_on && potential_nodes.size() > tube_node_cap) {
-				auto budget = tube_node_cap > level_pot_start
-					? tube_node_cap - level_pot_start : 0;
-				std::vector<size_t> idx(potential_nodes.size() - level_pot_start);
-				for (size_t i = 0; i < idx.size(); i++) idx[i] = level_pot_start + i;
-				std::sort(idx.begin(), idx.end(), [&](size_t a, size_t b) {
-					return potential_want[a] > potential_want[b]; });
-				// the weakest want that stays; nothing below it may descend
-				auto cutoff = budget > 0
-					? potential_want[idx[budget - 1]] : 1e300;
-				decltype(potential_nodes) kept_n(potential_nodes.begin(),
-					potential_nodes.begin() + level_pot_start);
-				std::vector<double> kept_w(potential_want.begin(),
-					potential_want.begin() + level_pot_start);
-				for (size_t i = 0; i < budget && i < idx.size(); i++) {
-					kept_n.push_back(std::move(potential_nodes[idx[i]]));
-					kept_w.push_back(potential_want[idx[i]]);
-				}
-				potential_nodes = std::move(kept_n);
-				potential_want = std::move(kept_w);
-				decltype(next_valid) nv;
-				std::vector<double> nw;
-				for (size_t i = 0; i < next_valid.size(); i++)
-					if (next_want[i] >= cutoff) {
-						nv.push_back(std::move(next_valid[i]));
-						nw.push_back(next_want[i]);
-					}
-				next_valid = std::move(nv);
-				next_want = std::move(nw);
+			if (tube.tube_on) {
+				tubeNodeBackstop(level_pot_start, next_valid, next_want);
 				if (next_valid.size() == 0) break;
 			}
 			valid = next_valid;
@@ -1491,7 +1028,7 @@ struct earth_core_t {
 			auto dist = fmax(0.0, (node->obb.center - eye).norm() - radius);
 			// (in tube mode the walk measured the distance through the
 			// roll, which is what proximity means there)
-			to_download.push_back({ tube_on ? node->sched_pri : dist / (2 * radius), kv.first.size(), node });
+			to_download.push_back({ tube.tube_on ? node->sched_pri : dist / (2 * radius), kv.first.size(), node });
 		}
 		std::sort(to_download.begin(), to_download.end(), [](const candidate_t &a, const candidate_t &b) {
 			// tiles containing the camera all have priority 0; coarse first there
@@ -1671,32 +1208,6 @@ struct earth_core_t {
 		return { local_up, east, sun_dir, zenith, haze };
 	}
 
-	// tube warp uniforms: the local->clip matrix folds the camera in, so
-	// the shader works in small rect-local coordinates end to end. the
-	// effective roll radius grows as curl shrinks (flat at curl 0); the
-	// floor keeps it finite for the shader
-	void setTubeUniforms(render_ctx_t &ctx, const frame_t &f) {
-		if (tube_on) {
-			Matrix4d l2c = f.viewprojection * tube_globe_from_local;
-			Matrix4f l2cf = l2c.cast<float>();
-			auto r_eff = tubeRollRadius();
-			renderSetTube(ctx, true, l2cf.data(),
-				(float)r_eff, (float)tube_half_len, (float)tube_half_wid, (float)tube_wid_offset,
-				(float)tunnelFade());
-		} else {
-			renderSetTube(ctx, false, nullptr, 0, 0, 0, 0);
-		}
-		// the body's geometry image goes up on the gl thread, here, the
-		// first draw after the host bakes it
-		if (body_dirty && body_w > 1 && body_h > 1) {
-			renderBodyUpload(ctx, body_w, body_h, body_pos.data(), body_nrm.data());
-			body_dirty = false;
-		}
-		float bands[4] = {(float)body_bands[0], (float)body_bands[1], (float)body_bands[2], (float)body_bands[3]};
-		renderSetBody(ctx, tube_on && tube_body && body_w > 1 && body_h > 1,
-			(float)fmax(0.0, fmin(tube_curl, 1.0)), bands);
-	}
-
 	struct draw_t { rocktree_t::node_t *node; uint8_t self_mask; uint32_t stale_mask; };
 
 	// what this frame draws: the downloaded part of the potential set, read
@@ -1735,17 +1246,10 @@ struct earth_core_t {
 			// skip if node is masked completely
 			auto self_mask = mask_map[full_path];
 			if (self_mask == 0xff) continue;
-			// the tunnel rolls whatever is resident, and a tile that is
-			// coarse against the roll's radius can't be rolled: its
-			// triangles span a large arc, the shader's rect clip is
-			// interpolated straight across them while the warp is not, and
-			// a lake tile came out as a slab across half the view. the rect
-			// tube avoids this by staying flat until fine coverage locks;
-			// the tunnel re-enters coarse land every time it moves, so it
-			// leaves a hole there until the fine tile lands instead. the
-			// parent's mask bit is already set above, so no ancestor fills
-			// the hole with its own slab
-			if (tunnel_on && node->obb.extents.norm() > 3.0 * tube_radius) continue;
+			// a tile too coarse for the tunnel to roll leaves a hole (see
+			// tunnelTooCoarse). the parent's mask bit is already set above,
+			// so no ancestor fills the hole with its own slab
+			if (tube.tunnelTooCoarse(node)) continue;
 
 			drawn_nodes.push_back({ node, self_mask });
 
@@ -1796,7 +1300,7 @@ struct earth_core_t {
 		auto near = f.near, far = f.far, ortho_half_extent = f.ortho_half_extent;
 		auto aspect_ratio = f.aspect_ratio;
 		auto &local_up = atm.local_up, &east = atm.east, &sun_dir = atm.sun_dir;
-		auto shadows_live = shadows_on && !tube_on && sun_el > 0.5 * M_PI / 180.0;
+		auto shadows_live = shadows_on && !tube.tube_on && sun_el > 0.5 * M_PI / 180.0;
 		float shadow_box_f[4] = {1, 1, 0, 1};
 		Matrix4d sun_view = Matrix4d::Identity();
 		double shadow_texel_m = 1;
@@ -1894,28 +1398,14 @@ struct earth_core_t {
 
 			// bind, draw (buildDrawList buffered every mesh)
 			renderSetTransform(ctx, transform_float.data());
-			if (tube_on) {
-				// mesh -> rect-local frame, composed in double then narrowed:
-				// local coordinates are km-scale, safe in float
-				Matrix4f m2l = (tube_local_from_globe * node->matrix_globe_from_mesh).cast<float>();
-				renderSetTubeNode(ctx, m2l.data());
-			}
-			// body mode: the land first, flat — the rect's own ground painted
-			// black in the shader, where the sheet lifted off — then the
-			// wrapped pass for whatever touches the rect
-			if (tube_on && tube_body) {
-				auto margin = node->obb.extents.norm();
-				Vector3d c = transformPoint(tube_local_from_globe, node->obb.center);
-				renderSetTubePass(ctx, 2);
+			tube.setTubeNode(ctx, node->matrix_globe_from_mesh);
+			auto draw = [&] {
 				for (auto &mesh : node->meshes) {
 					bindAndDrawMesh(mesh, self_mask, stale_mask, ctx);
 				}
-				if (!tubeRectTouches(margin, c)) continue;
-				renderSetTubePass(ctx, 1);
-			}
-			for (auto &mesh : node->meshes) {
-				bindAndDrawMesh(mesh, self_mask, stale_mask, ctx);
-			}
+			};
+			if (tube.tube_on && tube.tube_body) tube.drawBodyNode(ctx, node->obb, draw);
+			else draw();
 		}
 	}
 
@@ -1944,7 +1434,7 @@ struct earth_core_t {
 	// and a track drawn in globe space would hang in the air where the
 	// terrain used to be
 	void drawPath(render_ctx_t &ctx, const frame_t &f) {
-		if (path_up.empty() || tube_on || path_rgba[3] <= 0) return;
+		if (path_up.empty() || tube.tube_on || path_rgba[3] <= 0) return;
 		pathProbeGround(); // against this frame's drawn set
 		// draping keeps arriving for seconds after a drop, and rebuilding
 		// a long track's ribbon every frame to show one more measured
@@ -2010,9 +1500,9 @@ struct earth_core_t {
 		// as soon as the whole rect is covered at measurement resolution —
 		// long before full res. the host watches groundLocked, rolls the
 		// tube up, and the remaining detail streams into the rolled tube
-		if (tunnel_on) tunnelUpdate(cam, dt_ms);
-		else if (tube_on && !tube_ground_locked)
-			tubeLockGround(true);
+		if (tube.tunnel_on) tube.tunnelUpdate(cam, dt_ms);
+		else if (tube.tube_on && !tube.tube_ground_locked)
+			tube.tubeLockGround(true);
 		uploads_this_frame = 0;
 		auto f = setupFrame(ctx, cam, width, height);
 
@@ -2034,7 +1524,7 @@ struct earth_core_t {
 		sec.evict += t3 - t2;
 
 		auto atm = setAtmosphere(ctx, f, cam);
-		setTubeUniforms(ctx, f);
+		tube.setTubeUniforms(ctx, f.viewprojection);
 		auto draws = buildDrawList(ctx);
 		auto sh = shadowPass(ctx, f, cam, atm, draws);
 		drawTerrain(ctx, f, draws, sh);

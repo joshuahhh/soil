@@ -515,7 +515,7 @@ inline void renderSetTransform(render_ctx_t &ctx, const float *m16) {
 	glUniformMatrix4fv(ctx.transform_loc, 1, GL_FALSE, m16);
 }
 
-// tube mode (see earth_core.h): per-frame local-frame-to-clip matrix and warp
+// tube mode (see earth_tube.h): per-frame local-frame-to-clip matrix and warp
 // parameters (effective roll radius, rect half length/width in meters).
 // fade, in rect units along the axis: where the walls start darkening, to
 // black at the rect's ends; 0 is no fade
@@ -559,7 +559,7 @@ inline void renderSetTubeNode(render_ctx_t &ctx, const float *m16) {
 	glUniformMatrix4fv(ctx.tube_mesh_to_local_loc, 1, GL_FALSE, m16);
 }
 
-// body mode (see earth_core.h): the figure's geometry image, two w×h float
+// body mode (see earth_tube.h): the figure's geometry image, two w×h float
 // textures of positions and unit normals in body units. unfiltered float
 // textures are core webgl2; linear filtering of them is not, so the shader
 // fetches texels and interpolates by hand. units 5 and 6, clear of the
