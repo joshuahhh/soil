@@ -13,7 +13,8 @@ import { setRectData, unrollTube, applyTube } from './tube.js';
 import { followOn, debugSmooth, setDebugSmooth, setFollow, toggleFollow } from './path.js';
 import { saveAlign, capture, captureClick, stopSolve } from './align.js';
 
-export { keys, miniature, setMiniature, debugLod, setDebugLod, dragging, initInput };
+export { keys, miniature, setMiniature, debugLod, setDebugLod, mipmaps, setMipmaps, dragging,
+  initInput };
 
 // --- keyboard -> built-in flying controls -----------------------------------
 // ground frame: WASD cruise/truck, Q/E pedestal. hold Space for the view
@@ -38,6 +39,8 @@ const setDebugLod = (on) => {
   document.body.classList.toggle('lod', on);
   saveView(); // part of the view state: a reload comes back with it
 };
+let mipmaps = true;
+const setMipmaps = (on) => { mipmaps = on; view.setMipmaps(on); updateHint(); };
 // 0 (or Home): back to the default view — the pose/fov/speed the demo
 // opens with, level (no roll), out of ortho and terrain hug, map zoom
 // reset and following again. the tube is left alone: esc clears it
@@ -105,11 +108,7 @@ const initInput = () => {
     // mipmap A/B. only bites on the uncompressed texture path, so it's the
     // ?jpg build where you can see it — and it's motion that shows it, not a
     // still frame: watch distant ground crawl as you fly
-    if (e.code === 'KeyM' && !e.repeat) {
-      S.mipmaps = !S.mipmaps;
-      view.setMipmaps(S.mipmaps);
-      updateHint();
-    }
+    if (e.code === 'KeyM' && !e.repeat) setMipmaps(!mipmaps);
     // roll/unroll the tube for the current rect (drawn by shift+drag on the
     // map). rolling up also flies into the tube mouth — watching the roll
     // from outside mostly shows the back of the sheet

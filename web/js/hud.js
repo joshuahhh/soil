@@ -1,7 +1,7 @@
 import { S } from './state.js';
 import { view, canvas } from './engine.js';
 import { saveView } from './saveview.js';
-import { miniature } from './input.js';
+import { miniature, mipmaps } from './input.js';
 import { tunnelOn } from './tunnel.js';
 import { followOn } from './path.js';
 import { alignRefresh } from './align.js';
@@ -35,7 +35,7 @@ const updateSpeed = () => {
 const updateHint = () => {
   document.getElementById('hint').textContent = [
     HINTS[followOn ? 'follow' : tunnelOn ? 'tunnel' : S.tubeOn ? (S.tubeBody ? 'body' : 'tube') : S.ortho ? 'ortho' : 'persp'],
-    S.mipmaps ? '' : 'mipmaps off',
+    mipmaps ? '' : 'mipmaps off',
     miniature ? 'miniature' : '',
     // T and B only do anything once a rect exists
     !S.tubeOn && S.tubeRect ? 'rect drawn (T rolls it into a tube, B wraps it on a body)' : '',

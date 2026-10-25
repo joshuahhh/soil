@@ -1,3 +1,5 @@
+import { QS } from './config.js';
+
 export { db, dbOpen, IDB_OFF, IDB_RO, idbGet, idbPut, idbPutChecked, idbDel };
 
 // --- indexeddb byte cache -------------------------------------------------
@@ -12,6 +14,13 @@ export { db, dbOpen, IDB_OFF, IDB_RO, idbGet, idbPut, idbPutChecked, idbDel };
 // it arrives: until then every helper below sees a null db, fails its
 // try/catch, and the page runs straight off the network
 let db = null;
+// where the origin's storage stands, for a warning that may be about quota
+const warnUsage = () => {
+  if (navigator.storage && navigator.storage.estimate)
+    navigator.storage.estimate().then((e) => console.warn(
+      `idb: origin is using ${Math.round((e.usage || 0) / 1e6)} MB`
+      + ` of ${Math.round((e.quota || 0) / 1e6)} MB`));
+};
 const dbOpen = new Promise((res) => {
   // an open that neither succeeds nor fails is a real state (a blocked
   // upgrade, an origin whose storage is wedged) and it used to be a silent
@@ -22,10 +31,7 @@ const dbOpen = new Promise((res) => {
     console.warn('idb: open has been pending for 8s — no cache, and nothing'
       + ' the page stores will persist. if this sticks, clear this site\'s'
       + ' storage (the origin may be out of quota) and reload');
-    if (navigator.storage && navigator.storage.estimate)
-      navigator.storage.estimate().then((e) => console.warn(
-        `idb: origin is using ${Math.round((e.usage || 0) / 1e6)} MB`
-        + ` of ${Math.round((e.quota || 0) / 1e6)} MB`));
+    warnUsage();
   }, 8000);
   const tOpen = performance.now();
   try {
@@ -64,10 +70,10 @@ const dbOpen = new Promise((res) => {
 });
 // ?idb=0: run without the tile cache at all (profiling — what the cache
 // itself costs against the network)
-const IDB_OFF = new URLSearchParams(location.search).get('idb') === '0';
+const IDB_OFF = QS.get('idb') === '0';
 // ?idb=ro: look tiles up but never write them (profiling — how much of the
 // cache's cost is the writes queueing in front of the reads)
-const IDB_RO = new URLSearchParams(location.search).get('idb') === 'ro';
+const IDB_RO = QS.get('idb') === 'ro';
 const idbGet = (key, store = 'tiles') => new Promise((res) => {
   if (IDB_OFF) { res(undefined); return; }
   try {
@@ -91,10 +97,7 @@ const idbPut = (key, bytes, store = 'tiles') => {
 const idbPutChecked = (key, value, store = 'app') => new Promise((res) => {
   const fail = (why, err) => {
     console.warn(`idb: ${why} storing '${key}'`, err || '');
-    if (navigator.storage && navigator.storage.estimate)
-      navigator.storage.estimate().then((e) => console.warn(
-        `idb: origin is using ${Math.round((e.usage || 0) / 1e6)} MB`
-        + ` of ${Math.round((e.quota || 0) / 1e6)} MB`));
+    warnUsage();
     res(false);
   };
   if (!db) {

@@ -11,7 +11,6 @@ const S = {
   gain: 1, // re-initialized from the saved view once it loads
   ortho: false,
   hug: false, // terrain hug: hold height above the mesh, not the sphere
-  mipmaps: true,
   // the pointer's look-around, gathered between frames: input.js adds the
   // drag, the frame loop the arrow keys, and the frame (or the follow
   // camera) spends it

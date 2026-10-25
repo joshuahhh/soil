@@ -1,3 +1,4 @@
+import { QS } from './config.js';
 import { db, dbOpen, IDB_OFF, IDB_RO } from './idb.js';
 import { Module } from './engine.js';
 
@@ -343,7 +344,7 @@ const stats = window.__stats = {
   kinds: {},
   // ?fetchtrace: one record per request — when it was issued, when the
   // cache answered, when the network did, when it was handed to the engine
-  trace: new URLSearchParams(location.search).has('fetchtrace') ? [] : null,
+  trace: QS.has('fetchtrace') ? [] : null,
 };
 // 'B' bulk metadata, 'N' node data, 'P' the planetoid header
 const statKind = (path) => {
@@ -400,7 +401,7 @@ const fetchTile = async (path, id) => {
 const initTiles = () => {
   // alongside the engine's own 2s line, so the two can be read together.
   // ?fetchlog=0 turns it off
-  if (new URLSearchParams(location.search).get('fetchlog') !== '0') setInterval(() => {
+  if (QS.get('fetchlog') !== '0') setInterval(() => {
     const parts = [];
     for (const [kind, k] of Object.entries(stats.kinds)) {
       if (!k.n) continue;

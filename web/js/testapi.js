@@ -2,7 +2,7 @@ import { S } from './state.js';
 import { clearTiles } from './tiles.js';
 import { view, canvas } from './engine.js';
 import { map, marker } from './map.js';
-import { updateHint } from './hud.js';
+import { setMipmaps } from './input.js';
 import { refreshTunnel } from './tunnel.js';
 import { setBodyMesh } from './body.js';
 import { path, parseGpx, setPath } from './path.js';
@@ -51,7 +51,7 @@ const initTestApi = () => {
     // shimmer measurement (tools/shimmer.mjs) drives these: toggle the texture
     // filtering, then move the camera a fixed sub-degree amount and see how
     // much the image churns
-    setMipmaps: (on) => { S.mipmaps = on; view.setMipmaps(on); updateHint(); },
+    setMipmaps,
     nudgeHeading: (deg) => {
       const p = view.getPose();
       view.setPose(p.lat, p.lon, p.alt, p.heading + deg, p.tilt);
@@ -60,13 +60,6 @@ const initTestApi = () => {
     shot: () => new Promise((resolve) => {
       S.pendingShot = () => resolve(canvas.toDataURL('image/png'));
     }),
-    // for tools/shimmer.mjs: flip texture filtering, and move the camera by a
-    // fixed amount so the churn a small motion causes can be scored
-    setMipmaps: (on) => { S.mipmaps = on; view.setMipmaps(on); updateHint(); },
-    nudgeHeading: (deg) => {
-      const p = view.getPose();
-      view.setPose(p.lat, p.lon, p.alt, p.heading + deg, p.tilt);
-    },
     // settle until the scene reports itself fully loaded for `stable`
     // consecutive frames, or `timeoutMs` elapses. sceneComplete alone is not
     // enough to wait on: a download that keeps failing resets its node to a

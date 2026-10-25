@@ -103,19 +103,24 @@ const undistortUV = (u, v, k) => {
   const f = 1 / d;
   return { u: 0.5 + X * f / (2 * a), v: 0.5 + Y * f / 2 };
 };
-// null where the model has no answer: beyond 1/(4k) of pincushion, or a
-// barrel corner pushed out past where the inverse is real
+// the inverse: the radius as shot of the point the undistorted picture
+// has at r_u. null where the model has no answer: beyond 1/(4k) of
+// pincushion, or a barrel corner pushed out past where the inverse is real
+const distortRadius = (ru, k) => {
+  const q = 4 * k * ru * ru;
+  if (q > 1) return null;
+  // (1 - sqrt(1 - q)) / (2 k r_u), with the series where the subtraction
+  // would lose its digits
+  return Math.abs(q) < 1e-6 ? ru * (1 + k * ru * ru) : (1 - Math.sqrt(1 - q)) / (2 * k * ru);
+};
 const distortUV = (u, v, k) => {
   if (!k) return { u, v };
   const a = lensAspect();
   const X = (u - 0.5) * 2 * a, Y = (v - 0.5) * 2;
   const ru = Math.hypot(X, Y);
   if (ru < 1e-9) return { u, v };
-  const q = 4 * k * ru * ru;
-  if (q > 1) return null;
-  // (1 - sqrt(1 - q)) / (2 k r_u), with the series where the subtraction
-  // would lose its digits
-  const rd = Math.abs(q) < 1e-6 ? ru * (1 + k * ru * ru) : (1 - Math.sqrt(1 - q)) / (2 * k * ru);
+  const rd = distortRadius(ru, k);
+  if (rd === null) return null;
   const sc = rd / ru;
   return { u: 0.5 + X * sc / (2 * a), v: 0.5 + Y * sc / 2 };
 };
@@ -163,9 +168,8 @@ const renderWarp = () => {
   const toSource = (X, Y) => {
     const ru = Math.hypot(X, Y);
     if (ru < 1e-9) return [natW / 2, natH / 2];
-    const q = 4 * k * ru * ru;
-    if (q > 1) return null;
-    const rd = Math.abs(q) < 1e-6 ? ru * (1 + k * ru * ru) : (1 - Math.sqrt(1 - q)) / (2 * k * ru);
+    const rd = distortRadius(ru, k);
+    if (rd === null) return null;
     const s = rd / ru;
     return [(X * s / (2 * a) + 0.5) * natW, (Y * s / 2 + 0.5) * natH];
   };
