@@ -306,14 +306,12 @@ const followHooks = {
     fol.s = nearestS(spine, view.getPose());
     S.following = true; // let the map track the camera along
     canvas.focus();
-    document.body.classList.add('riding');
     refreshPathPanel();
     savePath();
   },
   exit: () => {
     fol.heading = fol.alt = null;
     setCursor(null);
-    document.body.classList.remove('riding');
     refreshPathPanel();
     savePath();
   },
