@@ -17,7 +17,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string>
-#include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 #include "rocktree_util.h"
@@ -151,7 +151,7 @@ struct earth_core_t {
 	// potential_nodes is in bfs level order, so iterating it backwards
 	// visits children before parents (the order the draw loop's octant
 	// masking needs)
-	std::vector<std::pair<std::string, rocktree_t::node_t *>> potential_nodes;
+	std::vector<rocktree_t::node_t *> potential_nodes;
 	// tube mode only: per-entry keep priority, parallel to potential_nodes
 	// — how far past its lod target a node was requested (r over the
 	// required texels-per-meter). the floor and ground-column nodes carry
@@ -672,9 +672,6 @@ struct earth_core_t {
 		return f;
 	}
 
-	// a child's path is its parent's plus one of these
-	static inline const std::string octs[8] = { "0", "1", "2", "3", "4", "5", "6", "7" };
-
 	// tube mode's node-budget backstop, between two levels of the walk:
 	// distance lod bounds the set on its own for any sane rect (a floor
 	// level over the rect plus fine rings near the camera), but a
@@ -688,7 +685,7 @@ struct earth_core_t {
 	// backwards)
 	static constexpr size_t tube_node_cap = 3000;
 	void tubeNodeBackstop(size_t level_pot_start,
-			std::vector<std::pair<std::string, rocktree_t::bulk_t *>> &next_valid,
+			std::vector<rocktree_t::node_t *> &next_valid,
 			std::vector<double> &next_want) {
 		if (potential_nodes.size() <= tube_node_cap) return;
 		auto budget = tube_node_cap > level_pot_start
@@ -710,7 +707,7 @@ struct earth_core_t {
 		}
 		potential_nodes = std::move(kept_n);
 		potential_want = std::move(kept_w);
-		std::vector<std::pair<std::string, rocktree_t::bulk_t *>> nv;
+		std::vector<rocktree_t::node_t *> nv;
 		std::vector<double> nw;
 		for (size_t i = 0; i < next_valid.size(); i++)
 			if (next_want[i] >= cutoff) {
@@ -747,7 +744,7 @@ struct earth_core_t {
 		auto reuse = cacheable && walk_cache_valid && walk_key == key;
 		walk_reused = reuse;
 		if (reuse) {
-			for (auto &kv : potential_nodes) kv.second->last_wanted_ms = now_ms;
+			for (auto n : potential_nodes) n->last_wanted_ms = now_ms;
 			for (auto b : walk_bulks) b->last_wanted_ms = now_ms;
 			stat.bulk_blocked = walk_bulk_blocked;
 			return walk_bulk_blocked == 0;
@@ -772,7 +769,9 @@ struct earth_core_t {
 		// the camera in the rect-local frame, for tube-mode lod distances
 		auto tv = tube.walkView(eye, direction);
 
-		std::vector<std::pair<std::string, rocktree_t::bulk_t *>> valid = { std::make_pair("", planetoid->root_bulk) };
+		// the nodes whose children the next bfs level looks at; null is the
+		// root, above the root bulk's top nodes
+		std::vector<rocktree_t::node_t *> valid = { nullptr };
 		decltype(valid) next_valid;
 		std::vector<double> next_want; // tube mode: potential_want's counterpart for next_valid
 
@@ -782,16 +781,13 @@ struct earth_core_t {
 		// node culling and level of detail using breadth-first search
 		for (;;) {
 			auto level_pot_start = potential_nodes.size();
-			for(auto cur2 : valid) {
-				auto cur = cur2.first;
-				auto bulk = cur2.second;
+			for(auto cur : valid) {
+				auto bulk = cur ? cur->parent : planetoid->root_bulk;
+				auto children = cur ? cur->children : bulk->children;
 
-				if (cur.size() > 0 && cur.size() % 4 == 0) {
-					auto rel = cur.substr (floor((cur.size() - 1) / 4) * 4, 4);
-					auto bulk_kv = bulk->bulks.find(rel);
-					auto has_bulk = bulk_kv != bulk->bulks.end();
-					if (!has_bulk) continue;
-					auto b = bulk_kv->second.get();
+				if (cur && cur->level % 4 == 0) {
+					auto b = cur->child_bulk;
+					if (!b) continue;
 					b->last_wanted_ms = now_ms;
 					walk_bulks.push_back(b);
 					if (b->dl_state == dl_state_stub) {
@@ -802,13 +798,10 @@ struct earth_core_t {
 						// refines outward from there instead of every subtree
 						// in the frustum competing at once
 						double pri = 1e300;
-						auto head = bulk->nodes.find(rel);
-						if (head != bulk->nodes.end()) {
-							auto radius = head->second->obb.extents.norm();
-							auto dist = fmax(0.0, (head->second->obb.center - eye).norm() - radius);
-							if (radius > 0) pri = dist / (2 * radius);
-						}
-						to_download_bulks.push_back({ pri, cur.size(), b });
+						auto radius = cur->obb.extents.norm();
+						auto dist = fmax(0.0, (cur->obb.center - eye).norm() - radius);
+						if (radius > 0) pri = dist / (2 * radius);
+						to_download_bulks.push_back({ pri, (size_t)cur->level, b });
 					}
 					if (b->dl_state != dl_state_downloaded) {
 						// the walk cannot see past a bulk it doesn't have: this
@@ -819,18 +812,16 @@ struct earth_core_t {
 						continue;
 					}
 					bulk = b;
+					children = b->children;
 				}
 				bulk->last_wanted_ms = now_ms;
 				walk_bulks.push_back(bulk);
 				potential_bulk_count++;
 
-				for(auto o : octs) {
+				for (auto o = 0; o < 8; o++) {
 					sec.oct++;
-					auto nxt = cur + o;
-					auto nxt_rel = nxt.substr (floor((nxt.size() - 1) / 4) * 4, 4);
-					auto node_kv = bulk->nodes.find(nxt_rel);
-					if (node_kv == bulk->nodes.end()) continue; // node at "nxt" doesn't exist
-					auto node = node_kv->second.get();
+					auto node = children[o];
+					if (!node) continue;
 
 					// cull outside frustum using obb
 					// todo: check if it could cull more
@@ -913,13 +904,13 @@ struct earth_core_t {
 						tube_want = r * node->meters_per_texel;
 					}
 
-					next_valid.push_back(std::make_pair(nxt, bulk));
+					next_valid.push_back(node);
 					if (tube.on) next_want.push_back(tube_want);
 
 					if (node->can_have_data) {
 						if (node->last_wanted_ms != prev_walk_ms) node->first_wanted_ms = now_ms;
 						node->last_wanted_ms = now_ms;
-						potential_nodes.emplace_back(std::move(nxt), node);
+						potential_nodes.push_back(node);
 						if (tube.on) potential_want.push_back(tube_want);
 					}
 				}
@@ -992,12 +983,11 @@ struct earth_core_t {
 		stat.nodes_loaded = stat.nodes_stub = stat.nodes_stuck = 0;
 		stat.nodes_failed = stat.max_level = 0;
 		pending_nodes.clear();
-		for (auto &kv : potential_nodes) {
-			auto node = kv.second;
-			if ((int)kv.first.size() > stat.max_level) stat.max_level = (int)kv.first.size();
+		for (auto node : potential_nodes) {
+			if (node->level > stat.max_level) stat.max_level = node->level;
 			if (node->dl_state != dl_state_downloaded) {
 				all_loaded = false;
-				pending_nodes.push_back({ kv.first, (int)node->dl_state.load(), node->dl_fails,
+				pending_nodes.push_back({ node->request.node_key().path(), (int)node->dl_state.load(), node->dl_fails,
 					(node->obb.center - eye).norm(), node->meters_per_texel, node->first_wanted_ms });
 			}
 			else stat.nodes_loaded++;
@@ -1010,7 +1000,7 @@ struct earth_core_t {
 			auto dist = fmax(0.0, (node->obb.center - eye).norm() - radius);
 			// (in tube mode the walk measured the distance through the
 			// roll, which is what proximity means there)
-			to_download.push_back({ tube.on ? node->sched_pri : dist / (2 * radius), kv.first.size(), node });
+			to_download.push_back({ tube.on ? node->sched_pri : dist / (2 * radius), (size_t)node->level, node });
 		}
 		std::sort(to_download.begin(), to_download.end(), [](const candidate_t &a, const candidate_t &b) {
 			// tiles containing the camera all have priority 0; coarse first there
@@ -1127,7 +1117,8 @@ struct earth_core_t {
 		// purge least recently wanted bulks until metadata is back under its
 		// budget. clearing the child maps only ever destroys stubs: a bulk
 		// with any downloading or downloaded child has busy_ctr > 0 and was
-		// not collected above
+		// not collected above. the links from the bulk above stay good: they
+		// point at the bulk itself, which stays behind as a stub
 		if (bulk_bytes_total > bulk_quota) {
 			std::sort(purgeable.begin(), purgeable.end(), [](const purge_t &a, const purge_t &b) {
 				return a.last_wanted_ms < b.last_wanted_ms;
@@ -1136,8 +1127,7 @@ struct earth_core_t {
 				if (bulk_bytes_total <= bulk_quota) break;
 				auto b = e.b;
 				obs_b_cnt++;
-				b->nodes.clear();
-				b->bulks.clear();
+				b->clear();
 				b->setDeleted();
 				bulk_bytes_total -= e.bytes;
 			}
@@ -1200,34 +1190,30 @@ struct earth_core_t {
 	// child covers) is complete by the time the node comes up. buffers
 	// whatever isn't on the gpu yet, and refreshes drawn_nodes
 	std::vector<draw_t> buildDrawList(render_ctx_t &ctx) {
-		// 8-bit octant mask flags of nodes
-		std::unordered_map<std::string, uint8_t> mask_map;
+		// 8-bit octant mask flags of nodes, filled in from the children
+		for (auto node : potential_nodes) node->mask = 0;
 
-		// potential-set membership by path, only needed for lod debug tinting
-		std::unordered_map<std::string, rocktree_t::node_t *> potential_set;
-		if (debug_lod)
-			for (auto &kv : potential_nodes) potential_set[kv.first] = kv.second;
+		// potential-set membership, only needed for lod debug tinting
+		std::unordered_set<rocktree_t::node_t *> potential_set;
+		if (debug_lod) potential_set.insert(potential_nodes.begin(), potential_nodes.end());
 
 		drawn_nodes.clear();
 		std::vector<draw_t> draws;
 		draws.reserve(potential_nodes.size());
 
 		// reverse level order: children before parents
-		for (auto kv = potential_nodes.rbegin(); kv != potential_nodes.rend(); ++kv) {
-			auto &full_path = kv->first;
-			auto node = kv->second;
-			auto level = full_path.size();
-			assert(level > 0);
+		for (auto it = potential_nodes.rbegin(); it != potential_nodes.rend(); ++it) {
+			auto node = *it;
+			assert(node->level > 0);
 			assert(node->can_have_data);
 			if (node->dl_state != dl_state_downloaded) continue;
 
 
 			// set octant mask of previous node
-			auto octant = (int)(full_path[level - 1] - '0');
-			mask_map[full_path.substr(0, level - 1)] |= 1 << octant;
+			if (node->up) node->up->mask |= 1 << node->octant;
 
 			// skip if node is masked completely
-			auto self_mask = mask_map[full_path];
+			auto self_mask = node->mask;
 			if (self_mask == 0xff) continue;
 			// a tile too coarse for the tunnel to roll leaves a hole (see
 			// tunnelTooCoarse). the parent's mask bit is already set above,
@@ -1240,15 +1226,19 @@ struct earth_core_t {
 			// three bits per octant saying where that tile's request is
 			// (the shader's legend — 1 not yet requested, 2 cache lookup,
 			// 3 network, 4 decoding, 5 waiting to retry after a failure).
-			// children are drawn before parents here, so mask_map for this
-			// node is already complete
+			// children are drawn before parents here, so this node's mask
+			// is already complete
 			uint32_t stale_mask = 0;
 			if (debug_lod) {
-				for (auto o = 0; o < 8; o++) {
+				// (a child bulk still downloading is being filled in on the
+				// decode pool, and nothing under it is in the potential set)
+				auto b = node->child_bulk;
+				auto children = !b ? node->children
+					: b->dl_state == dl_state_downloaded ? b->children : nullptr;
+				for (auto o = 0; children && o < 8; o++) {
 					if (self_mask & (1 << o)) continue;
-					auto it = potential_set.find(full_path + octs[o]);
-					if (it == potential_set.end()) continue;
-					auto child = it->second;
+					auto child = children[o];
+					if (!child || !potential_set.count(child)) continue;
 					uint32_t phase;
 					if (child->dl_state == dl_state_stub) phase = child->dl_fails ? 5 : 1;
 					else switch (child->fetch_phase.load()) {

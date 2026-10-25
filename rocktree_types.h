@@ -79,6 +79,21 @@ struct rocktree_t {
 		// when the current unbroken run of being wanted began (profiling)
 		double first_wanted_ms = 0;
 
+		// the octree, linked by populateBulk so the walk descends through
+		// pointers: the node above (for a bulk's top nodes, its head node
+		// in the bulk above), the nodes under it in the same bulk, and for
+		// a bulk's bottom nodes the bulk that continues the subtree. links
+		// into the bulk above are safe: that bulk can't be purged while
+		// this one is downloaded (busy_ctr)
+		node_t *up = nullptr;
+		node_t *children[8] = {};
+		bulk_t *child_bulk = nullptr;
+		int level; // full path length
+		int octant; // the path's last digit
+		// the octants a drawn child covers, written children first by the
+		// draw list (render thread only)
+		uint8_t mask = 0;
+
 		float meters_per_texel;
 		OrientedBoundingBox obb;
 
@@ -125,8 +140,20 @@ struct rocktree_t {
 
 		std::atomic<int> busy_ctr;
 
+		// keyed by path relative to the bulk; they own what the links point at
 		std::map<std::string, std::unique_ptr<node_t>> nodes;
 		std::map<std::string, std::unique_ptr<bulk_t>> bulks;
+		// the node this bulk's subtree hangs under (in the bulk above), and
+		// the top nodes of the subtree
+		node_t *head = nullptr;
+		node_t *children[8] = {};
+
+		// back to an unpopulated stub's contents
+		void clear() {
+			nodes.clear();
+			bulks.clear();
+			for (auto &c : children) c = nullptr;
+		}
 	};
 	float radius;
 	bulk_t *root_bulk;

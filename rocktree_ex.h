@@ -113,15 +113,37 @@ inline const char *populateBulk(rocktree_t::bulk_t *bulk, const BulkMetadata &bu
 				n->request = createNodeDataRequest(bulk->request.node_key().path(), bulk_metadata, node_meta);
 			}
 			n->meters_per_texel = meters_per_texel;
+			n->level = (int)bulk->request.node_key().path().size() + aux.level;
+			n->octant = aux.path[aux.level - 1] - '0';
 			if (!unpackObb(node_meta.oriented_bounding_box(), bulk->head_node_center, meters_per_texel, n->obb)) {
 				// (only stubs so far: nothing else has seen them)
-				bulk->nodes.clear();
-				bulk->bulks.clear();
+				bulk->clear();
 				return "bad obb";
 			}
 			bulk->nodes.insert(std::make_pair(aux.path,std::move(n)));
 		}
 	}	
+	// link the tree (see node_t). a node whose parent path has no node is
+	// left out, as is a bulk whose path has none: the walk can't reach them
+	for (auto &kv : bulk->nodes) {
+		auto &rel = kv.first;
+		auto n = kv.second.get();
+		if (rel.size() == 1) {
+			n->up = bulk->head;
+			bulk->children[n->octant] = n;
+		} else {
+			auto p = bulk->nodes.find(rel.substr(0, rel.size() - 1));
+			if (p != bulk->nodes.end()) {
+				n->up = p->second.get();
+				n->up->children[n->octant] = n;
+			}
+		}
+		auto b = bulk->bulks.find(rel);
+		if (b != bulk->bulks.end()) {
+			n->child_bulk = b->second.get();
+			n->child_bulk->head = n;
+		}
+	}
 	bulk->setFinishedDownloading();
 	return nullptr;
 }
