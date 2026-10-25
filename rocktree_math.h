@@ -59,6 +59,14 @@ inline auto classifyObbFrustum(OrientedBoundingBox* obb, std::array<Vector4d, 6>
 	return result;
 }
 
+// corner i (0..7) of the box: bits 0, 1 and 2 pick the far side along x, y and z
+inline Vector3d obbCorner(const OrientedBoundingBox &obb, int i) {
+	Vector3d s(i & 1 ? obb.extents.x() : -obb.extents.x(),
+		i & 2 ? obb.extents.y() : -obb.extents.y(),
+		i & 4 ? obb.extents.z() : -obb.extents.z());
+	return obb.center + obb.orientation * s;
+}
+
 inline Matrix4d perspective (double fov_rad, double aspect_ratio, double near, double far)
 {
     assert(aspect_ratio > 0);
@@ -104,4 +112,9 @@ inline Matrix4d lookAt(Vector3d eye, Vector3d center, Vector3d up) {
            0,0,0,1;
 
     return res;
+}
+
+// p as a point (w = 1) through m
+inline Vector3d transformPoint(const Matrix4d &m, const Vector3d &p) {
+	return (m * Vector4d(p.x(), p.y(), p.z(), 1.0)).head<3>();
 }

@@ -120,7 +120,7 @@ struct EarthView {
 	}
 
 	double planetRadius() {
-		return earth.planetoid && earth.planetoid->downloaded ? earth.planetoid->radius : 6371010.0;
+		return earth.planetRadius();
 	}
 
 	bool ready() { return earth.ready(); }
@@ -216,8 +216,8 @@ struct EarthView {
 		o.set("radius", earth.tunnel_circumference / (2.0 * M_PI));
 		o.set("groundAlt", earth.tunnel_ground_radius - planetRadius());
 		o.set("groundMeasured", earth.tunnel_ground_measured);
-		o.set("nodesWanted", earth.stat_nodes_wanted);
-		o.set("nodesLoaded", earth.stat_nodes_loaded);
+		o.set("nodesWanted", earth.stat.nodes_wanted);
+		o.set("nodesLoaded", earth.stat.nodes_loaded);
 		return o;
 	}
 	// the camera in unrolled tube coordinates (see earth_core::tubePose):
@@ -249,8 +249,8 @@ struct EarthView {
 		o.set("body", earth.tube_body);
 		// last walk's want/have node counts — in tube mode that's exactly
 		// the rect's download progress
-		o.set("nodesWanted", earth.stat_nodes_wanted);
-		o.set("nodesLoaded", earth.stat_nodes_loaded);
+		o.set("nodesWanted", earth.stat.nodes_wanted);
+		o.set("nodesLoaded", earth.stat.nodes_loaded);
 		return o;
 	}
 	// --- path overlay ---------------------------------------------------
@@ -320,33 +320,33 @@ struct EarthView {
 	// --- test/profiling hooks -------------------------------------------
 	// the engine's own frame accounting, read back rather than only printed
 	// to the console. the section times are the last 2s window's per-frame
-	// averages (see earth_core's avg_*); note `draw` is command-submission
+	// averages (see earth_core's avg); note `draw` is command-submission
 	// time, not gpu time — webgl is asynchronous, so it measures the cost of
 	// crossing into the browser, which is what the per-node bind sequence
 	// dominates. the node counts are the current frame's
 	val getStats() {
 		val o = val::object();
-		o.set("bfsMs", earth.avg_bfs);
-		o.set("dlMs", earth.avg_dl);
-		o.set("evictMs", earth.avg_evict);
-		o.set("drawMs", earth.avg_draw);
-		o.set("fps", earth.avg_fps);
-		o.set("octantsWalked", (double)earth.avg_oct);
-		o.set("nodesCulled", (double)earth.avg_cull);
-		o.set("nodesLodTested", (double)earth.avg_lod);
-		o.set("nodesWanted", earth.stat_nodes_wanted);
-		o.set("nodesLoaded", earth.stat_nodes_loaded);
+		o.set("bfsMs", earth.avg.bfs);
+		o.set("dlMs", earth.avg.dl);
+		o.set("evictMs", earth.avg.evict);
+		o.set("drawMs", earth.avg.draw);
+		o.set("fps", earth.avg.frames);
+		o.set("octantsWalked", (double)earth.avg.oct);
+		o.set("nodesCulled", (double)earth.avg.cull);
+		o.set("nodesLodTested", (double)earth.avg.lod);
+		o.set("nodesWanted", earth.stat.nodes_wanted);
+		o.set("nodesLoaded", earth.stat.nodes_loaded);
 		o.set("nodesDrawn", (int)earth.drawn_nodes.size());
 		o.set("sceneComplete", earth.scene_complete);
 		// the rest of the download picture (the 2s "tiles:" console line)
-		o.set("nodesStub", earth.stat_nodes_stub);
+		o.set("nodesStub", earth.stat.nodes_stub);
 		o.set("nodesInflight", (int)earth.nodes_in_flight);
-		o.set("nodesStuck", earth.stat_nodes_stuck);
-		o.set("nodesFailed", earth.stat_nodes_failed);
-		o.set("maxLevel", earth.stat_max_level);
-		o.set("bulksBlocked", earth.stat_bulk_blocked);
+		o.set("nodesStuck", earth.stat.nodes_stuck);
+		o.set("nodesFailed", earth.stat.nodes_failed);
+		o.set("maxLevel", earth.stat.max_level);
+		o.set("bulksBlocked", earth.stat.bulk_blocked);
 		o.set("bulksInflight", (int)earth.bulks_in_flight);
-		o.set("bulksStarted", earth.stat_bulks_started);
+		o.set("bulksStarted", earth.stat.bulks_started);
 		// per-frame averages since the last call (see frame)
 		o.set("frameMs", acc_frames ? acc_frame_ms / acc_frames : 0.0);
 		// gpu ms per frame by section, averaged over the last second (-1
@@ -403,10 +403,7 @@ struct EarthView {
 			// safety margin is measured from this)
 			double lo = INFINITY, hi = -INFINITY;
 			for (auto i = 0; i < 8; i++) {
-				Vector3d s(i & 1 ? obb.extents.x() : -obb.extents.x(),
-					i & 2 ? obb.extents.y() : -obb.extents.y(),
-					i & 4 ? obb.extents.z() : -obb.extents.z());
-				Vector3d c = obb.center + obb.orientation * s;
+				Vector3d c = obbCorner(obb, i);
 				auto h = c.norm() - earth_core_t::ellipsoidRadiusAt(c);
 				lo = fmin(lo, h); hi = fmax(hi, h);
 			}
@@ -464,31 +461,26 @@ struct EarthView {
 		// than it would without the mode
 		auto &a = ctx.accum;
 		a.on = glamour && !a.failed;
+		earth.glamour = {};
 		if (a.on) {
 			auto n = a.samples;
 			if (n > 0 && n < glamour_samples) {
-				earth.jitter_x = halton(n, 2) - 0.5;
-				earth.jitter_y = halton(n, 3) - 0.5;
+				earth.glamour.jitter_x = halton(n, 2) - 0.5;
+				earth.glamour.jitter_y = halton(n, 3) - 0.5;
 				// a point on the aperture disc, uniformly
 				auto r = sqrt(halton(n, 5)) * glamour_aperture, th = 2.0 * M_PI * halton(n, 7);
-				earth.lens_x = r * cos(th);
-				earth.lens_y = r * sin(th);
+				earth.glamour.lens_x = r * cos(th);
+				earth.glamour.lens_y = r * sin(th);
 				// the sun across its disc (soft shadows), and the shadow
 				// map's box across a texel (an anti-aliased map)
 				auto sr = sqrt(halton(n, 11)) * glamour_soft, sth = 2.0 * M_PI * halton(n, 13);
-				earth.sun_jitter_x = sr * cos(sth);
-				earth.sun_jitter_y = sr * sin(sth);
-				earth.shadow_jitter_x = halton(n, 17) - 0.5;
-				earth.shadow_jitter_y = halton(n, 19) - 0.5;
+				earth.glamour.sun_x = sr * cos(sth);
+				earth.glamour.sun_y = sr * sin(sth);
+				earth.glamour.shadow_x = halton(n, 17) - 0.5;
+				earth.glamour.shadow_y = halton(n, 19) - 0.5;
 				a.ao_rotation = (float)(2.0 * M_PI * halton(n, 23));
-			} else {
-				earth.jitter_x = earth.jitter_y = earth.lens_x = earth.lens_y = 0;
-				earth.sun_jitter_x = earth.sun_jitter_y = earth.shadow_jitter_x = earth.shadow_jitter_y = 0;
 			}
 			if (n == 0) earth.lens_focus = fmax(1.0, earth.centerDistanceMesh(camera));
-		} else {
-			earth.jitter_x = earth.jitter_y = earth.lens_x = earth.lens_y = 0;
-			earth.sun_jitter_x = earth.sun_jitter_y = earth.shadow_jitter_x = earth.shadow_jitter_y = 0;
 		}
 		renderFrameBegin(ctx, w, h, sky);
 		auto t1 = earth_core_t::ticksMs();
@@ -497,10 +489,10 @@ struct EarthView {
 			// anything that changed the picture: the average starts over
 			auto drawn = (int)earth.drawn_nodes.size();
 			if (!earth.walk_reused || earth.uploads_this_frame > 0
-				|| earth.stat_nodes_loaded != glamour_loaded || drawn != glamour_drawn
+				|| earth.stat.nodes_loaded != glamour_loaded || drawn != glamour_drawn
 				|| w != glamour_w || h != glamour_h)
 				a.samples = 0;
-			glamour_loaded = earth.stat_nodes_loaded; glamour_drawn = drawn;
+			glamour_loaded = earth.stat.nodes_loaded; glamour_drawn = drawn;
 			glamour_w = w; glamour_h = h;
 			// enough: keep showing the average without adding to it
 			a.hold = a.samples >= glamour_samples;

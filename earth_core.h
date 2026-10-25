@@ -28,16 +28,20 @@ struct earth_core_t {
 
 	// true when the last walk saw everything the view wants fully downloaded
 	bool scene_complete = false;
-	// last walk's want/have node counts, for download progress display
-	int stat_nodes_wanted = 0, stat_nodes_loaded = 0;
-	// the rest of the download picture, reported with the 2s sections line.
-	// 'stuck' is the one to watch: nodes the walk still wants whose request
-	// went out and never came back either way. a transport error resolves
-	// the request without resetting the node to a stub, so it is never
-	// retried and never drawn — and it isn't in flight either, so the
-	// scheduler has nothing left to say about it
-	int stat_nodes_stub = 0, stat_nodes_stuck = 0, stat_bulk_blocked = 0, stat_max_level = 0;
-	int stat_nodes_failed = 0, stat_bulks_started = 0;
+	struct download_stats_t {
+		// last walk's want/have node counts, for download progress display
+		int nodes_wanted = 0, nodes_loaded = 0;
+		// the rest of the download picture, reported with the 2s sections
+		// line. 'stuck' counts nodes the walk still wants whose request went
+		// out and hasn't come back (the line's 'downloading'): normally the
+		// ones in flight. a failed transfer comes back as a stub and is
+		// retried after a backoff ('failed' counts those), so the thing to
+		// watch is stuck staying up with nothing in flight — requests that
+		// nothing answered
+		int nodes_stub = 0, nodes_stuck = 0, bulk_blocked = 0, max_level = 0;
+		int nodes_failed = 0, bulks_started = 0;
+	};
+	download_stats_t stat;
 	// draw n-times coarser than the standard target. the web shell sets it
 	// live (see setLodScale) because the volume of data a view asks for is
 	// the one thing that decides whether a deep zoom can finish at all, and
@@ -54,20 +58,27 @@ struct earth_core_t {
 	bool sky_on = true, haze_on = true, tint_on = true;
 
 	// glamour mode (EarthView::frame accumulates frames while the camera
-	// sits still): a sub-pixel offset for the projection, in pixels, and
-	// a lens offset for the eye, in metres along the camera's right and
-	// up, aimed so the point at lens_focus stays put — thin-lens depth of
-	// field, one sample at a time. the walk's cache key ignores both
-	double jitter_x = 0, jitter_y = 0, lens_x = 0, lens_y = 0, lens_focus = 0;
+	// sits still): one sample's offsets, all zero outside the mode. a
+	// sub-pixel offset for the projection, in pixels, and a lens offset
+	// for the eye, in metres along the camera's right and up, aimed so the
+	// point at lens_focus stays put — thin-lens depth of field, one sample
+	// at a time. the walk's cache key ignores both. sun and shadow are the
+	// shadow pass's (see sun shadows, below)
+	struct glamour_sample_t {
+		double jitter_x = 0, jitter_y = 0, lens_x = 0, lens_y = 0;
+		double sun_x = 0, sun_y = 0, shadow_x = 0, shadow_y = 0;
+	};
+	glamour_sample_t glamour;
+	double lens_focus = 0;
 	bool walk_reused = false; // did the last frame reuse the cached walk?
 
-	// sun shadows (see the shadow pass in updateAndDraw): on, and how dark
-	// the shade is. glamour mode jitters the sun across a disc (radians,
-	// along two axes across it) and the map's box by fractions of a texel,
-	// a sample at a time, for soft penumbras and an anti-aliased map
+	// sun shadows (see shadowPass): on, and how dark the shade is. glamour
+	// mode jitters the sun across a disc (glamour.sun_*: radians, along two
+	// axes across it) and the map's box by fractions of a texel
+	// (glamour.shadow_*), a sample at a time, for soft penumbras and an
+	// anti-aliased map
 	bool shadows_on = true;
 	double shadow_strength = 0.45;
-	double sun_jitter_x = 0, sun_jitter_y = 0, shadow_jitter_x = 0, shadow_jitter_y = 0;
 	static constexpr int shadow_size = 4096;
 	double shadow_focus = 0; // metres to the terrain under the crosshair, refreshed when the camera moves
 	// what the last shadow map was rendered from: when none of it has
@@ -170,7 +181,7 @@ struct earth_core_t {
 	// then (0, 0, its height above that ground), which the roll leaves at
 	// the tube's bottom: the camera is inside wherever its altitude puts it
 	void tunnelUpdate(const camera_t &cam, double dt_ms) {
-		auto R_p = planetoid && planetoid->downloaded ? (double)planetoid->radius : 6371010.0;
+		auto R_p = planetRadius();
 		Vector3d up = cam.eye.normalized();
 		Vector3d h = cam.direction - up * cam.direction.dot(up);
 		if (h.norm() < 1e-6 && tunnel_heading_set) h = tunnel_heading - up * tunnel_heading.dot(up); // straight down: keep the old heading
@@ -234,6 +245,10 @@ struct earth_core_t {
 		return c * c;
 	}
 
+	// the roll's radius at the current curl: the closed tube's, growing as
+	// curl shrinks (flat at curl 0), floored so it stays finite
+	double tubeRollRadius() const { return tube_radius / fmax(tube_curl, 1e-3); }
+
 	void tubeRebuild() {
 		Matrix4d g = Matrix4d::Identity();
 		g.block<3,1>(0,0) = tube_axis;
@@ -256,7 +271,7 @@ struct earth_core_t {
 	// small-rect tangent-plane approximation: over a few km the curvature
 	// drop below the plane is centimeters
 	void setTubeRect(double lat0, double lon0, double lat1, double lon1, bool ew_axis) {
-		auto R_p = planetoid && planetoid->downloaded ? (double)planetoid->radius : 6371010.0;
+		auto R_p = planetRadius();
 		auto latc = (lat0 + lat1) / 2, lonc = (lon0 + lon1) / 2;
 		auto ns_half = R_p * fabs(lat1 - lat0) / 2;
 		auto ew_half = R_p * cos(latc) * fabs(lon1 - lon0) / 2;
@@ -289,9 +304,8 @@ struct earth_core_t {
 	bool tubePose(const Vector3d &eye, const Vector3d &direction,
 			double &lat, double &lon, double &heading) {
 		if (!tube_on || tube_radius <= 0) return false;
-		auto R_eff = tube_radius / fmax(tube_curl, 1e-3);
-		Vector3d l = (tube_local_from_globe
-			* Vector4d(eye.x(), eye.y(), eye.z(), 1.0)).head<3>();
+		auto R_eff = tubeRollRadius();
+		Vector3d l = transformPoint(tube_local_from_globe, eye);
 		Vector3d d = (tube_local_from_globe
 			* Vector4d(direction.x(), direction.y(), direction.z(), 0.0)).head<3>();
 		auto theta = atan2(l.y(), R_eff - l.z());
@@ -317,7 +331,7 @@ struct earth_core_t {
 		auto dN = x * tube_axis.dot(north) + y * across.dot(north);
 		auto hE = dx * tube_axis.dot(east) + dy * across.dot(east);
 		auto hN = dx * tube_axis.dot(north) + dy * across.dot(north);
-		auto R_p = planetoid && planetoid->downloaded ? (double)planetoid->radius : 6371010.0;
+		auto R_p = planetRadius();
 		lat = latc + dN / R_p;
 		lon = lonc + dE / (R_p * cos(latc));
 		heading = atan2(hE, hN);
@@ -361,8 +375,7 @@ struct earth_core_t {
 	bool bodyPose(const Vector3d &eye, const Vector3d &direction,
 			double &lat, double &lon, double &heading) {
 		if (!tube_on || !tube_body || body_w < 2 || body_h < 2) return false;
-		Vector3d l = (tube_local_from_globe
-			* Vector4d(eye.x(), eye.y(), eye.z(), 1.0)).head<3>();
+		Vector3d l = transformPoint(tube_local_from_globe, eye);
 		auto best = 1e300;
 		int bi = 0, bj = 0;
 		auto consider = [&](int i, int j) {
@@ -397,7 +410,7 @@ struct earth_core_t {
 	// across the tube's diameter is a couple of radii away (overhead), not
 	// half a circumference
 	Vector3d tubeWarp(const Vector3d &l) const {
-		auto R = tube_radius / fmax(tube_curl, 1e-3);
+		auto R = tubeRollRadius();
 		auto th = l.y() / R;
 		auto rho = fmax(R - l.z(), 0.05 * R);
 		auto ze = R - rho;
@@ -428,9 +441,8 @@ struct earth_core_t {
 	};
 	tube_cyl_t tubeCyl(const Vector3d &p) const {
 		tube_cyl_t c;
-		auto R = tube_radius / fmax(tube_curl, 1e-3);
-		Vector3d l = (tube_local_from_globe
-			* Vector4d(p.x(), p.y(), p.z(), 1.0)).head<3>();
+		auto R = tubeRollRadius();
+		Vector3d l = transformPoint(tube_local_from_globe, p);
 		c.x = l.x();
 		c.theta = atan2(l.y(), R - l.z());
 		c.rho = Vector2d(l.y(), l.z() - R).norm();
@@ -441,9 +453,8 @@ struct earth_core_t {
 
 	// globe position of cylindrical (x, theta, rho)
 	Vector3d tubeCylPoint(double x, double theta, double rho) const {
-		auto R = tube_radius / fmax(tube_curl, 1e-3);
-		return (tube_globe_from_local
-			* Vector4d(x, rho * sin(theta), R - rho * cos(theta), 1.0)).head<3>();
+		auto R = tubeRollRadius();
+		return transformPoint(tube_globe_from_local, Vector3d(x, rho * sin(theta), R - rho * cos(theta)));
 	}
 
 	// the wall's radial distance at (x, theta): unroll the angle back onto
@@ -455,16 +466,14 @@ struct earth_core_t {
 	// toward a surface that sits tens of meters off
 	bool tubeWallRho(double x, double theta, double &rho_wall) {
 		if (!tube_on || tube_radius <= 0) return false;
-		auto R = tube_radius / fmax(tube_curl, 1e-3);
+		auto R = tubeRollRadius();
 		auto y = tube_wid_offset + remainder(theta - tube_wid_offset / R, 2.0 * M_PI) * R;
-		Vector3d origin = (tube_globe_from_local
-			* Vector4d(x, y, 10000.0, 1.0)).head<3>();
+		Vector3d origin = transformPoint(tube_globe_from_local, Vector3d(x, y, 10000.0));
 		Vector3d hit;
 		double mpt;
 		if (raycast(origin, -tube_up, hit, &mpt) != raycast_mesh) return false;
 		if (mpt > 10.0) return false;
-		auto z_ground = (tube_local_from_globe
-			* Vector4d(hit.x(), hit.y(), hit.z(), 1.0)).z();
+		auto z_ground = transformPoint(tube_local_from_globe, hit).z();
 		rho_wall = fmax(R - z_ground, 0.05 * R); // the warp's own clamp
 		return true;
 	}
@@ -476,7 +485,7 @@ struct earth_core_t {
 	// when there is no roof to be under
 	bool tunnelCeilingRadius(double &r) {
 		if (!tube_on || !tunnel_on || tube_curl < 0.999) return false;
-		auto R = tube_radius / tube_curl;
+		auto R = tubeRollRadius();
 		double rho;
 		if (!tubeWallRho(0, M_PI, rho)) rho = R;
 		r = tube_ground_radius + R + rho;
@@ -569,21 +578,34 @@ struct earth_core_t {
 	std::vector<rocktree_t::bulk_t *> walk_bulks; // every bulk the walk stamped as wanted
 	int walk_bulk_count = 0, walk_bulk_blocked = 0;
 	bool walk_cache_valid = false;
-	Matrix4d walk_key_vp = Matrix4d::Zero();
-	Vector3d walk_key_eye = Vector3d::Zero();
-	int walk_key_w = 0, walk_key_h = 0, walk_key_epoch = -1;
-	double walk_key_lod = 0;
-	bool walk_key_column = false;
+	// what the cached walk was made from: the unmoved camera's
+	// view-projection and eye, the viewport, the tree, the lod scale and
+	// whether the ground column was on
+	struct walk_key_t {
+		Matrix4d vp = Matrix4d::Zero();
+		Vector3d eye = Vector3d::Zero();
+		int w = 0, h = 0, epoch = -1;
+		double lod = 0;
+		bool column = false;
+		bool operator==(const walk_key_t &o) const {
+			return epoch == o.epoch && w == o.w && h == o.h && lod == o.lod
+				&& column == o.column && eye == o.eye && vp == o.vp;
+		}
+	};
+	walk_key_t walk_key;
 
-	// per-section frame timing and bfs work counters, reported every 2s
-	double sec_bfs = 0, sec_dl = 0, sec_evict = 0, sec_draw = 0;
-	long cnt_oct = 0, cnt_cull = 0, cnt_lod = 0;
-	int sec_frames = 0;
-	// the last 2s report's per-frame averages, kept (rather than only
-	// printed) so shells can read them back — see EarthView::getStats
-	double avg_bfs = 0, avg_dl = 0, avg_evict = 0, avg_draw = 0;
-	long avg_oct = 0, avg_cull = 0, avg_lod = 0;
-	int avg_fps = 0;
+	// per-section frame timing (ms) and bfs work counters
+	struct section_stats_t {
+		double bfs = 0, dl = 0, evict = 0, draw = 0;
+		long oct = 0, cull = 0, lod = 0;
+		int frames = 0;
+	};
+	// summed over the current 2s window, reported at its end
+	section_stats_t sec;
+	// the last report's per-frame averages (frames: per second), kept
+	// (rather than only printed) so shells can read them back — see
+	// EarthView::getStats
+	section_stats_t avg;
 	double sec_report_ms = 0, stats_report_ms = 0;
 	int evict_tick = 0;
 
@@ -614,6 +636,10 @@ struct earth_core_t {
 	}
 
 	double radius() const { return planetoid->radius; }
+	// the planetoid's sphere, or the earth's mean radius before it loads
+	double planetRadius() const {
+		return planetoid && planetoid->downloaded ? planetoid->radius : 6371010.0;
+	}
 
 	// --- picking --------------------------------------------------------
 
@@ -659,12 +685,8 @@ struct earth_core_t {
 	static bool obbOccluded(const Vector3d &eye, const OrientedBoundingBox &obb, double planet_radius) {
 		auto r_occ = planet_radius - 1500.0;
 		auto r_occ2 = r_occ * r_occ;
-		for (auto i = 0; i < 8; i++) {
-			Vector3d s(i & 1 ? obb.extents.x() : -obb.extents.x(),
-				i & 2 ? obb.extents.y() : -obb.extents.y(),
-				i & 4 ? obb.extents.z() : -obb.extents.z());
-			if (!pointOccluded(eye, obb.center + obb.orientation * s, r_occ2)) return false;
-		}
+		for (auto i = 0; i < 8; i++)
+			if (!pointOccluded(eye, obbCorner(obb, i), r_occ2)) return false;
 		return true;
 	}
 
@@ -702,7 +724,7 @@ struct earth_core_t {
 			const rocktree_t::node_t *node, uint8_t octant_mask, double &best_t,
 			const rocktree_t::node_t *&best_node) {
 		Matrix4d mesh_from_globe = node->matrix_globe_from_mesh.inverse();
-		Vector3d o = (mesh_from_globe * Vector4d(origin.x(), origin.y(), origin.z(), 1.0)).head<3>();
+		Vector3d o = transformPoint(mesh_from_globe, origin);
 		Vector3d d = (mesh_from_globe * Vector4d(dir.x(), dir.y(), dir.z(), 0.0)).head<3>();
 		for (auto &mesh : node->meshes) {
 			auto verts = mesh.vertices.data();
@@ -829,7 +851,7 @@ struct earth_core_t {
 	void setPath(const std::vector<double> &lla) {
 		path_up.clear(); path_r.clear(); path_ground.clear(); path_brk.clear();
 		path_probe_at = 0;
-		auto R = planetoid && planetoid->downloaded ? planetoid->radius : 6371010.0;
+		auto R = planetRadius();
 		bool brk = true;
 		for (size_t i = 0; i + 2 < lla.size(); i += 3) {
 			auto lat = lla[i], lon = lla[i + 1], ele = lla[i + 2];
@@ -878,7 +900,7 @@ struct earth_core_t {
 	}
 
 	void setPathCursor(double lat, double lon, double alt) {
-		auto R = planetoid && planetoid->downloaded ? planetoid->radius : 6371010.0;
+		auto R = planetRadius();
 		path_cursor = geoUp(lat * M_PI / 180.0, lon * M_PI / 180.0) * (R + alt);
 		path_cursor_on = true;
 	}
@@ -960,22 +982,24 @@ struct earth_core_t {
 		return centerDistance(cam, planetoid->radius);
 	}
 
-	// cull, schedule downloads, evict, draw. the shell has already begun the
-	// frame (renderFrameBegin) and will end it after this returns
-	void updateAndDraw(render_ctx_t &ctx, const camera_t &cam, int width, int height, double dt_ms) {
-		if (!ready()) return;
-		auto current_bulk = planetoid->root_bulk;
-		auto planet_radius = planetoid->radius;
+	// what the frame's setup works out for the phases after it: the camera
+	// as drawn (the eye and direction moved by the lens offset, and its
+	// right and up), the clip range and the matrices
+	struct frame_t {
+		int width, height;
+		Vector3d eye, direction, right, cam_up;
+		double near, far;
+		double ortho_half_extent; // vertical half-extent in meters (ortho only)
+		float aspect_ratio;
+		Matrix4d viewprojection;
+		Matrix4d key_vp; // the unmoved camera, before the jitter: the walk's cache key
+	};
 
-		// stage 2 of the tube pipeline: as tiles stream in, keep attempting
-		// the ground measurement against last frame's drawn meshes; it locks
-		// as soon as the whole rect is covered at measurement resolution —
-		// long before full res. the host watches groundLocked, rolls the
-		// tube up, and the remaining detail streams into the rolled tube
-		if (tunnel_on) tunnelUpdate(cam, dt_ms);
-		else if (tube_on && !tube_ground_locked)
-			tubeLockGround(true);
-
+	// the camera for this frame: its up vector and lens offset, the clip
+	// range and projection, the jitter, and the camera the miniature and
+	// occlusion passes read depth back with
+	frame_t setupFrame(render_ctx_t &ctx, const camera_t &cam, int width, int height) {
+		auto planet_radius = planetRadius();
 		Vector3d eye = cam.eye;
 		Vector3d direction = cam.direction;
 		// airplane mode owns its up vector (roll); otherwise up is gravity,
@@ -987,14 +1011,13 @@ struct earth_core_t {
 		// the lens offset (glamour mode): the eye steps sideways on the
 		// aperture and turns to keep the focus point on the boresight
 		auto key_view = lookAt(eye, eye + direction, up); // the unmoved camera, for the walk's cache key
-		if ((lens_x != 0 || lens_y != 0) && lens_focus > 0) {
+		if ((glamour.lens_x != 0 || glamour.lens_y != 0) && lens_focus > 0) {
 			Vector3d right = direction.cross(up).normalized();
 			Vector3d cup = right.cross(direction).normalized();
 			Vector3d focus_pt = eye + direction * lens_focus;
-			eye += right * lens_x + cup * lens_y;
+			eye += right * glamour.lens_x + cup * glamour.lens_y;
 			direction = (focus_pt - eye).normalized();
 		}
-		uploads_this_frame = 0;
 
 		// projection
 		float aspect_ratio = (float)width / (float)height;
@@ -1054,8 +1077,6 @@ struct earth_core_t {
 			ctx.dof.range = ctx.dof.range_host * (float)(half_angle / tan(0.125 * M_PI));
 		}
 
-		auto t0 = ticksMs();
-
 		// the glamour pass's ambient occlusion reads depth back into
 		// positions with this camera
 		ctx.accum.near = (float)near; ctx.accum.far = (float)far; ctx.accum.ortho = cam.ortho;
@@ -1066,12 +1087,63 @@ struct earth_core_t {
 		Matrix4d key_vp = projection * key_view; // before the jitter
 		// the sub-pixel jitter (glamour mode): a shift of the whole image by
 		// a fraction of a pixel, in the projection's own terms
-		if (jitter_x != 0 || jitter_y != 0) {
-			if (cam.ortho) { projection(0, 3) += jitter_x * 2.0 / width; projection(1, 3) += jitter_y * 2.0 / height; }
-			else { projection(0, 2) += jitter_x * 2.0 / width; projection(1, 2) += jitter_y * 2.0 / height; }
+		if (glamour.jitter_x != 0 || glamour.jitter_y != 0) {
+			if (cam.ortho) { projection(0, 3) += glamour.jitter_x * 2.0 / width; projection(1, 3) += glamour.jitter_y * 2.0 / height; }
+			else { projection(0, 2) += glamour.jitter_x * 2.0 / width; projection(1, 2) += glamour.jitter_y * 2.0 / height; }
 		}
 		auto view = lookAt(eye, eye + direction, up);
 		Matrix4d viewprojection = projection * view;
+		Vector3d right = direction.cross(up).normalized();
+		Vector3d cam_up = right.cross(direction).normalized();
+
+		frame_t f;
+		f.width = width; f.height = height;
+		f.eye = eye; f.direction = direction; f.right = right; f.cam_up = cam_up;
+		f.near = near; f.far = far; f.ortho_half_extent = ortho_half_extent;
+		f.aspect_ratio = aspect_ratio;
+		f.viewprojection = viewprojection; f.key_vp = key_vp;
+		return f;
+	}
+
+	// a child's path is its parent's plus one of these
+	static inline const std::string octs[8] = { "0", "1", "2", "3", "4", "5", "6", "7" };
+
+	// node culling and level of detail: a breadth-first walk of the tree
+	// that stamps what the view wants and collects the nodes and bulks it
+	// wants and doesn't have — or, when nothing it depends on has moved,
+	// last frame's answer, re-stamped. true when no bulk it needed was
+	// missing
+	bool walk(const frame_t &f, const camera_t &cam, double now_ms) {
+		auto &eye = f.eye, &direction = f.direction;
+		auto &viewprojection = f.viewprojection;
+		auto width = f.width, height = f.height;
+		auto aspect_ratio = f.aspect_ratio;
+		auto ortho_half_extent = f.ortho_half_extent;
+		auto planet_radius = planetRadius();
+
+		// wanted bulks/nodes are marked by stamping last_wanted_ms with this
+		// frame's time during the walk; membership tests elsewhere (eviction,
+		// bulk purge) compare against the stamp instead of consulting a map
+		auto prev_walk_ms = last_walk_ms;
+		last_walk_ms = now_ms;
+
+		// is last frame's walk still the answer? (see the members)
+		auto epoch = g_tree_epoch.load();
+		auto cacheable = !tube_on && !tunnel_on;
+		walk_key_t key = { f.key_vp, cam.eye, width, height, epoch, lod_scale, ground_column_on };
+		auto reuse = cacheable && walk_cache_valid && walk_key == key;
+		walk_reused = reuse;
+		if (reuse) {
+			for (auto &kv : potential_nodes) kv.second->last_wanted_ms = now_ms;
+			for (auto b : walk_bulks) b->last_wanted_ms = now_ms;
+			stat.bulk_blocked = walk_bulk_blocked;
+			return walk_bulk_blocked == 0;
+		}
+		potential_nodes.clear();
+		potential_want.clear();
+		to_download_bulks.clear();
+		walk_bulks.clear();
+		stat.bulk_blocked = 0; // counted over this frame's walk only
 
 		auto frustum_planes = getFrustumPlanes(viewprojection); // for obb culling
 
@@ -1091,49 +1163,16 @@ struct earth_core_t {
 		Vector3d tube_eye_local = Vector3d::Zero();
 		Vector3d tube_dir_local = Vector3d::UnitX();
 		if (tube_on) {
-			tube_eye_local = (tube_local_from_globe
-				* Vector4d(eye.x(), eye.y(), eye.z(), 1.0)).head<3>();
+			tube_eye_local = transformPoint(tube_local_from_globe, eye);
 			tube_dir_local = tube_local_from_globe.block<3, 3>(0, 0) * direction;
 		}
 
-		const std::string octs[] = { "0", "1", "2", "3", "4", "5", "6", "7" };
-		std::vector<std::pair<std::string, rocktree_t::bulk_t *>> valid = { std::make_pair("", current_bulk) };
+		std::vector<std::pair<std::string, rocktree_t::bulk_t *>> valid = { std::make_pair("", planetoid->root_bulk) };
 		decltype(valid) next_valid;
 		std::vector<double> next_want; // tube mode: potential_want's counterpart for next_valid
 
-		// downloaded nodes and bulk metadata are both lru caches with byte
-		// quotas (see the eviction sweep below); nothing is ever dropped on
-		// a clock
-		auto now_ms = ticksMs();
-		auto prev_walk_ms = last_walk_ms;
-		last_walk_ms = now_ms;
-
-		// wanted bulks/nodes are marked by stamping last_wanted_ms with this
-		// frame's time during the walk; membership tests elsewhere (eviction,
-		// bulk purge) compare against the stamp instead of consulting a map
 		auto potential_bulk_count = 0;
 		bool all_loaded = true;
-
-		// is last frame's walk still the answer? (see the members)
-		auto epoch = g_tree_epoch.load();
-		auto cacheable = !tube_on && !tunnel_on;
-		auto reuse = cacheable && walk_cache_valid && walk_key_epoch == epoch
-			&& walk_key_w == width && walk_key_h == height && walk_key_lod == lod_scale
-			&& walk_key_column == ground_column_on && walk_key_eye == cam.eye
-			&& walk_key_vp == key_vp;
-		walk_reused = reuse;
-		if (reuse) {
-			for (auto &kv : potential_nodes) kv.second->last_wanted_ms = now_ms;
-			for (auto b : walk_bulks) b->last_wanted_ms = now_ms;
-			potential_bulk_count = walk_bulk_count;
-			stat_bulk_blocked = walk_bulk_blocked;
-			if (walk_bulk_blocked) all_loaded = false;
-		} else {
-		potential_nodes.clear();
-		potential_want.clear();
-		to_download_bulks.clear();
-		walk_bulks.clear();
-		stat_bulk_blocked = 0; // counted over this frame's walk only
 
 		// node culling and level of detail using breadth-first search
 		for (;;) {
@@ -1170,7 +1209,7 @@ struct earth_core_t {
 						// the walk cannot see past a bulk it doesn't have: this
 						// is a whole 4-level subtree that stays coarse until it
 						// lands, which is what a deep zoom is waiting on
-						stat_bulk_blocked++;
+						stat.bulk_blocked++;
 						all_loaded = false;
 						continue;
 					}
@@ -1181,7 +1220,7 @@ struct earth_core_t {
 				potential_bulk_count++;
 
 				for(auto o : octs) {
-					cnt_oct++;
+					sec.oct++;
 					auto nxt = cur + o;
 					auto nxt_rel = nxt.substr (floor((nxt.size() - 1) / 4) * 4, 4);
 					auto node_kv = bulk->nodes.find(nxt_rel);
@@ -1190,7 +1229,7 @@ struct earth_core_t {
 
 					// cull outside frustum using obb
 					// todo: check if it could cull more
-					cnt_cull++;
+					sec.cull++;
 					// ground-column nodes skip culling and the lod cutoff:
 					// the ground query wants the finest mesh under the
 					// camera regardless of where the view points
@@ -1198,8 +1237,7 @@ struct earth_core_t {
 						&& rayHitsObb(col_origin, col_dir, node->obb, INFINITY);
 					Vector3d tube_c = Vector3d::Zero(); // node center in the rect-local frame
 					if (tube_on)
-						tube_c = (tube_local_from_globe * Vector4d(
-							node->obb.center.x(), node->obb.center.y(), node->obb.center.z(), 1.0)).head<3>();
+						tube_c = transformPoint(tube_local_from_globe, node->obb.center);
 					// tube mode culls against the rect, not the view: the
 					// whole slab is drawn wherever the camera looks. body
 					// mode keeps the land around the figure too — the rect
@@ -1217,7 +1255,7 @@ struct earth_core_t {
 							&& !obbOccluded(eye, node->obb, planet_radius);
 						if (!in_view && !in_rect) continue;
 					}
-					cnt_lod++;
+					sec.lod++;
 
 					// level of detail: the ground column always descends — it
 					// wants the finest mesh there regardless of the camera
@@ -1377,120 +1415,114 @@ struct earth_core_t {
 			next_want.clear();
 		}
 		walk_bulk_count = potential_bulk_count;
-		walk_bulk_blocked = stat_bulk_blocked;
+		walk_bulk_blocked = stat.bulk_blocked;
 		walk_cache_valid = cacheable;
-		walk_key_epoch = epoch;
-		walk_key_w = width; walk_key_h = height; walk_key_lod = lod_scale;
-		walk_key_column = ground_column_on; walk_key_eye = cam.eye;
-		walk_key_vp = key_vp;
-		} // end of the walk
-		auto t1 = ticksMs();
-		sec_bfs += t1 - t0;
+		walk_key = key;
+		return all_loaded;
+	}
 
-		// download nodes in order of importance: by apparent size on screen,
-		// biggest first. distance to the node's bounding sphere over its diameter
-		// is the inverse of angular size, so it ranks a fine tile right in front
-		// of the camera above a coarse tile at the horizon, while a huge coarse
-		// tile still wins over everything when nothing is loaded yet. only a
-		// limited number of requests may be in flight at once, so the order can
-		// adapt while the camera moves instead of everything being queued in path
-		// order the first frame it becomes visible
-		{
-			const auto max_nodes_in_flight = 32;
-			// small on purpose: see bulks_in_flight. eight is enough to keep
-			// the descent moving down the path you're looking along without
-			// the metadata ever being what the node requests wait behind
-			const auto max_bulks_in_flight = 16;
-			// how long a thing that just failed has to wait before being asked
-			// for again: half a second, doubling per failure, capped at half a
-			// minute. set when the request goes out, so a failure that returns
-			// immediately still can't be retried before the delay is up
-			auto retry_delay_ms = [](int fails) {
-				return 500.0 * (double)(1 << (fails < 6 ? fails : 6));
-			};
-			// ready if it has never failed, or if its penalty box has expired
-			auto retry_ready = [&](auto *x) {
-				return x->dl_fails == 0 || now_ms >= x->dl_next_try_ms;
-			};
+	// download nodes in order of importance: by apparent size on screen,
+	// biggest first. distance to the node's bounding sphere over its diameter
+	// is the inverse of angular size, so it ranks a fine tile right in front
+	// of the camera above a coarse tile at the horizon, while a huge coarse
+	// tile still wins over everything when nothing is loaded yet. only a
+	// limited number of requests may be in flight at once, so the order can
+	// adapt while the camera moves instead of everything being queued in path
+	// order the first frame it becomes visible
+	void scheduleDownloads(const frame_t &f, double now_ms, bool all_loaded) {
+		auto &eye = f.eye;
+		const auto max_nodes_in_flight = 32;
+		// small on purpose: see bulks_in_flight. sixteen is enough to keep
+		// the descent moving down the path you're looking along without
+		// the metadata ever being what the node requests wait behind
+		const auto max_bulks_in_flight = 16;
+		// how long a thing that just failed has to wait before being asked
+		// for again: half a second, doubling per failure, capped at half a
+		// minute. set when the request goes out, so a failure that returns
+		// immediately still can't be retried before the delay is up
+		auto retry_delay_ms = [](int fails) {
+			return 500.0 * (double)(1 << (fails < 6 ? fails : 6));
+		};
+		// ready if it has never failed, or if its penalty box has expired
+		auto retry_ready = [&](auto *x) {
+			return x->dl_fails == 0 || now_ms >= x->dl_next_try_ms;
+		};
 
-			// bulks first: they cost little and the walk cannot see past them,
-			// so a slot spent here opens four levels of everything below
-			std::sort(to_download_bulks.begin(), to_download_bulks.end(),
-				[](const bulk_candidate_t &a, const bulk_candidate_t &b) {
-					return a.priority != b.priority ? a.priority < b.priority : a.level < b.level;
-				});
-			stat_bulks_started = 0;
-			for (auto &c : to_download_bulks) {
-				if (bulks_in_flight >= max_bulks_in_flight) break;
-				// (a reused walk's candidates include ones already requested)
-				if (c.bulk->dl_state != dl_state_stub) continue;
-				if (!retry_ready(c.bulk)) continue;
-				bulks_in_flight++;
-				stat_bulks_started++;
-				c.bulk->dl_next_try_ms = now_ms + retry_delay_ms(c.bulk->dl_fails);
-				c.bulk->setStartedDownloading();
-				getBulk(c.bulk, [this] { bulks_in_flight--; });
-			}
-
-			struct candidate_t { double priority; size_t level; rocktree_t::node_t *node; };
-			std::vector<candidate_t> to_download;
-			stat_nodes_wanted = (int)potential_nodes.size();
-			stat_nodes_loaded = stat_nodes_stub = stat_nodes_stuck = 0;
-			stat_nodes_failed = stat_max_level = 0;
-			pending_nodes.clear();
-			for (auto &kv : potential_nodes) {
-				auto node = kv.second;
-				if ((int)kv.first.size() > stat_max_level) stat_max_level = (int)kv.first.size();
-				if (node->dl_state != dl_state_downloaded) {
-					all_loaded = false;
-					pending_nodes.push_back({ kv.first, (int)node->dl_state.load(), node->dl_fails,
-						(node->obb.center - eye).norm(), node->meters_per_texel, node->first_wanted_ms });
-				}
-				else stat_nodes_loaded++;
-				if (node->dl_state == dl_state_stub) stat_nodes_stub++;
-				else if (node->dl_state == dl_state_downloading) stat_nodes_stuck++;
-				if (node->dl_fails) stat_nodes_failed++;
-				if (node->dl_state != dl_state_stub) continue;
-				if (!retry_ready(node)) continue; // waiting out a failure
-				auto radius = node->obb.extents.norm();
-				auto dist = fmax(0.0, (node->obb.center - eye).norm() - radius);
-				// (in tube mode the walk measured the distance through the
-				// roll, which is what proximity means there)
-				to_download.push_back({ tube_on ? node->sched_pri : dist / (2 * radius), kv.first.size(), node });
-			}
-			std::sort(to_download.begin(), to_download.end(), [](const candidate_t &a, const candidate_t &b) {
-				// tiles containing the camera all have priority 0; coarse first there
+		// bulks first: they cost little and the walk cannot see past them,
+		// so a slot spent here opens four levels of everything below
+		std::sort(to_download_bulks.begin(), to_download_bulks.end(),
+			[](const bulk_candidate_t &a, const bulk_candidate_t &b) {
 				return a.priority != b.priority ? a.priority < b.priority : a.level < b.level;
 			});
-			auto started = 0;
-			for (auto &c : to_download) {
-				if (nodes_in_flight >= max_nodes_in_flight) break;
-				auto node = c.node;
-				nodes_in_flight++;
-				started++;
-				node->dl_next_try_ms = now_ms + retry_delay_ms(node->dl_fails);
-				node->setStartedDownloading();
-				getNode(node, [this] { nodes_in_flight--; });
-			}
-			if (log_sched && (to_download.size() > 0 || nodes_in_flight > 0))
-				printf("timing: sched at=%.0f stubs=%zu started=%d inflight=%d pot=%zu\n",
-					now_ms, to_download.size(), started, (int)nodes_in_flight, potential_nodes.size());
+		stat.bulks_started = 0;
+		for (auto &c : to_download_bulks) {
+			if (bulks_in_flight >= max_bulks_in_flight) break;
+			// (a reused walk's candidates include ones already requested)
+			if (c.bulk->dl_state != dl_state_stub) continue;
+			if (!retry_ready(c.bulk)) continue;
+			bulks_in_flight++;
+			stat.bulks_started++;
+			c.bulk->dl_next_try_ms = now_ms + retry_delay_ms(c.bulk->dl_fails);
+			c.bulk->setStartedDownloading();
+			getBulk(c.bulk, [this] { bulks_in_flight--; });
 		}
+
+		struct candidate_t { double priority; size_t level; rocktree_t::node_t *node; };
+		std::vector<candidate_t> to_download;
+		stat.nodes_wanted = (int)potential_nodes.size();
+		stat.nodes_loaded = stat.nodes_stub = stat.nodes_stuck = 0;
+		stat.nodes_failed = stat.max_level = 0;
+		pending_nodes.clear();
+		for (auto &kv : potential_nodes) {
+			auto node = kv.second;
+			if ((int)kv.first.size() > stat.max_level) stat.max_level = (int)kv.first.size();
+			if (node->dl_state != dl_state_downloaded) {
+				all_loaded = false;
+				pending_nodes.push_back({ kv.first, (int)node->dl_state.load(), node->dl_fails,
+					(node->obb.center - eye).norm(), node->meters_per_texel, node->first_wanted_ms });
+			}
+			else stat.nodes_loaded++;
+			if (node->dl_state == dl_state_stub) stat.nodes_stub++;
+			else if (node->dl_state == dl_state_downloading) stat.nodes_stuck++;
+			if (node->dl_fails) stat.nodes_failed++;
+			if (node->dl_state != dl_state_stub) continue;
+			if (!retry_ready(node)) continue; // waiting out a failure
+			auto radius = node->obb.extents.norm();
+			auto dist = fmax(0.0, (node->obb.center - eye).norm() - radius);
+			// (in tube mode the walk measured the distance through the
+			// roll, which is what proximity means there)
+			to_download.push_back({ tube_on ? node->sched_pri : dist / (2 * radius), kv.first.size(), node });
+		}
+		std::sort(to_download.begin(), to_download.end(), [](const candidate_t &a, const candidate_t &b) {
+			// tiles containing the camera all have priority 0; coarse first there
+			return a.priority != b.priority ? a.priority < b.priority : a.level < b.level;
+		});
+		auto started = 0;
+		for (auto &c : to_download) {
+			if (nodes_in_flight >= max_nodes_in_flight) break;
+			auto node = c.node;
+			nodes_in_flight++;
+			started++;
+			node->dl_next_try_ms = now_ms + retry_delay_ms(node->dl_fails);
+			node->setStartedDownloading();
+			getNode(node, [this] { nodes_in_flight--; });
+		}
+		if (log_sched && (to_download.size() > 0 || nodes_in_flight > 0))
+			printf("timing: sched at=%.0f stubs=%zu started=%d inflight=%d pot=%zu\n",
+				now_ms, to_download.size(), started, (int)nodes_in_flight, potential_nodes.size());
 		scene_complete = all_loaded;
+	}
 
-		auto t2 = ticksMs();
-		sec_dl += t2 - t1;
-
-		// downloaded nodes form an lru cache with a byte quota: nothing is evicted
-		// until resident mesh/texture data exceeds the quota, then the least
-		// recently wanted nodes are dropped first. nodes in the current potential
-		// set are never evicted, even over quota
-		// ~100-150KB per resident node
-		//
-		// the sweep walks every node entry of every resident bulk (including
-		// stubs), which costs tens of ms in heavy views — and it only needs to be
-		// roughly current, so it runs every 15th frame
-		if (evict_tick++ % 15 == 0) {
+	// downloaded nodes form an lru cache with a byte quota: nothing is evicted
+	// until resident mesh/texture data exceeds the quota, then the least
+	// recently wanted nodes are dropped first. nodes in the current potential
+	// set are never evicted, even over quota
+	// ~100-150KB per resident node
+	//
+	// the sweep walks every node entry of every resident bulk (including
+	// stubs), which costs tens of ms in heavy views — and it only needs to be
+	// roughly current, so it runs every 15th frame
+	void evict(double now_ms, double dt_ms) {
 		// the wasm heap is a fixed 1GB; leave headroom for decode buffers
 		// and the module itself. too small a quota makes looking around
 		// evict whatever was just behind you
@@ -1519,10 +1551,11 @@ struct earth_core_t {
 				+ b->bulks.size() * 128;
 		};
 
-		std::vector<rocktree_t::bulk_t*> x = {current_bulk};
+		// depth first: a stack of the bulks still to visit
+		std::vector<rocktree_t::bulk_t*> x = {planetoid->root_bulk};
 		auto buf_cnt = 0, obs_n_cnt = 0, obs_b_cnt = 0, total_n = 0, total_b = 0;
 		while(!x.empty()) {
-			auto cur_bulk = x[0]; x.erase(x.begin());
+			auto cur_bulk = x.back(); x.pop_back();
 			total_b++;
 			auto bbytes = bulk_bytes(cur_bulk);
 			bulk_bytes_total += bbytes;
@@ -1532,7 +1565,7 @@ struct earth_core_t {
 			for (auto &kv : cur_bulk->bulks) {
 				auto b = kv.second.get();
 				if (b->dl_state != dl_state_downloaded) continue;
-				x.emplace(x.begin(), b);
+				x.push_back(b);
 			}
 			// current iteration
 			for (auto &kv : cur_bulk->nodes) {
@@ -1596,33 +1629,28 @@ struct earth_core_t {
 		if (stats_report_ms > 2000) {
 			stats_report_ms = 0;
 			printf("buffered: %d, tot_n: %d, tot_b: %d, pot_n: %lu, pot_b: %d, obs n: %d, obs b: %d, mem: %zu MB\n",
-				buf_cnt, total_n, total_b, potential_nodes.size(), potential_bulk_count, obs_n_cnt, obs_b_cnt,
+				buf_cnt, total_n, total_b, potential_nodes.size(), walk_bulk_count, obs_n_cnt, obs_b_cnt,
 				resident_bytes >> 20
 			);
 		}
-		} // end amortized eviction sweep
+	}
 
-		auto t3 = ticksMs();
-		sec_evict += t3 - t2;
+	struct atmosphere_t {
+		Vector3d local_up, east, sun_dir; // the eye's local frame, and the sun in it
+		Vector3f zenith, haze; // the sky's colours
+	};
+	static double smooth(double a, double b, double x) { x = fmin(1.0, fmax(0.0, (x - a) / (b - a))); return x * x * (3 - 2 * x); }
 
-		// 8-bit octant mask flags of nodes
-		std::unordered_map<std::string, uint8_t> mask_map;
-
-		// potential-set membership by path, only needed for lod debug tinting
-		std::unordered_map<std::string, rocktree_t::node_t *> potential_set;
-		if (debug_lod)
-			for (auto &kv : potential_nodes) potential_set[kv.first] = kv.second;
-
-		renderSetDebugLod(ctx, debug_lod);
-
-		// the atmosphere's colours this frame: the sun in the eye's local
-		// frame, and the haze and the ground's tint from its height
+	// the atmosphere's colours this frame: the sun in the eye's local
+	// frame, and the haze and the ground's tint from its height
+	atmosphere_t setAtmosphere(render_ctx_t &ctx, const frame_t &f, const camera_t &cam) {
+		auto &eye = f.eye;
+		auto planet_radius = planetRadius();
 		Vector3d local_up = eye.normalized();
 		Vector3d east = Vector3d::UnitZ().cross(local_up);
 		if (east.norm() < 1e-6) east = Vector3d::UnitX(); else east.normalize();
 		Vector3d north = local_up.cross(east);
 		Vector3d sun_dir = cos(sun_el) * (sin(sun_az) * east + cos(sun_az) * north) + sin(sun_el) * local_up;
-		auto smooth = [](double a, double b, double x) { x = fmin(1.0, fmax(0.0, (x - a) / (b - a))); return x * x * (3 - 2 * x); };
 		auto low = 1.0 - smooth(0.0, 25.0 * M_PI / 180.0, sun_el); // 1 at the horizon, 0 at 25° up
 		auto day = smooth(-8.0 * M_PI / 180.0, 3.0 * M_PI / 180.0, sun_el); // 0 at night, 1 by day
 		auto bright = 0.1 + 0.9 * day;
@@ -1634,23 +1662,24 @@ struct earth_core_t {
 		Vector3f tint = Vector3f(1, 1, 1) * (float)(1.0 - 0.45 * low) + Vector3f(1.0f, 0.86f, 0.70f) * (float)(0.45 * low);
 		tint *= (float)(0.3 + 0.7 * day);
 		if (!tint_on) tint = Vector3f(1, 1, 1);
-		Vector3d right = direction.cross(up).normalized();
-		Vector3d cam_up = right.cross(direction).normalized();
 		Matrix3f cam_f;
-		cam_f.col(0) = right.cast<float>(); cam_f.col(1) = cam_up.cast<float>(); cam_f.col(2) = direction.cast<float>();
+		cam_f.col(0) = f.right.cast<float>(); cam_f.col(1) = f.cam_up.cast<float>(); cam_f.col(2) = f.direction.cast<float>();
 		Vector3f eye_f = eye.cast<float>();
 		renderSetAtmosphere(ctx, haze_on, (float)visibility_m, haze.data(), tint.data(),
-			(float)near, (float)far, cam.ortho, cam_f.data(), eye_f.data(),
-			(float)tan(cam.fov / 2.0), aspect_ratio, (float)planet_radius, (float)scale_height_m, width, height);
+			(float)f.near, (float)f.far, cam.ortho, cam_f.data(), eye_f.data(),
+			(float)tan(cam.fov / 2.0), f.aspect_ratio, (float)planet_radius, (float)scale_height_m, f.width, f.height);
+		return { local_up, east, sun_dir, zenith, haze };
+	}
 
-		// tube warp uniforms: the local->clip matrix folds the camera in, so
-		// the shader works in small rect-local coordinates end to end. the
-		// effective roll radius grows as curl shrinks (flat at curl 0); the
-		// floor keeps it finite for the shader
+	// tube warp uniforms: the local->clip matrix folds the camera in, so
+	// the shader works in small rect-local coordinates end to end. the
+	// effective roll radius grows as curl shrinks (flat at curl 0); the
+	// floor keeps it finite for the shader
+	void setTubeUniforms(render_ctx_t &ctx, const frame_t &f) {
 		if (tube_on) {
-			Matrix4d l2c = viewprojection * tube_globe_from_local;
+			Matrix4d l2c = f.viewprojection * tube_globe_from_local;
 			Matrix4f l2cf = l2c.cast<float>();
-			auto r_eff = tube_radius / fmax(tube_curl, 1e-3);
+			auto r_eff = tubeRollRadius();
 			renderSetTube(ctx, true, l2cf.data(),
 				(float)r_eff, (float)tube_half_len, (float)tube_half_wid, (float)tube_wid_offset,
 				(float)tunnelFade());
@@ -1666,9 +1695,26 @@ struct earth_core_t {
 		float bands[4] = {(float)body_bands[0], (float)body_bands[1], (float)body_bands[2], (float)body_bands[3]};
 		renderSetBody(ctx, tube_on && tube_body && body_w > 1 && body_h > 1,
 			(float)fmax(0.0, fmin(tube_curl, 1.0)), bands);
+	}
+
+	struct draw_t { rocktree_t::node_t *node; uint8_t self_mask; uint32_t stale_mask; };
+
+	// what this frame draws: the downloaded part of the potential set, read
+	// children first so that a node's octant mask (the octants a drawn
+	// child covers) is complete by the time the node comes up. buffers
+	// whatever isn't on the gpu yet, and refreshes drawn_nodes
+	std::vector<draw_t> buildDrawList(render_ctx_t &ctx) {
+		// 8-bit octant mask flags of nodes
+		std::unordered_map<std::string, uint8_t> mask_map;
+
+		// potential-set membership by path, only needed for lod debug tinting
+		std::unordered_map<std::string, rocktree_t::node_t *> potential_set;
+		if (debug_lod)
+			for (auto &kv : potential_nodes) potential_set[kv.first] = kv.second;
+
+		renderSetDebugLod(ctx, debug_lod);
 
 		drawn_nodes.clear();
-		struct draw_t { rocktree_t::node_t *node; uint8_t self_mask; uint32_t stale_mask; };
 		std::vector<draw_t> draws;
 		draws.reserve(potential_nodes.size());
 
@@ -1730,16 +1776,26 @@ struct earth_core_t {
 				if (!mesh.buffered) { bufferMesh(mesh, ctx); uploads_this_frame++; }
 			draws.push_back({ node, self_mask, stale_mask });
 		}
+		return draws;
+	}
 
-		// --- sun shadows -------------------------------------------------
-		// a depth map from the sun over what is drawn, fitted to the near
-		// part of the view: the frustum from the near plane out to a few
-		// times the distance to the terrain under the crosshair. the box is
-		// square in the sun's frame, its size quantized and its centre
-		// snapped to whole texels, so the map doesn't crawl as the camera
-		// moves; depth runs from 8 km toward the sun (the casters: towers,
-		// ridges) to just past the frustum. nothing changed since the last
-		// map (a still camera, no new tiles, the same sun) and it is reused
+	struct shadow_t { bool live; Matrix4d sun_view; };
+
+	// --- sun shadows -------------------------------------------------
+	// a depth map from the sun over what is drawn, fitted to the near
+	// part of the view: the frustum from the near plane out to a few
+	// times the distance to the terrain under the crosshair. the box is
+	// square in the sun's frame, its size quantized and its centre
+	// snapped to whole texels, so the map doesn't crawl as the camera
+	// moves; depth runs from 8 km toward the sun (the casters: towers,
+	// ridges) to just past the frustum. nothing changed since the last
+	// map (a still camera, no new tiles, the same sun) and it is reused
+	shadow_t shadowPass(render_ctx_t &ctx, const frame_t &f, const camera_t &cam,
+			const atmosphere_t &atm, const std::vector<draw_t> &draws) {
+		auto &eye = f.eye, &direction = f.direction, &right = f.right, &cam_up = f.cam_up;
+		auto near = f.near, far = f.far, ortho_half_extent = f.ortho_half_extent;
+		auto aspect_ratio = f.aspect_ratio;
+		auto &local_up = atm.local_up, &east = atm.east, &sun_dir = atm.sun_dir;
 		auto shadows_live = shadows_on && !tube_on && sun_el > 0.5 * M_PI / 180.0;
 		float shadow_box_f[4] = {1, 1, 0, 1};
 		Matrix4d sun_view = Matrix4d::Identity();
@@ -1750,8 +1806,8 @@ struct earth_core_t {
 			Vector3d L = sun_dir;
 			Vector3d sx = local_up.cross(L);
 			if (sx.norm() < 1e-6) sx = east; else sx.normalize();
-			if (sun_jitter_x != 0 || sun_jitter_y != 0) {
-				L = (L + sx * sun_jitter_x + L.cross(sx) * sun_jitter_y).normalized();
+			if (glamour.sun_x != 0 || glamour.sun_y != 0) {
+				L = (L + sx * glamour.sun_x + L.cross(sx) * glamour.sun_y).normalized();
 				sx = local_up.cross(L);
 				if (sx.norm() < 1e-6) sx = east; else sx.normalize();
 			}
@@ -1779,8 +1835,8 @@ struct earth_core_t {
 			auto half = 0.5 * fmax(x1 - x0, y1 - y0);
 			half = pow(2.0, ceil(log2(half) * 8.0) / 8.0);
 			shadow_texel_m = 2.0 * half / shadow_size;
-			auto cx = (floor(0.5 * (x0 + x1) / shadow_texel_m) + shadow_jitter_x) * shadow_texel_m;
-			auto cy = (floor(0.5 * (y0 + y1) / shadow_texel_m) + shadow_jitter_y) * shadow_texel_m;
+			auto cx = (floor(0.5 * (x0 + x1) / shadow_texel_m) + glamour.shadow_x) * shadow_texel_m;
+			auto cy = (floor(0.5 * (y0 + y1) / shadow_texel_m) + glamour.shadow_y) * shadow_texel_m;
 			auto cz = z1;
 			// the map's origin: the box's centre across the sun, and along it
 			// the frustum's most sunward point. depth runs along -L from there
@@ -1811,26 +1867,32 @@ struct earth_core_t {
 		auto shade = shadow_strength * smooth(0.5 * M_PI / 180.0, 6.0 * M_PI / 180.0, sun_el);
 		Vector3f up_sun = (sun_view.block<3, 3>(0, 0) * local_up).cast<float>();
 		Matrix3f sun_rot = sun_view.block<3, 3>(0, 0).cast<float>();
-		Vector3f eye_sun = (sun_view * Vector4d(eye.x(), eye.y(), eye.z(), 1.0)).head<3>().cast<float>();
+		Vector3f eye_sun = transformPoint(sun_view, eye).cast<float>();
 		renderSetShadow(ctx, shadows_live, shadow_box_f, (float)shade,
 			(float)(1.0 / shadow_size), (float)((0.3 + 0.5 * shadow_texel_m) / (shadow_box_f[3] - shadow_box_f[2])),
 			up_sun.data(), sun_rot.data(), eye_sun.data());
+		return { shadows_live, sun_view };
+	}
 
+	// the terrain: a node's meshes with its octant mask, shadowed, and in
+	// tube mode through the warp
+	void drawTerrain(render_ctx_t &ctx, const frame_t &f, const std::vector<draw_t> &draws,
+			const shadow_t &sh) {
 		for (auto &dr : draws) {
 			auto node = dr.node;
 			auto self_mask = dr.self_mask;
 			auto stale_mask = dr.stale_mask;
-			if (shadows_live) {
-				Matrix4f mv = (sun_view * node->matrix_globe_from_mesh).cast<float>();
+			if (sh.live) {
+				Matrix4f mv = (sh.sun_view * node->matrix_globe_from_mesh).cast<float>();
 				renderSetShadowNode(ctx, mv.data());
 			}
 
 			// float transform matrix
-			Matrix4d transform = viewprojection * node->matrix_globe_from_mesh;
+			Matrix4d transform = f.viewprojection * node->matrix_globe_from_mesh;
 			Matrix4f transform_float;
 			for(auto i = 0; i < 16; ++i) transform_float.data()[i] = (float)(transform.data()[i]);
 
-			// buffer, bind, draw
+			// bind, draw (buildDrawList buffered every mesh)
 			renderSetTransform(ctx, transform_float.data());
 			if (tube_on) {
 				// mesh -> rect-local frame, composed in double then narrowed:
@@ -1843,82 +1905,85 @@ struct earth_core_t {
 			// wrapped pass for whatever touches the rect
 			if (tube_on && tube_body) {
 				auto margin = node->obb.extents.norm();
-				Vector3d c = (tube_local_from_globe * Vector4d(
-					node->obb.center.x(), node->obb.center.y(), node->obb.center.z(), 1.0)).head<3>();
+				Vector3d c = transformPoint(tube_local_from_globe, node->obb.center);
 				renderSetTubePass(ctx, 2);
 				for (auto &mesh : node->meshes) {
-					if (!mesh.buffered) { bufferMesh(mesh, ctx); uploads_this_frame++; }
 					bindAndDrawMesh(mesh, self_mask, stale_mask, ctx);
 				}
 				if (!tubeRectTouches(margin, c)) continue;
 				renderSetTubePass(ctx, 1);
 			}
 			for (auto &mesh : node->meshes) {
-				if (!mesh.buffered) { bufferMesh(mesh, ctx); uploads_this_frame++; }
 				bindAndDrawMesh(mesh, self_mask, stale_mask, ctx);
 			}
 		}
+	}
 
-		// the sky, where the terrain left the far plane
-		if (sky_on) {
-			Vector3f r = right.cast<float>(), u = cam_up.cast<float>(), f = direction.cast<float>();
-			Vector3f lu = local_up.cast<float>(), sd = sun_dir.cast<float>();
-			auto alt = fmax(0.0, eye.norm() - planet_radius);
-			auto dip = acos(planet_radius / (planet_radius + alt));
-			// the sky thins away with altitude; what's left from high up is
-			// the limb, an atmosphere's thickness (a few scale heights)
-			// seen edge-on just above the horizon line
-			auto sky_amount = exp(-alt / (3.0 * scale_height_m));
-			auto limb = asin(fmin(1.0, (planet_radius + 4.0 * scale_height_m) / (planet_radius + alt)))
-				- asin(fmin(1.0, planet_radius / (planet_radius + alt)));
-			renderSkyDraw(ctx, r.data(), u.data(), f.data(), lu.data(), sd.data(),
-				(float)tan(cam.fov / 2.0), aspect_ratio, (float)dip, (float)sun_el, zenith.data(), haze.data(),
-				(float)sky_amount, (float)fmax(limb, 1e-3));
+	// the sky, where the terrain left the far plane
+	void drawSky(render_ctx_t &ctx, const frame_t &f, const camera_t &cam, const atmosphere_t &atm) {
+		if (!sky_on) return;
+		auto planet_radius = planetRadius();
+		Vector3f r = f.right.cast<float>(), u = f.cam_up.cast<float>(), fwd = f.direction.cast<float>();
+		Vector3f lu = atm.local_up.cast<float>(), sd = atm.sun_dir.cast<float>();
+		auto alt = fmax(0.0, f.eye.norm() - planet_radius);
+		auto dip = acos(planet_radius / (planet_radius + alt));
+		// the sky thins away with altitude; what's left from high up is
+		// the limb, an atmosphere's thickness (a few scale heights)
+		// seen edge-on just above the horizon line
+		auto sky_amount = exp(-alt / (3.0 * scale_height_m));
+		auto limb = asin(fmin(1.0, (planet_radius + 4.0 * scale_height_m) / (planet_radius + alt)))
+			- asin(fmin(1.0, planet_radius / (planet_radius + alt)));
+		renderSkyDraw(ctx, r.data(), u.data(), fwd.data(), lu.data(), sd.data(),
+			(float)tan(cam.fov / 2.0), f.aspect_ratio, (float)dip, (float)sun_el, atm.zenith.data(), atm.haze.data(),
+			(float)sky_amount, (float)fmax(limb, 1e-3));
+	}
+
+	// the dropped track, over the terrain it was walked on. after the
+	// meshes, so the depth test it loses against is a complete one; not
+	// in tube mode, where the ground has been rolled out from under it
+	// and a track drawn in globe space would hang in the air where the
+	// terrain used to be
+	void drawPath(render_ctx_t &ctx, const frame_t &f) {
+		if (path_up.empty() || tube_on || path_rgba[3] <= 0) return;
+		pathProbeGround(); // against this frame's drawn set
+		// draping keeps arriving for seconds after a drop, and rebuilding
+		// a long track's ribbon every frame to show one more measured
+		// point is not worth it — batch a few frames' worth
+		if (path_dirty && ++path_rebuild_wait >= 8) {
+			path_dirty = false;
+			path_rebuild_wait = 0;
+			pathRebuild();
+			renderPathUpload(ctx, path_verts.data(), (int)(path_verts.size() / 8));
 		}
-
-		// the dropped track, over the terrain it was walked on. after the
-		// meshes, so the depth test it loses against is a complete one; not
-		// in tube mode, where the ground has been rolled out from under it
-		// and a track drawn in globe space would hang in the air where the
-		// terrain used to be
-		if (!path_up.empty() && !tube_on && path_rgba[3] > 0) {
-			pathProbeGround(); // against this frame's drawn set
-			// draping keeps arriving for seconds after a drop, and rebuilding
-			// a long track's ribbon every frame to show one more measured
-			// point is not worth it — batch a few frames' worth
-			if (path_dirty && ++path_rebuild_wait >= 8) {
-				path_dirty = false;
-				path_rebuild_wait = 0;
-				pathRebuild();
-				renderPathUpload(ctx, path_verts.data(), (int)(path_verts.size() / 8));
-			}
-			Matrix4d to_clip = viewprojection;
-			to_clip.col(3) = viewprojection * Vector4d(path_origin.x(), path_origin.y(), path_origin.z(), 1.0);
-			Matrix4f to_clip_f = to_clip.cast<float>();
-			renderPathDraw(ctx, to_clip_f.data(), path_rgba, path_width, path_depth_bias, width, height);
-			if (path_cursor_on) {
-				// the path's own color, exactly: the disc is the track's
-				// position marker, not a second thing sitting on it
-				Vector3f c = (path_cursor - path_origin).cast<float>();
-				renderPathCursorDraw(ctx, to_clip_f.data(), path_rgba,
-					fmaxf(11.0f, path_width * 3.0f), path_depth_bias, width, height, c.data());
-			}
+		Matrix4d to_clip = f.viewprojection;
+		to_clip.col(3) = f.viewprojection * Vector4d(path_origin.x(), path_origin.y(), path_origin.z(), 1.0);
+		Matrix4f to_clip_f = to_clip.cast<float>();
+		renderPathDraw(ctx, to_clip_f.data(), path_rgba, path_width, path_depth_bias, f.width, f.height);
+		if (path_cursor_on) {
+			// the path's own color, exactly: the disc is the track's
+			// position marker, not a second thing sitting on it
+			Vector3f c = (path_cursor - path_origin).cast<float>();
+			renderPathCursorDraw(ctx, to_clip_f.data(), path_rgba,
+				fmaxf(11.0f, path_width * 3.0f), path_depth_bias, f.width, f.height, c.data());
 		}
+	}
 
-		sec_draw += ticksMs() - t3;
-		sec_frames++;
+	// per-section averages and the download picture, every 2s: printed,
+	// and kept for EarthView::getStats
+	void reportStats(render_ctx_t &ctx, double dt_ms) {
+		sec.frames++;
 		sec_report_ms += dt_ms;
-		if (sec_report_ms > 2000 && sec_frames > 0) {
+		if (sec_report_ms > 2000 && sec.frames > 0) {
 			sec_report_ms = 0;
-			avg_bfs = sec_bfs / sec_frames; avg_dl = sec_dl / sec_frames;
-			avg_evict = sec_evict / sec_frames; avg_draw = sec_draw / sec_frames;
-			avg_oct = cnt_oct / sec_frames; avg_cull = cnt_cull / sec_frames;
-			avg_lod = cnt_lod / sec_frames;
-			avg_fps = sec_frames / 2;
+			avg.bfs = sec.bfs / sec.frames; avg.dl = sec.dl / sec.frames;
+			avg.evict = sec.evict / sec.frames; avg.draw = sec.draw / sec.frames;
+			avg.oct = sec.oct / sec.frames; avg.cull = sec.cull / sec.frames;
+			avg.lod = sec.lod / sec.frames;
+			avg.frames = sec.frames / 2;
 			printf("sections avg ms: bfs %.2f, dl %.2f, evict %.2f, draw %.2f (%d frames; per frame: oct %ld, cull %ld, lod %ld)"
 				" · gpu %.2f (shadow %.2f, scene %.2f, occlusion %.2f, post %.2f)\n",
-				avg_bfs, avg_dl, avg_evict, avg_draw,
-				sec_frames, avg_oct, avg_cull, avg_lod,
+				avg.bfs, avg.dl, avg.evict, avg.draw,
+				sec.frames, avg.oct, avg.cull, avg.lod,
 				ctx.gpu.avg[0] + ctx.gpu.avg[1] + ctx.gpu.avg[2] + ctx.gpu.avg[3],
 				ctx.gpu.avg[gpu_shadow], ctx.gpu.avg[gpu_scene], ctx.gpu.avg[gpu_occlusion], ctx.gpu.avg[gpu_post]);
 			// what the view is still waiting for. the section above times the
@@ -1927,13 +1992,55 @@ struct earth_core_t {
 			// it is stuck: those nodes asked once and nothing answered
 			printf("tiles: want %d loaded %d waiting %d inflight %d downloading %d retrying %d"
 				" · deepest level %d · bulks: blocked %d inflight %d started %d%s\n",
-				stat_nodes_wanted, stat_nodes_loaded, stat_nodes_stub,
-				(int)nodes_in_flight, stat_nodes_stuck, stat_nodes_failed,
-				stat_max_level, stat_bulk_blocked, (int)bulks_in_flight,
-				stat_bulks_started, scene_complete ? " · complete" : "");
-			sec_bfs = sec_dl = sec_evict = sec_draw = 0;
-			cnt_oct = cnt_cull = cnt_lod = 0;
-			sec_frames = 0;
+				stat.nodes_wanted, stat.nodes_loaded, stat.nodes_stub,
+				(int)nodes_in_flight, stat.nodes_stuck, stat.nodes_failed,
+				stat.max_level, stat.bulk_blocked, (int)bulks_in_flight,
+				stat.bulks_started, scene_complete ? " · complete" : "");
+			sec = {};
 		}
+	}
+
+	// cull, schedule downloads, evict, draw. the shell has already begun the
+	// frame (renderFrameBegin) and will end it after this returns
+	void updateAndDraw(render_ctx_t &ctx, const camera_t &cam, int width, int height, double dt_ms) {
+		if (!ready()) return;
+
+		// stage 2 of the tube pipeline: as tiles stream in, keep attempting
+		// the ground measurement against last frame's drawn meshes; it locks
+		// as soon as the whole rect is covered at measurement resolution —
+		// long before full res. the host watches groundLocked, rolls the
+		// tube up, and the remaining detail streams into the rolled tube
+		if (tunnel_on) tunnelUpdate(cam, dt_ms);
+		else if (tube_on && !tube_ground_locked)
+			tubeLockGround(true);
+		uploads_this_frame = 0;
+		auto f = setupFrame(ctx, cam, width, height);
+
+		auto t0 = ticksMs();
+		// downloaded nodes and bulk metadata are both lru caches with byte
+		// quotas (see evict); nothing is ever dropped on
+		// a clock
+		auto now_ms = ticksMs();
+		auto all_loaded = walk(f, cam, now_ms);
+		auto t1 = ticksMs();
+		sec.bfs += t1 - t0;
+
+		scheduleDownloads(f, now_ms, all_loaded);
+		auto t2 = ticksMs();
+		sec.dl += t2 - t1;
+
+		if (evict_tick++ % 15 == 0) evict(now_ms, dt_ms);
+		auto t3 = ticksMs();
+		sec.evict += t3 - t2;
+
+		auto atm = setAtmosphere(ctx, f, cam);
+		setTubeUniforms(ctx, f);
+		auto draws = buildDrawList(ctx);
+		auto sh = shadowPass(ctx, f, cam, atm, draws);
+		drawTerrain(ctx, f, draws, sh);
+		drawSky(ctx, f, cam, atm);
+		drawPath(ctx, f);
+		sec.draw += ticksMs() - t3;
+		reportStats(ctx, dt_ms);
 	}
 };
