@@ -1,18 +1,23 @@
 #include <math.h>
 const int MAX_LEVEL = 20;
 
+// the unpack* functions that can meet bytes that don't add up return false
+// rather than asserting: a malformed tile fails its decode (and is asked for
+// again later), it doesn't take the page down
+
 // unpackVarInt unpacks variable length integer from proto (like coded_stream.h)
-int unpackVarInt(std::string packed, int* index) {
+bool unpackVarInt(const std::string &packed, int* index, int* value) {
 	auto data = (uint8_t*)packed.data();
 	auto size = packed.size();
 	int c = 0, d = 1, e;
 	do {
-		assert(*index < size);
+		if (*index >= size) return false;
 		e = data[(*index)++];
 		c += (e & 0x7F) * d;
 		d <<= 7;
 	} while (e & 0x80);
-	return c;
+	*value = c;
+	return true;
 }
 
 // vertex is a packed struct for an 8-byte-per-vertex array
@@ -26,7 +31,7 @@ struct vertex_t {
 static_assert((sizeof(vertex_t) == 8), "vertex_t size must be 8");
 
 // unpackVertices unpacks vertices XYZ to new 8-byte-per-vertex array
-std::vector<uint8_t> unpackVertices(std::string packed) {
+std::vector<uint8_t> unpackVertices(const std::string &packed) {
 	auto data = (uint8_t*)packed.data();
 	auto count = packed.size() / 3;
 	auto vertices = std::vector<uint8_t>(count * sizeof(vertex_t));
@@ -41,10 +46,10 @@ std::vector<uint8_t> unpackVertices(std::string packed) {
 }
 
 // unpackTexCoords unpacks texture coordinates UV to 8-byte-per-vertex-array
-void unpackTexCoords(std::string packed, uint8_t* vertices, int vertices_len, Vector2f &uv_offset, Vector2f &uv_scale) {	
+bool unpackTexCoords(const std::string &packed, uint8_t* vertices, int vertices_len, Vector2f &uv_offset, Vector2f &uv_scale) {	
 	auto data = (uint8_t*)packed.data();
 	auto count = vertices_len / sizeof(vertex_t);
-	assert(count * 4 == (packed.size() - 4) && packed.size() >= 4);
+	if (!(count * 4 == (packed.size() - 4) && packed.size() >= 4)) return false;
 	auto u_mod = 1 + *(uint16_t *)(data + 0);
 	auto v_mod = 1 + *(uint16_t *)(data + 2);
 	data += 4;
@@ -59,50 +64,60 @@ void unpackTexCoords(std::string packed, uint8_t* vertices, int vertices_len, Ve
 	uv_offset[1] = 0.5;
 	uv_scale[0] = 1.0 / u_mod;
 	uv_scale[1] = 1.0 / v_mod;
+	return true;
 }
 
 // unpackIndices unpacks indices to triangle strip
-std::vector<uint16_t> unpackIndices(std::string packed) {
+bool unpackIndices(const std::string &packed, std::vector<uint16_t> &triangle_strip) {
 	auto offset = 0;	
 
-	auto triangle_strip_len = unpackVarInt(packed, &offset);
-	auto triangle_strip = std::vector<uint16_t>(triangle_strip_len);
+	int triangle_strip_len;
+	if (!unpackVarInt(packed, &offset, &triangle_strip_len)) return false;
+	// every index takes at least a byte: a length past that is garbage, and
+	// sizing the vector by it could ask for gigabytes
+	if (triangle_strip_len < 0 || triangle_strip_len > packed.size()) return false;
+	triangle_strip.resize(triangle_strip_len);
 	for (int zeros = 0, i = 0; i < triangle_strip_len; i++) {
-		int val = unpackVarInt(packed, &offset);
+		int val;
+		if (!unpackVarInt(packed, &offset, &val)) return false;
 		triangle_strip[i] = zeros - val;
 		if (0 == val) zeros++;
 	}	
 	
-	return triangle_strip;
+	return true;
 }
 
 // unpackOctantMaskAndOctantCountsAndLayerBounds unpacks the octant mask for vertices (W) and layer bounds and octant counts
-void unpackOctantMaskAndOctantCountsAndLayerBounds(const std::string packed, const uint16_t *indices, int indices_len, uint8_t *vertices, int vertices_len, int layer_bounds[10])
+bool unpackOctantMaskAndOctantCountsAndLayerBounds(const std::string &packed, const uint16_t *indices, int indices_len, uint8_t *vertices, int vertices_len, int layer_bounds[10])
 {
 	// todo: octant counts
 	auto offset = 0;
-	auto len = unpackVarInt(packed, &offset);
+	int len;
+	if (!unpackVarInt(packed, &offset, &len)) return false;
 	auto idx_i = 0;
 	auto k = 0;
 	auto m = 0;
 
 	for (auto i = 0; i < len; i++) {
 		if (0 == i % 8) {
-			assert(m < 10);
+			if (!(m < 10)) return false;
 			layer_bounds[m++] = k;
 		}
-		auto v = unpackVarInt(packed, &offset);
+		int v;
+		if (!unpackVarInt(packed, &offset, &v)) return false;
 		for (auto j = 0; j < v; j++) {
+			if (!(idx_i < indices_len)) return false;
 			auto idx = indices[idx_i++];
-			assert(0 <= idx && idx < indices_len);
+			if (!(0 <= idx && idx < indices_len)) return false;
 			auto vtx_i = idx;
-			assert(0 <= vtx_i && vtx_i < vertices_len / sizeof(vertex_t));
+			if (!(0 <= vtx_i && vtx_i < vertices_len / sizeof(vertex_t))) return false;
 			((vertex_t *)vertices)[vtx_i].w = i & 7;
 		}
 		k += v;
 	}
 
 	for (; 10 > m; m++) layer_bounds[m] = k;
+	return true;
 }
 
 struct node_data_path_and_flags_t {
@@ -112,7 +127,7 @@ struct node_data_path_and_flags_t {
 };
 
 // unpackPathAndFlags unpacks path, flags and level (strlen(path)) from node metadata
-node_data_path_and_flags_t unpackPathAndFlags(NodeMetadata node_meta) {
+node_data_path_and_flags_t unpackPathAndFlags(const NodeMetadata &node_meta) {
 
 	auto getPathAndFlags = [](int path_id, char path[], int* level, int* flags) {
 		*level = 1 + (path_id & 3);
@@ -137,10 +152,9 @@ struct OrientedBoundingBox {
 	Matrix3d orientation;
 };
 
-OrientedBoundingBox unpackObb(std::string packed, Vector3f head_node_center, float meters_per_texel) {
-	assert(packed.size() == 15);
+bool unpackObb(const std::string &packed, Vector3f head_node_center, float meters_per_texel, OrientedBoundingBox &obb) {
+	if (packed.size() != 15) return false;
 	auto data = (uint8_t*)packed.data();
-	OrientedBoundingBox obb;
 	obb.center[0] = *(int16_t *)(data + 0) * meters_per_texel + head_node_center[0];
 	obb.center[1] = *(int16_t *)(data + 2) * meters_per_texel + head_node_center[1];
 	obb.center[2] = *(int16_t *)(data + 4) * meters_per_texel + head_node_center[2];
@@ -168,5 +182,5 @@ OrientedBoundingBox unpackObb(std::string packed, Vector3f head_node_center, flo
 	orientation[7] = -c0 * s1;
 	orientation[8] = c1;
 
-	return obb;
+	return true;
 }

@@ -39,14 +39,14 @@ static inline uint32_t timing_ms() {
 	return (uint32_t)duration_cast<milliseconds>(steady_clock::now().time_since_epoch()).count();
 }
 
-BulkMetadataRequest createBulkMetadataRequest(const std::string base_path, std::string path, int epoch);
-NodeDataRequest createNodeDataRequest(const std::string base_path, BulkMetadata bulk, NodeMetadata node_meta);
+BulkMetadataRequest createBulkMetadataRequest(const std::string &base_path, const std::string &path, int epoch);
+NodeDataRequest createNodeDataRequest(const std::string &base_path, const BulkMetadata &bulk, const NodeMetadata &node_meta);
 
 // extended data structure using decoders
 #include "rocktree_ex.h"
 
 // createBulkMetadataRequest creates a object for requesting bulk data. can be re-used
-BulkMetadataRequest createBulkMetadataRequest(const std::string base_path, std::string path, int epoch)
+BulkMetadataRequest createBulkMetadataRequest(const std::string &base_path, const std::string &path, int epoch)
 {
 	BulkMetadataRequest req;
 	auto key = new NodeKey();
@@ -57,7 +57,7 @@ BulkMetadataRequest createBulkMetadataRequest(const std::string base_path, std::
 }
 
 // createNodeDataRequest creates a object for requesting node data. can be re-used
-NodeDataRequest createNodeDataRequest(const std::string base_path, BulkMetadata bulk, NodeMetadata node_meta) {
+NodeDataRequest createNodeDataRequest(const std::string &base_path, const BulkMetadata &bulk, const NodeMetadata &node_meta) {
 	auto aux = unpackPathAndFlags(node_meta);	
 	assert(!(aux.flags & NodeMetadata_Flags_NODATA));
 	//assert(node_meta.has_epoch());
@@ -102,24 +102,16 @@ NodeDataRequest createNodeDataRequest(const std::string base_path, BulkMetadata 
 
 // getPlanetoid fetches planetoid from web and calls cb when it's done.
 void getPlanetoid(std::function<void(std::unique_ptr<PlanetoidMetadata>)> cb) {
-
-	static std::map<int, std::function<void(std::unique_ptr<PlanetoidMetadata>)>> map;
-	static int i = 0;
-
-	auto thunk = [](int i, int error, uint8_t *data, size_t len){
-		auto cb = map[i];		
-  		if (error) {
+	fetchData("PlanetoidMetadata", [cb](bool ok, const uint8_t *data, size_t len) {
+  		if (!ok) {
 			fprintf(stderr, "%s", "could not load planetoid\n");
 			cb(NULL);
-		} else {
-			PlanetoidMetadata planetoid;			
-			cb(planetoid.ParseFromArray(data, len) ? std::make_unique<PlanetoidMetadata>(planetoid) : NULL);
+			return;
 		}
-		map.erase(i);
-	};
-
-	map[++i] = cb;
-	fetchData("PlanetoidMetadata", i, thunk);
+		auto planetoid = std::make_unique<PlanetoidMetadata>();
+		if (!planetoid->ParseFromArray(data, len)) planetoid = nullptr;
+		cb(std::move(planetoid));
+	});
 }
 
 #include "threads.h"
@@ -129,139 +121,80 @@ void getPlanetoid(std::function<void(std::unique_ptr<PlanetoidMetadata>)> cb) {
 // dominates warm-cache load time, so use most of the machine
 ThreadPool pool(std::max(2, (int)std::thread::hardware_concurrency() - 2));
 
-// getBulk fetches a bulk using path and epoch from web or cache and calls cb when it's done.
-void getBulk(BulkMetadataRequest req, rocktree_t::bulk_t *b, std::function<void(std::unique_ptr<BulkMetadata>)> cb) {		
+// fetchAndDecode fetches url for x (a node or bulk), then parses it as a Msg
+// and populates x on the decode pool. any failure — transport, parse, or the
+// tile's data — puts x back to a stub. done runs at the end either way, on
+// whichever thread got there. kind names x in the log lines
+template <class Msg, class T>
+void fetchAndDecode(const std::string &url, const char *kind, T *x,
+	const char *(*populate)(T *, const Msg &), std::atomic<int> *phase, std::function<void()> done) {
 
-	auto path = req.node_key().path().c_str();
-	auto epoch = req.node_key().epoch();
-
-	using p = std::pair<std::function<void(std::unique_ptr<BulkMetadata>)>, rocktree_t::bulk_t *>;
-	static std::map<int, p> map;
-	static int i = 0;
-
-	auto thunk = [](int i, int error, uint8_t *data, size_t len){
-		p pair;	
-		{	
-			auto it = map.find(i);
-			pair = it->second;
-			map.erase(it);
-		}
-		auto cb = pair.first;
-		auto b = pair.second;
-  		if (error) {
+	auto finish = [done]() { if (done) done(); };
+	fetchData(url, [=](bool ok, const uint8_t *data, size_t len) {
+  		if (!ok) {
 			// back to a stub, or this node is never asked for again: the walk
 			// only ever schedules stubs, so a transport failure that left the
 			// state at 'downloading' meant the tile was lost for the life of
 			// the page, and the view could never complete. the scheduler backs
 			// off between attempts (dl_next_try_ms) so a url that keeps failing
 			// costs one request every few seconds, not one every frame
-			b->setFailedDownloading();
-			fprintf(stderr, "could not load bulk %s (attempt %d)\n",
-				b->request.node_key().path().c_str(), b->dl_fails);
-			cb(NULL);
-		} else {
-			auto vec = std::vector<uint8_t>(data, data+len);
-			
-			auto result = pool.enqueue([](auto b, auto cb, auto vec) {
-
-				auto t0 = timing_ms();
-				BulkMetadata bulk;
-
-				if (!bulk.ParseFromArray(vec.data(), vec.size())) {
-					printf("bulk parse failed: %s (%zu bytes)\n", b->request.node_key().path().c_str(), vec.size());
-					b->setFailedDownloading();
-					cb(NULL);
-					return;
-				}
-
-				auto bu = std::make_unique<BulkMetadata>(bulk);
-				populateBulk(b, std::move(bu));
-				if (g_log_timing)
-					printf("timing: decode bulk %s start=%u dur=%u\n",
-						b->request.node_key().path().c_str(), t0, timing_ms() - t0);
-				cb(NULL);
-
-			}, b, cb, vec);
+			if (phase) *phase = fetch_phase_none;
+			x->setFailedDownloading();
+			fprintf(stderr, "could not load %s %s (attempt %d)\n",
+				kind, x->request.node_key().path().c_str(), x->dl_fails);
+			finish();
+			return;
+		}
+		auto vec = std::vector<uint8_t>(data, data+len);
+		if (phase) {
+			*phase = fetch_phase_decode;
+			if (g_log_timing)
+				printf("timing: queued %s %s at=%u\n", kind, x->request.node_key().path().c_str(), timing_ms());
 		}
 
-	};
+		pool.post([=, vec = std::move(vec)]() {
+			auto t0 = timing_ms();
+			Msg msg;
 
-	assert(strlen(path) < 30);
-	char *url_buf = new char[200];
-	sprintf(url_buf, "BulkMetadata/pb=!1m2!1s%s!2u%d", path, epoch);	
+			if (!msg.ParseFromArray(vec.data(), vec.size())) {
+				printf("%s parse failed: %s (%zu bytes)\n", kind, x->request.node_key().path().c_str(), vec.size());
+				x->setFailedDownloading();
+				finish();
+				return;
+			}
 
-	++i;
-	map[i] = std::make_pair(cb, b);
-	fetchData(url_buf, i, thunk);
+			if (auto error = populate(x, msg)) {
+				printf("%s decode failed: %s: %s (%zu bytes)\n", kind, x->request.node_key().path().c_str(), error, vec.size());
+				x->setFailedDownloading();
+				finish();
+				return;
+			}
+			if (g_log_timing)
+				printf("timing: decode %s %s start=%u dur=%u\n",
+					kind, x->request.node_key().path().c_str(), t0, timing_ms() - t0);
+			finish();
+		});
+	}, phase);
 }
 
-// getNode fetches a node from path, epoch, texture_format and imagery_epoch (none if -1) and calls cb when it's done.
-void getNode(NodeDataRequest req, rocktree_t::node_t *n, std::function<void(std::unique_ptr<NodeData>)> cb) {
+// getBulk fetches bulk b (b->request: path and epoch) from web or cache, and
+// calls done when it's populated or has failed back to a stub.
+void getBulk(rocktree_t::bulk_t *b, std::function<void()> done = nullptr) {
+	const auto &key = b->request.node_key();
+	auto url = "BulkMetadata/pb=!1m2!1s" + key.path() + "!2u" + std::to_string(key.epoch());
+	fetchAndDecode<BulkMetadata>(url, "bulk", b, populateBulk, nullptr, done);
+}
 
-	using p = std::pair<std::function<void(std::unique_ptr<NodeData>)>, rocktree_t::node_t *>;
-	static std::map<int, p> map;
-	static int i = 0;	
-
-	auto thunk = [](int i, int error, uint8_t *data, size_t len){
-		p pair;	
-		{	
-			auto it = map.find(i);
-			pair = it->second;
-			map.erase(it);
-		}	
-		auto cb = pair.first;
-		auto n = pair.second;
-  		if (error) {
-			// back to a stub, or this node is never asked for again: the walk
-			// only ever schedules stubs, so a transport failure that left the
-			// state at 'downloading' meant the tile was lost for the life of
-			// the page, and the view could never complete. the scheduler backs
-			// off between attempts (dl_next_try_ms) so a url that keeps failing
-			// costs one request every few seconds, not one every frame
-			n->fetch_phase = fetch_phase_none;
-			n->setFailedDownloading();
-			fprintf(stderr, "could not load node %s (attempt %d)\n",
-				n->request.node_key().path().c_str(), n->dl_fails);
-			cb(NULL);
-		} else {			
-			auto vec = std::vector<uint8_t>(data, data+len);
-			n->fetch_phase = fetch_phase_decode;
-			if (g_log_timing)
-				printf("timing: queued node %s at=%u\n", n->request.node_key().path().c_str(), timing_ms());
-
-			auto result = pool.enqueue([](auto n, auto cb, auto vec) {
-				auto t0 = timing_ms();
-				NodeData node;
-
-				if (!node.ParseFromArray(vec.data(), vec.size())) {
-					printf("node parse failed: %s (%zu bytes)\n", n->request.node_key().path().c_str(), vec.size());
-					n->setFailedDownloading();
-					cb(NULL);
-					return;
-				}
-
-				auto nu = std::make_unique<NodeData>(node);
-				populateNode(n, std::move(nu));
-				if (g_log_timing)
-					printf("timing: decode node %s start=%u dur=%u\n",
-						n->request.node_key().path().c_str(), t0, timing_ms() - t0);
-				cb(NULL);
-    		}, n, cb, vec);		
-		}
-	};
-
-	auto path = req.node_key().path().c_str();
-
-	assert(strlen(path) < 30);
-	char *url_buf = new char[200];
-	if (!req.has_imagery_epoch()) {		
-		sprintf(url_buf, "NodeData/pb=!1m2!1s%s!2u%d!2e%d!4b0", path, req.node_key().epoch(), req.texture_format());
-	} else {
-		sprintf(url_buf, "NodeData/pb=!1m2!1s%s!2u%d!2e%d!3u%d!4b0", path, req.node_key().epoch(), req.texture_format(), req.imagery_epoch());
-	}	
-	
-	++i;
-	map[i] = std::make_pair(cb, n);
+// getNode fetches node n (n->request: path, epoch, texture_format and
+// imagery_epoch, if any) and calls done when it's populated or has failed back
+// to a stub.
+void getNode(rocktree_t::node_t *n, std::function<void()> done) {
+	const auto &req = n->request;
+	auto url = "NodeData/pb=!1m2!1s" + req.node_key().path()
+		+ "!2u" + std::to_string(req.node_key().epoch())
+		+ "!2e" + std::to_string(req.texture_format())
+		+ (req.has_imagery_epoch() ? "!3u" + std::to_string(req.imagery_epoch()) : "")
+		+ "!4b0";
 	n->fetch_phase = fetch_phase_none;
-	fetchData(url_buf, i, thunk, &n->fetch_phase);
+	fetchAndDecode<NodeData>(url, "node", n, populateNode, &n->fetch_phase, done);
 }

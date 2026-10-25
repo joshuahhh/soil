@@ -589,7 +589,7 @@ struct earth_core_t {
 			auto bulk = p->root_bulk;
 			assert(bulk->dl_state == dl_state_stub);
 			bulk->setStartedDownloading();
-			getBulk(bulk->request, bulk, [=](auto _) { /* todo rm cb */ });
+			getBulk(bulk);
 		});
 	}
 
@@ -1414,7 +1414,7 @@ struct earth_core_t {
 				stat_bulks_started++;
 				c.bulk->dl_next_try_ms = now_ms + retry_delay_ms(c.bulk->dl_fails);
 				c.bulk->setStartedDownloading();
-				getBulk(c.bulk->request, c.bulk, [this](auto) { bulks_in_flight--; });
+				getBulk(c.bulk, [this] { bulks_in_flight--; });
 			}
 
 			struct candidate_t { double priority; size_t level; rocktree_t::node_t *node; };
@@ -1455,7 +1455,7 @@ struct earth_core_t {
 				started++;
 				node->dl_next_try_ms = now_ms + retry_delay_ms(node->dl_fails);
 				node->setStartedDownloading();
-				getNode(node->request, node, [node, this](auto) { nodes_in_flight--; });
+				getNode(node, [this] { nodes_in_flight--; });
 			}
 			if (log_sched && (to_download.size() > 0 || nodes_in_flight > 0))
 				printf("timing: sched at=%.0f stubs=%zu started=%d inflight=%d pot=%zu\n",

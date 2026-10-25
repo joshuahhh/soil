@@ -44,22 +44,18 @@ using emscripten::val;
 
 // fetches delegated to a js function (path, token); js answers by calling
 // Module.deliverFetch(token, ok, uint8array). single-threaded on the js main
-// thread, so no locking.
-//
-// the request ids passed into fetch() are NOT globally unique — getBulk,
-// getNode and getPlanetoid each run their own counter and only use the id to
-// find their own map entry — so the pending map is keyed by a token of our
-// own and remembers each request's (thunk, id) pair
+// thread, so no locking. the token is the request's only id: the pending map
+// holds what to call when its bytes arrive
 struct js_fetcher_t : fetcher_t {
 	val fn = val::undefined();
-	struct pending_t { fetch_thunk_t thunk; int i; std::atomic<int> *phase; };
+	struct pending_t { fetch_done_t done; std::atomic<int> *phase; };
 	std::map<int, pending_t> pending;
 	int next_token = 0;
 
-	void fetch(const char *path, int i, fetch_thunk_t thunk, std::atomic<int> *phase) override {
+	void fetch(const std::string &path, fetch_done_t done, std::atomic<int> *phase) override {
 		auto token = next_token++;
-		pending[token] = { thunk, i, phase };
-		fn(std::string(path), token);
+		pending[token] = { std::move(done), phase };
+		fn(path, token);
 	}
 
 	// the page says where a request is (cache lookup, network): the lod
@@ -72,15 +68,14 @@ struct js_fetcher_t : fetcher_t {
 	void deliver(int token, bool ok, val bytes) {
 		auto it = pending.find(token);
 		if (it == pending.end()) return;
-		auto thunk = it->second.thunk;
-		auto i = it->second.i;
+		auto done = std::move(it->second.done);
 		pending.erase(it);
 		if (!ok) {
-			thunk(i, 1, nullptr, 0);
+			done(false, nullptr, 0);
 			return;
 		}
 		auto vec = emscripten::convertJSArrayToNumberVector<uint8_t>(bytes);
-		thunk(i, 0, vec.data(), vec.size());
+		done(true, vec.data(), vec.size());
 	}
 };
 static js_fetcher_t js_fetcher;

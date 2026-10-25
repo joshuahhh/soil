@@ -32,50 +32,42 @@ struct rocktree_t {
 		texture_format_dxt1 = 2,
 	};
 	struct bulk_t;
-	struct node_t {
-		NodeDataRequest request;
-		bool can_have_data;
+	// the download state machine nodes and bulks share: a stub is asked for
+	// (downloading), then lands (downloaded) or fails back to a stub, and a
+	// downloaded one is deleted back to a stub. from asked-for until it is a
+	// stub again it counts in its parent's busy_ctr. bulks shape the octree,
+	// so their transitions also bump g_tree_epoch; nodes' don't. the
+	// transitions are defined below rocktree_t, where bulk_t is complete
+	template <bool shapes_tree>
+	struct download_t {
 		std::atomic<dl_state> dl_state;
-		std::atomic<int> fetch_phase{fetch_phase_none};
 		bulk_t* parent;
-		// tube mode: the download order's measure of this node, set by the
-		// walk — its distance through the roll over its size, pushed back
-		// when its rolled position can't be on screen (render thread only)
-		double sched_pri = 0;
 
-		void setNotDownloadedYet() {
-			dl_state = dl_state_stub;
-		}
+		void setNotDownloadedYet();
+		void setStartedDownloading();
+		void setFinishedDownloading();
+		void setFailedDownloading();
+		void setDeleted();
 
-		void setStartedDownloading() {
-			if (parent) parent->busy_ctr++;
-			dl_state = dl_state_downloading;
-		}
-
-		void setFinishedDownloading() {
-			dl_state = dl_state_downloaded;
-		}
-
-		void setFailedDownloading() {
-			dl_fails++;
-			dl_state = dl_state_stub;
-			if (parent) parent->busy_ctr--;
-		}
-
-		void setDeleted() {
-			dl_state = dl_state_stub;
-			if (parent) parent->busy_ctr--;
-		}
-
-		double last_wanted_ms = 0; // last time this node was in the potential set (render thread only)
-		// when the current unbroken run of being wanted began (profiling)
-		double first_wanted_ms = 0;
+		double last_wanted_ms = 0; // last time this was in the potential set (render thread only)
 		// a request that failed comes back to stub so it can be asked for
 		// again, but a url that is failing for a reason won't start working
 		// this frame: the scheduler holds off until dl_next_try_ms, which it
 		// pushes further out with every attempt
 		int dl_fails = 0;
 		double dl_next_try_ms = 0;
+	};
+	struct node_t : download_t<false> {
+		NodeDataRequest request;
+		bool can_have_data;
+		std::atomic<int> fetch_phase{fetch_phase_none};
+		// tube mode: the download order's measure of this node, set by the
+		// walk — its distance through the roll over its size, pushed back
+		// when its rolled position can't be on screen (render thread only)
+		double sched_pri = 0;
+
+		// when the current unbroken run of being wanted began (profiling)
+		double first_wanted_ms = 0;
 
 		float meters_per_texel;
 		OrientedBoundingBox obb;
@@ -116,45 +108,8 @@ struct rocktree_t {
 		std::vector<mesh_t> meshes;
 	};
 	
-	struct bulk_t {
+	struct bulk_t : download_t<true> {
 		BulkMetadataRequest request;
-		std::atomic<dl_state> dl_state;
-		bulk_t* parent;
-
-		void setNotDownloadedYet() {
-			dl_state = dl_state_stub;
-		}
-
-		void setStartedDownloading() {
-			if (parent) parent->busy_ctr++;
-			dl_state = dl_state_downloading;
-		}
-
-		void setFinishedDownloading() {
-			dl_state = dl_state_downloaded;
-			g_tree_epoch++;
-		}
-
-		void setFailedDownloading() {
-			dl_fails++;
-			dl_state = dl_state_stub;
-			if (parent) parent->busy_ctr--;
-			g_tree_epoch++;
-		}
-
-		void setDeleted() {
-			dl_state = dl_state_stub;
-			if (parent) parent->busy_ctr--;
-			g_tree_epoch++;
-		}
-
-		double last_wanted_ms = 0; // last time this bulk was in the potential set (render thread only)
-		// a request that failed comes back to stub so it can be asked for
-		// again, but a url that is failing for a reason won't start working
-		// this frame: the scheduler holds off until dl_next_try_ms, which it
-		// pushes further out with every attempt
-		int dl_fails = 0;
-		double dl_next_try_ms = 0;
 
 		Vector3f head_node_center;
 
@@ -167,3 +122,35 @@ struct rocktree_t {
 	bulk_t *root_bulk;
 	std::atomic<bool> downloaded;
 };
+
+template <bool shapes_tree>
+void rocktree_t::download_t<shapes_tree>::setNotDownloadedYet() {
+	dl_state = dl_state_stub;
+}
+
+template <bool shapes_tree>
+void rocktree_t::download_t<shapes_tree>::setStartedDownloading() {
+	if (parent) parent->busy_ctr++;
+	dl_state = dl_state_downloading;
+}
+
+template <bool shapes_tree>
+void rocktree_t::download_t<shapes_tree>::setFinishedDownloading() {
+	dl_state = dl_state_downloaded;
+	if (shapes_tree) g_tree_epoch++;
+}
+
+template <bool shapes_tree>
+void rocktree_t::download_t<shapes_tree>::setFailedDownloading() {
+	dl_fails++;
+	dl_state = dl_state_stub;
+	if (parent) parent->busy_ctr--;
+	if (shapes_tree) g_tree_epoch++;
+}
+
+template <bool shapes_tree>
+void rocktree_t::download_t<shapes_tree>::setDeleted() {
+	dl_state = dl_state_stub;
+	if (parent) parent->busy_ctr--;
+	if (shapes_tree) g_tree_epoch++;
+}

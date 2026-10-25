@@ -5,22 +5,17 @@
 #define THREAD_POOL_H
 
 #include <vector>
-#include <queue>
 #include <deque>
-#include <memory>
 #include <thread>
 #include <mutex>
 #include <condition_variable>
-#include <future>
 #include <functional>
 #include <stdexcept>
 
 class ThreadPool {
 public:
     ThreadPool(size_t);
-    template<class F, class... Args>
-    auto enqueue(F&& f, Args&&... args) 
-        -> std::future<typename std::invoke_result<F, Args...>::type>;
+    void post(std::function<void()> task);
     ~ThreadPool();
 private:
     // need to keep track of threads so we can join them
@@ -62,18 +57,10 @@ inline ThreadPool::ThreadPool(size_t threads)
         );
 }
 
-// add new work item to the pool
-template<class F, class... Args>
-auto ThreadPool::enqueue(F&& f, Args&&... args) 
-    -> std::future<typename std::invoke_result<F, Args...>::type>
+// add new work item to the pool, ahead of everything already queued (newest
+// first)
+inline void ThreadPool::post(std::function<void()> task)
 {
-    using return_type = typename std::invoke_result<F, Args...>::type;
-
-    auto task = std::make_shared< std::packaged_task<return_type()> >(
-            std::bind(std::forward<F>(f), std::forward<Args>(args)...)
-        );
-        
-    std::future<return_type> res = task->get_future();
     {
         std::unique_lock<std::mutex> lock(queue_mutex);
 
@@ -81,10 +68,9 @@ auto ThreadPool::enqueue(F&& f, Args&&... args)
         if(stop)
             throw std::runtime_error("enqueue on stopped ThreadPool");
 
-        tasks.emplace(tasks.begin(), [task](){ (*task)(); });
+        tasks.emplace_front(std::move(task));
     }
     condition.notify_one();
-    return res;
 }
 
 // the destructor joins all threads
