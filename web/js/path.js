@@ -191,9 +191,9 @@ const setPath = (parsed, fresh) => {
   buildSpine();
   fol.s = 0;
   fol.heading = fol.alt = null;
-  if (debugSmooth && spine) setDebugSmooth(true);
   if (!spine) setFollow(false); // nothing left to ride
-  setPathData();
+  setPathData(); // clears the debug line, so redraw it after
+  if (debugSmooth && spine) setDebugSmooth(true);
   pushPath();
   refreshPathPanel();
   savePath();
