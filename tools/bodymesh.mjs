@@ -1,5 +1,5 @@
 // extract the skin from makehuman's base mesh into web/body.obj: the file
-// the body mode (index.html, bakeBody) wraps the tube rect onto.
+// the body mode (web/js/bodybake.js, bakeBody) wraps the tube rect onto.
 //
 //   curl -sLO https://raw.githubusercontent.com/makehumancommunity/makehuman/master/makehuman/data/3dobjs/base.obj
 //   node tools/bodymesh.mjs base.obj

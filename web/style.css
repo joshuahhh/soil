@@ -1,0 +1,265 @@
+html, body { margin: 0; height: 100%; }
+body { display: flex; }
+#map, #right { flex: 1; height: 100%; }
+/* the containing block for everything drawn over the 3d view, and the clip
+   for it: the photo can be scaled to 400% and dragged around, and the pair
+   markers hang off its corners (#pairs is overflow: visible on purpose), so
+   without this they spill left across the divider and sit on the map */
+#right { position: relative; overflow: hidden; }
+/* the strip between the panes; hovering it reveals an arrow that collapses
+   the map so the 3d view gets the whole window (and back) */
+#divider { flex: 0 0 8px; position: relative; background: #333; z-index: 20;
+           cursor: pointer; }
+#expandbtn { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+             width: 22px; height: 48px; padding: 0; border: 0; border-radius: 4px;
+             color: #fff; background: rgba(0,0,0,.55); font: 14px sans-serif;
+             cursor: pointer; opacity: 0; transition: opacity .15s; }
+#divider:hover #expandbtn { opacity: 1; }
+body.full3d #map { display: none; }
+/* the axis switch sits over the map's corner; without the map it's noise */
+body.full3d #axisbtn { display: none; }
+/* divider is at the window's left edge now: keep the arrow fully on-screen */
+body.full3d #expandbtn { left: 0; transform: translateY(-50%); }
+#globe { width: 100%; height: 100%; display: block; outline: none; }
+/* pick debug: reticle at the exact screen center of the 3d view (what the
+   center raycast should be looking through) plus a readout of the hit */
+#cross { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%);
+         pointer-events: none; z-index: 5; }
+#pickinfo { position: absolute; right: 8px; bottom: 8px; z-index: 10; color: #fff;
+            background: rgba(0,0,0,.55); font: 12px monospace; padding: 6px 8px;
+            border-radius: 4px; pointer-events: none; }
+#tubeinfo { position: absolute; left: 8px; bottom: 8px; z-index: 10; color: #fff;
+            background: rgba(0,0,0,.55); font: 12px monospace; padding: 6px 8px;
+            border-radius: 4px; pointer-events: none; display: none; }
+/* reference image dropped onto the page: laid over the 3d view at adjustable
+   opacity so you can fly the camera until the render matches the photo.
+   under #cross so the reticle stays readable through it.
+   placed by explicit left/top/width/height (see layoutOverlay) rather than
+   object-fit: its height is a fixed fraction of the viewport's, so resizing
+   the window or collapsing the map can't change which part of the frustum
+   a given point of the photo stands for — an alignment stays aligned */
+#overlay { position: absolute; pointer-events: none; z-index: 4; }
+body:not(.overlay) #overlay { display: none; }
+/* the photo undistorted (see renderWarp): drawn in place of the <img>
+   whenever the lens parameter is non-zero, and only then, since the warp
+   is a canvas that has to be redrawn when k changes */
+#overlaywarp { position: absolute; pointer-events: none; z-index: 4; display: none; }
+body.overlay.distorted #overlaywarp { display: block; }
+body.distorted #overlay { visibility: hidden; }
+
+/* --- point-pair alignment -------------------------------------------------
+   each pair ties a point of the photo to a point on the mesh; the solver
+   nudges the camera until the two land on top of each other. the svg layer
+   draws both ends and the residual between them, over the photo */
+#pairs { position: absolute; inset: 0; width: 100%; height: 100%;
+         z-index: 6; pointer-events: none; overflow: visible; display: none; }
+body.align #pairs { display: block; }
+/* a minimized photo panel takes its markers off the view with it */
+body:has(#photopanel.min) #pairs { display: none; }
+/* what the pointer can take hold of. the visible art is thin — a 2.5px ring
+   and a dashed line — so hit targets are separate invisible shapes over it:
+   a fat line along the residual, a disc at each end, and the number itself.
+   pointer-events: visible ignores the (transparent) paint but still honours
+   visibility, so the hit shape of an off-screen end goes away with it */
+#pairs .hit { fill: transparent; stroke: transparent; pointer-events: visible; }
+#pairs .grab { cursor: grab; }
+#pairs .pick { cursor: pointer; }
+#pairs .lbl { font: bold 10px sans-serif; fill: #fff; pointer-events: visible;
+              paint-order: stroke; stroke: rgba(0,0,0,.7); stroke-width: 3px; }
+/* the markers carry the same two states as the rows of the list, in the same
+   two colours: a pale wash under the pointer, amber for the selected pair.
+   a ring behind each end and the residual line between them all take it, so
+   the pair reads as one object rather than two dots that happen to match */
+#pairs .halo { fill: none; stroke: none; }
+#pairs g.hov .halo { fill: rgba(255,255,255,.18); stroke: rgba(255,255,255,.6);
+                     stroke-width: 1.5; }
+#pairs g.sel .halo { fill: rgba(255,127,14,.35); stroke: #ff7f0e; stroke-width: 2; }
+#pairs g.hov .res { stroke-width: 2.5; opacity: 1; }
+#pairs g.sel .res { stroke: #ff7f0e; stroke-width: 2.5; opacity: 1; }
+#pairs g.sel .lbl { fill: #ff7f0e; }
+/* the two hud panels (photo, path) share their chrome. they live in the
+   hud's column rather than floating in a corner, so the two lay themselves
+   out instead of being kept apart by a hardcoded offset. min-height: 0 lets
+   a panel give way in a short window — #aplist takes up the slack by
+   scrolling */
+.panel { display: none; flex-direction: column; gap: 6px; min-height: 0;
+         width: 236px; max-width: 100%; color: #fff;
+         background: #1c1c1c; font: 12px sans-serif;
+         padding: 8px; border-radius: 5px; }
+/* one panel for the photo and its pairs: both are up whenever there is a
+   photo. two panels meant the opacity of a picture and the size of the
+   same picture lived in different boxes */
+body.overlay #photopanel { display: flex; }
+#appairsblock { display: none; flex-direction: column; gap: 6px; min-height: 0; }
+body.align #appairsblock { display: flex; }
+/* there's a photo, but this view can't have pairs */
+#apoff { display: none; }
+body.overlay:not(.align) #apoff { display: block; }
+body.path #pathpanel { display: flex; }
+/* roll has no other marker in the ui — nothing in the hud says the horizon
+   is off — so it gets a panel whose whole job is to be present when the
+   camera is banked, and to level it when dismissed */
+body.rolled #rollpanel { display: flex; }
+/* the lod overlay's legend (L): a swatch per fetch phase */
+body.lod #lodpanel { display: flex; }
+/* the atmosphere's controls (Y) */
+body.skypanel #skypanel { display: flex; }
+/* glamour mode (I): the accumulated render's controls and progress */
+body.glamourpanel #glamourpanel { display: flex; }
+/* slider rows: a name in a fixed column — or the switch that gates the
+   row, standing in for its name — then the slider, then its value. what
+   a switch (or another panel's) has turned off is dimmed and locked */
+.panel .row > .lbl { flex: 0 0 68px; }
+.panel .row span.amt { min-width: 44px; text-align: right; font-variant-numeric: tabular-nums; }
+.panel .off { opacity: .4; }
+#lodpanel .row { gap: 4px 10px; }
+#lodpanel .row span { display: flex; align-items: center; gap: 4px; }
+.swatch { display: inline-block; width: 11px; height: 11px; border-radius: 2px; }
+body.tunnel #tunnelpanel { display: flex; }
+#tunnelamount, #tunnellagamount, #tunnellenamount { font: 11px sans-serif; opacity: .85; white-space: nowrap; min-width: 13ch; }
+/* the range input carries a default 2px margin, which is what put its
+   track's left end right of the text on the row below */
+#tunnelc, #tunnellag, #tunnellen { margin: 0; }
+/* lens distortion, likewise: present when the photo has some, or when the
+   solver has been asked to look for it and it wants setting by eye */
+body.overlay.distorted #lenspanel, body.overlay.lenswanted #lenspanel { display: flex; }
+/* fixed width: the readout flips between 'barrel' and 'pincushion' as the
+   slider crosses zero, and if the label reflowed the row the slider would
+   change size under the pointer mid-drag — a value would then map to a
+   different position depending on which side you came from */
+#lensamount { font: 11px sans-serif; opacity: .85; white-space: nowrap;
+              min-width: 23ch; font-variant-numeric: tabular-nums; }
+/* the near cut (H): ignore the mesh within some distance of the eye */
+body.cut #cutpanel { display: flex; }
+#cutamount { font: 11px sans-serif; opacity: .85; white-space: nowrap; }
+#rollamount { font: 11px sans-serif; opacity: .85; }
+#overlayblendtoggle { cursor: pointer; user-select: none; }
+#overlayblendtoggle:hover { text-decoration: underline; }
+.panel .head { display: flex; align-items: center; justify-content: space-between;
+               gap: 6px; font-weight: bold; cursor: pointer; user-select: none;
+               /* reach the panel's edges, so a click just off the title still counts */
+               margin: -8px -8px 0; padding: 8px 8px 0; }
+/* the title takes the slack, so the head's buttons sit together on the right
+   however many of them a panel has */
+.panel .head span { flex: 1; min-width: 0; }
+.panel .row { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.panel button { border: 0; border-radius: 3px; padding: 4px 8px; cursor: pointer;
+                font: 12px sans-serif; background: rgba(255,255,255,.15); color: #fff; }
+.panel button:hover { background: rgba(255,255,255,.28); }
+.panel button:disabled { opacity: .4; cursor: default; }
+.panel button.primary { background: #ff7f0e; color: #000; font-weight: bold; }
+.panel .x { background: none; padding: 0 4px; font-size: 14px; }
+/* minimized: just the head line, so a panel can get out of the way without
+   giving up what it holds (the ✕ is what gives that up) */
+.panel.min > :not(.head) { display: none !important; }
+.panel .minbtn { background: none; padding: 0 4px; font-size: 14px; line-height: 1; }
+.panel label { display: flex; align-items: center; gap: 2px; }
+.panel input[type=range] { flex: 1; min-width: 0; }
+/* a locked switch (the drape one, on a file with no elevations) should read
+   as settled rather than broken */
+.panel label:has(input:disabled) { opacity: .55; }
+/* the swatch: a plain color input is a chunky bevelled box in every
+   browser, so strip it back to the swatch itself */
+#pathcolor { width: 26px; height: 20px; padding: 0; border: 0; border-radius: 3px;
+             background: none; cursor: pointer; flex: 0 0 auto; }
+#pathcolor::-webkit-color-swatch-wrapper { padding: 0; }
+#pathcolor::-webkit-color-swatch { border: 1px solid rgba(255,255,255,.4); border-radius: 3px; }
+#pathname { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#pathstats { font: 11px monospace; opacity: .85; }
+/* how far along the track the follow camera has got; only up while riding */
+#pathprogress { display: none; font: 11px monospace; }
+body.riding #pathprogress { display: block; }
+.panel .tip { font: 10px sans-serif; opacity: .55; line-height: 1.35; }
+/* a section inside a panel: its own lightly raised box, so the things
+   that belong together sit together without a label saying so */
+.panel .group { display: flex; flex-direction: column; gap: 6px; min-height: 0;
+                padding: 6px; border-radius: 4px; background: rgba(255,255,255,.07); }
+/* a button that lives inside a tip, sized to its text */
+.panel button.tiny { font-size: 10px; padding: 1px 5px; margin-left: 4px; vertical-align: baseline; }
+#aplist { overflow-y: auto; min-height: 0; display: flex; flex-direction: column; gap: 2px; }
+#aplist .pair { display: flex; align-items: center; gap: 6px; padding: 2px 4px;
+                border-radius: 3px; cursor: pointer; font: 11px monospace; }
+/* .hov is the same wash as :hover, applied when the pointer is on that
+   pair's markers out in the view instead of on the row */
+#aplist .pair:hover, #aplist .pair.hov { background: rgba(255,255,255,.12); }
+#aplist .pair.sel { background: rgba(255,127,14,.35); }
+#aplist .pair .n { color: #ff7f0e; font-weight: bold; }
+#aplist .pair .err { margin-left: auto; opacity: .8; }
+#aplist .pair.off .err { color: #ff6b6b; }
+#apstatus { font: 11px sans-serif; opacity: .85; line-height: 1.35; }
+#apwarn { font: 11px sans-serif; color: #ffb366; line-height: 1.35; }
+#apwarn:empty { display: none; }
+/* the step-by-step prompt while a pair is being captured */
+#apbanner { position: absolute; left: 50%; top: 12px; transform: translateX(-50%);
+            z-index: 14; display: none; color: #000; background: #ff7f0e;
+            font: bold 12px sans-serif; padding: 6px 10px; border-radius: 4px;
+            white-space: nowrap; pointer-events: none; }
+body.capturing #apbanner { display: block; }
+body.capturing #globe { cursor: crosshair; }
+/* drop target while an image is being dragged over the window */
+body.dropping #right::after { content: ''; position: absolute; inset: 6px; z-index: 12;
+           border: 2px dashed rgba(255,255,255,.85); border-radius: 6px;
+           pointer-events: none; }
+/* top-right hud: controls hint and speed readout as separate boxes, each
+   hugging its own content. positioned inside #right, and capped to it: the
+   hint is a long line, and a fixed box anchored only by its right edge grew
+   leftwards across the divider and sat over the map */
+#hud { position: absolute; right: 8px; top: 8px; z-index: 12; display: flex;
+       flex-direction: column; align-items: flex-end; gap: 4px;
+       max-width: calc(100% - 16px); max-height: calc(100% - 56px);
+       /* the box is far bigger than what it draws — the hint line stretches
+          it to the width of the view, and the gaps between its children are
+          its own — so it swallowed clicks meant for the picture under it
+          (placing a point pair near the top of the photo did nothing). the
+          readouts want no clicks at all; the panels take theirs back */
+       pointer-events: none; }
+#hud .panel { pointer-events: auto; }
+/* the state readouts sit in a row along the top, opaque like the panels */
+#status { display: flex; justify-content: flex-end; gap: 4px; max-width: 100%; }
+#hint, #hug, #speed { color: #fff; background: #1c1c1c; font: 12px sans-serif;
+                      padding: 6px 8px; border-radius: 4px; white-space: nowrap; }
+#hint:empty, #hug:empty { display: none; }
+/* the key reference: a ? in the view's bottom-right corner, and the table
+   it opens. the hint line above only says what mode the view is in */
+#keysbtn, #shotbtn { position: fixed; right: 8px; bottom: 24px; z-index: 10; width: 26px;
+           height: 26px; padding: 0; border: 0; border-radius: 13px; cursor: pointer;
+           color: #fff; font: bold 14px sans-serif; background: #1c1c1c; }
+#keysbtn:hover, body.keys #keysbtn, #shotbtn:hover { background: #ff7f0e; color: #000; }
+/* the screenshot camera, beside the ? */
+#shotbtn { right: 40px; }
+#shotbtn svg { display: block; margin: auto; }
+#keys { display: none; position: fixed; right: 8px; bottom: 56px; z-index: 25; color: #fff;
+        background: #1c1c1c; border-radius: 5px; padding: 10px 12px; font: 12px sans-serif;
+        /* over the hud (z 12), and edged so it reads as its own sheet where
+           it overlaps a panel of the same colour */
+        border: 1px solid rgba(255,255,255,.35); box-shadow: 0 4px 24px rgba(0,0,0,.7);
+        max-height: calc(100% - 80px); max-width: calc(100% - 16px); overflow: auto;
+        columns: 2; column-gap: 20px; }
+body.keys #keys { display: block; }
+#keys section { break-inside: avoid; margin-bottom: 10px; }
+#keys h4 { margin: 0 0 3px; font: bold 11px sans-serif; text-transform: uppercase;
+           letter-spacing: .06em; opacity: .6; }
+#keys table { border-collapse: collapse; }
+#keys td { padding: 1px 0; vertical-align: top; }
+#keys td:first-child { padding-right: 10px; white-space: nowrap; }
+#keys kbd { font: 11px monospace; background: rgba(255,255,255,.15); padding: 0 4px;
+            border-radius: 3px; }
+/* geolocate button and search box side by side in the window's top-left
+   (the map's corner in split view). the slot is lifted out of #map after the
+   controls are added, so they stay when the map collapses; fixed so it's
+   pinned there either way, above the divider (20) */
+.maplibregl-ctrl-top-left { display: flex; align-items: flex-start;
+                            position: fixed; z-index: 25; }
+/* the divider is at the left edge now: keep the same gap from the pane */
+body.full3d .maplibregl-ctrl-top-left { left: 8px; }
+/* tube axis switch, over the map's bottom-left corner */
+/* a passing word about something that just happened — the session copy/paste
+   below is the only thing that talks this way, and it needs an answer */
+#toast { position: fixed; left: 50%; top: 12px; transform: translateX(-50%); z-index: 30;
+         color: #fff; background: rgba(0,0,0,.78); font: 12px sans-serif;
+         padding: 8px 12px; border-radius: 4px; pointer-events: none;
+         opacity: 0; transition: opacity .2s; }
+#toast.on { opacity: 1; }
+#axisbtn { position: fixed; left: 8px; bottom: 24px; z-index: 10; color: #fff;
+           background: #1c1c1c; font: 12px sans-serif; padding: 6px 8px;
+           border-radius: 4px; cursor: pointer; user-select: none; }

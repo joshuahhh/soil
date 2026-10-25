@@ -6,8 +6,9 @@ and renders in a split-screen demo next to a MapLibre slippy map.
 
 - repo root — the engine (C++ → wasm via emscripten, `earth_web.cpp` +
   `rocktree_*.h`) and its build/deploy scripts
-- [web/](./web/) — the split-screen app (`index.html`), the phone camera-match
-  page (`ar.html`), and the build's js/wasm output
+- [web/](./web/) — the split-screen app (`index.html`, its code in `js/` as
+  native es modules brought up by `js/main.js`, its look in `style.css`), the
+  phone camera-match page (`ar.html`), and the build's js/wasm output
 - [proto/](./proto/) — protobuf schema for Google Earth's "rocktree" data
 
 #### Build
@@ -749,9 +750,10 @@ builds from source and publishes `web/` to GitHub Pages as an artifact. No
 build products are committed; the deploy job needs the build job, so a failed
 build publishes nothing.
 
-`index.html` isn't built — it ships as written — so the toolchain exists only
-to produce `earth.js`/`earth.wasm`. Those are cached under a key hashing the
-c++ sources and the scripts that build them, and a run that changes neither
+The page isn't built — `index.html`, `style.css` and `js/` ship as written,
+native es modules and no bundler — so the toolchain exists only to produce
+`earth.js`/`earth.wasm`. Those are cached under a key hashing the c++ sources
+and the scripts that build them, and a run that changes neither
 skips the build outright: checkout, restore, upload. That's most pushes, and
 it's the difference between about 90 seconds and about 15. Touching a header
 (or aging the entry out of the cache) builds and repopulates it.
