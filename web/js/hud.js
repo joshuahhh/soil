@@ -2,8 +2,8 @@ import { S } from './state.js';
 import { view, canvas } from './engine.js';
 import { saveView } from './saveview.js';
 import { miniature, mipmaps } from './input.js';
-import { tunnelOn } from './tunnel.js';
-import { followOn } from './path.js';
+import { mode, inTube, viewName, ortho, hug } from './mode.js';
+import { tubeRect } from './tube.js';
 import { alignRefresh } from './align.js';
 
 export { updateSpeed, updateHint, toast, refreshRoll, initHud, initPanels, initRoll };
@@ -26,19 +26,19 @@ const HINTS = {
 const updateSpeed = () => {
   document.getElementById('speed').textContent =
     `speed ${S.gain >= 1 ? S.gain : '1/' + (1/S.gain)}`;
-  const h = S.hug ? view.getFollowHeight() : NaN;
+  const h = hug ? view.getFollowHeight() : NaN;
   const height = Number.isFinite(h) ? ` at ${h < 10 ? h.toFixed(1) : Math.round(h)} m` : '';
   document.getElementById('hug').textContent =
-    S.hug && S.tubeOn ? `hugging the wall${height}`
-      : S.hug && !S.ortho ? `hugging terrain${height}` : '';
+    hug && inTube() ? `hugging the wall${height}`
+      : hug && !ortho ? `hugging terrain${height}` : '';
 };
 const updateHint = () => {
   document.getElementById('hint').textContent = [
-    HINTS[followOn ? 'follow' : tunnelOn ? 'tunnel' : S.tubeOn ? (S.tubeBody ? 'body' : 'tube') : S.ortho ? 'ortho' : 'persp'],
+    HINTS[viewName()],
     mipmaps ? '' : 'mipmaps off',
     miniature ? 'miniature' : '',
     // T and B only do anything once a rect exists
-    !S.tubeOn && S.tubeRect ? 'rect drawn (T rolls it into a tube, B wraps it on a body)' : '',
+    !inTube() && tubeRect ? 'rect drawn (T rolls it into a tube, B wraps it on a body)' : '',
   ].filter(Boolean).join(' · ');
   updateSpeed();
   // point-pair alignment is perspective-only, so every mode switch has to
@@ -63,7 +63,7 @@ const rollAmountEl = document.getElementById('rollamount');
 let shownRoll = null;
 const refreshRoll = () => {
   const roll = view.ready() ? (view.getPose().roll || 0) : 0;
-  const on = !S.tubeOn && !tunnelOn && Math.abs(roll) > 0.05;
+  const on = !inTube() && mode !== 'tunnel' && Math.abs(roll) > 0.05;
   const shown = on ? Math.round(roll * 10) / 10 : null;
   if (shown === shownRoll) return;
   shownRoll = shown;

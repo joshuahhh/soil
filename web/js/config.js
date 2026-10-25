@@ -1,7 +1,10 @@
+import { loadStore } from './persist.js';
+
 export { QS, TEST, DEFAULT_VIEW, START };
 
 // what the page starts from: the url's parameters and the saved view. it
-// imports nothing, so every module can read these at its top level
+// imports only persist.js, which imports nothing, so every module can read
+// these at its top level
 const QS = new URLSearchParams(location.search);
 // headless capture mode (?test=1&lat=..&lon=..&alt=..&heading=..&tilt=..&fov=..):
 // the pose comes from the url instead of localstorage, nothing is saved back,
@@ -30,10 +33,8 @@ const START = (() => {
   // test mode ignores saved state entirely: a capture must not depend on
   // whatever pose the last interactive session happened to leave behind
   if (TEST) return { ...DEFAULT_VIEW, ...TEST.pose, full3d: true };
-  try {
-    const v = JSON.parse(localStorage.getItem('earth-view'));
-    if (v && Number.isFinite(v.lat) && Number.isFinite(v.lon) && Number.isFinite(v.alt))
-      return { ...DEFAULT_VIEW, ...v };
-  } catch (e) {}
+  const v = loadStore('earth-view');
+  if (v && Number.isFinite(v.lat) && Number.isFinite(v.lon) && Number.isFinite(v.alt))
+    return { ...DEFAULT_VIEW, ...v };
   return DEFAULT_VIEW;
 })();

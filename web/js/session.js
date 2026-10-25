@@ -1,10 +1,11 @@
+import { STORES, FILES, freezeStorage } from './persist.js';
 import { idbGet, idbPutChecked, idbDel } from './idb.js';
 import { saveView } from './saveview.js';
 import { toast } from './hud.js';
 import { savePath } from './path.js';
 import { saveAlign } from './align.js';
 
-export { storageFrozen, copyState, fileStamp, saveFile, saveState, pasteState, initSession };
+export { copyState, fileStamp, saveFile, saveState, pasteState, initSession };
 
 // --- move a session between origins ---------------------------------------
 // the deployed page and localhost are two origins, and nothing is shared
@@ -17,16 +18,6 @@ export { storageFrozen, copyState, fileStamp, saveFile, saveState, pasteState, i
 // bytes that re-download themselves, and the only cost of leaving it
 // behind is that the first minute over the same ground is slower
 const STATE_TAG = 'soil-session-v1';
-const STATE_KEYS = ['earth-view', 'earth-path', 'earth-align'];
-const STATE_FILES = ['gpx-file', 'ref-image'];
-// set once a pasted session has been written to storage, and never cleared.
-// from that moment what's in storage describes a session this page is not
-// showing, and every saver below would be writing the one it's replacing
-// over it. the view saver is the one that actually bites: it runs both on
-// beforeunload — which the reload after a paste fires itself — and once a
-// second off the frame loop, so leaving it live loses the pasted pose
-// always, or intermittently, depending on which one gets there first
-let storageFrozen = false;
 // files go over as data urls: json is the only thing the clipboard carries
 // between two pages, and this is the one encoding of a blob that comes back
 // through fetch() without a byte of parsing here
@@ -50,13 +41,13 @@ const collectState = async () => {
   // too, so each entry goes in as the object it is — not a json string
   // escaped inside the json. (a value that isn't json stays a string)
   const ls = {};
-  for (const k of STATE_KEYS) {
+  for (const k of STORES) {
     const v = localStorage.getItem(k);
     if (v == null) continue;
     try { ls[k] = JSON.parse(v); } catch (e) { ls[k] = v; }
   }
   const files = {};
-  for (const k of STATE_FILES) {
+  for (const k of FILES) {
     const f = await idbGet(k, 'app');
     if (!f) continue;
     const j = await fileToJson(f);
@@ -103,8 +94,8 @@ const saveState = async () => {
 // have is a key it doesn't want, so it goes. half-pasting one session over
 // another leaves a mix that belongs to neither
 const applyState = async (s) => {
-  storageFrozen = true; // before the first write: nothing may save over it now
-  for (const k of STATE_KEYS) {
+  freezeStorage(); // before the first write: nothing may save over it now
+  for (const k of STORES) {
     // objects from the current format, strings from files written before
     // it stored them parsed
     if (s.ls && s.ls[k] != null)
@@ -112,7 +103,7 @@ const applyState = async (s) => {
     else localStorage.removeItem(k);
   }
   const failed = [];
-  for (const k of STATE_FILES) {
+  for (const k of FILES) {
     const j = s.files && s.files[k];
     if (!j) { idbDel(k, 'app'); continue; }
     try {

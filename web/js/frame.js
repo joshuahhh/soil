@@ -1,22 +1,19 @@
-import { QS, TEST, START } from './config.js';
+import { TEST } from './config.js';
 import { S } from './state.js';
 import { setPlanetR } from './geo.js';
 import { view } from './engine.js';
-import { saveView } from './saveview.js';
+import { saveView, restoreView } from './saveview.js';
 import { marker, setMarkerHeading, pickDebug, updatePickDebug, mapPointerDown,
   followMarker } from './map.js';
 import { updateSpeed, updateHint, refreshRoll } from './hud.js';
 import { refreshKeys } from './keytable.js';
-import { showCut } from './nearcut.js';
-import { keys, setMiniature, setDebugLod, dragging } from './input.js';
-import { tunnelOn, K_MIN, K_MAX, refreshTunnel, tunnelClosing, curlTarget, endTunnel,
-  setTunnel } from './tunnel.js';
-import { tubePendingSince, setRectData, updateAxisBtn, flyIntoTube, flyOntoBody,
-  applyTube } from './tube.js';
+import { mode, inTube, ortho, hug } from './mode.js';
+import { keys, dragging } from './input.js';
+import { tunnelClosing, curlTarget, endTunnel } from './tunnel.js';
+import { tubePending, advanceTube } from './tube.js';
 import { bodyPromise } from './body.js';
-import { followOn, pushPath, spine, buildSpine, followStep } from './path.js';
+import { pushPath, spine, buildSpine, followStep } from './path.js';
 import { updateMarkers, updateStatus, solving, solveStep, stopSolve } from './align.js';
-import { applyGlamour, applySky } from './sky.js';
 
 export { frameCount, frameTiming, initFrame };
 
@@ -33,7 +30,7 @@ const tick = (now) => {
   const dt = TEST ? TEST.dt : Math.min(100, now - last);
   last = now;
   refreshKeys(now);
-  if (S.hug && now - speedAt > 100) { speedAt = now; updateSpeed(); }
+  if (hug && now - speedAt > 100) { speedAt = now; updateSpeed(); }
 
   if (view.ready() && !posed) {
     // once the planet metadata is in, jump to the start (or saved) pose
@@ -41,52 +38,7 @@ const tick = (now) => {
     // the datum setPose's altitude and every pick are measured from; the
     // alignment math rebuilds ecef points against it
     setPlanetR(view.planetRadius());
-    view.setPose(START.lat, START.lon, START.alt, START.heading, START.tilt);
-    view.setFov(START.fov);
-    if (Number.isFinite(START.nearCut) && START.nearCut > 0) {
-      view.setNearCut(START.nearCut);
-      showCut();
-    }
-    S.gain = START.gain;
-    S.ortho = !!START.ortho;
-    view.setOrtho(S.ortho);
-    S.hug = !!START.hug;
-    view.setTerrainFollow(S.hug);
-    if (START.miniature) setMiniature(true);
-    if (START.lod) setDebugLod(true);
-    applySky();
-    applyGlamour();
-    // a banked camera comes back banked. inside the tube the bank belongs to
-    // the airplane frame and is restored after the roll-up below instead,
-    // because that is what creates the frame to bank
-    if (START.roll && !(START.tube && START.tube.on)) view.setRoll(START.roll);
-    // restore a saved tube rect; if it was rolled, it rolls up again from
-    // flat (the camera pose is already wherever it was saved)
-    if (START.tube && START.tube.rect) {
-      S.tubeRect = START.tube.rect;
-      S.tubeAxisEw = START.tube.ewAxis !== false;
-      S.tubeBody = !!START.tube.body;
-      updateAxisBtn();
-      setRectData(S.tubeRect);
-      if (START.tube.on) {
-        applyTube(S.tubeRect, false); // reload + roll in place at the saved pose
-        if (START.roll) view.setRoll(START.roll); // restore the bank angle
-      } else {
-        view.setTubeRect(S.tubeRect[0], S.tubeRect[1], S.tubeRect[2], S.tubeRect[3], S.tubeAxisEw);
-      }
-    }
-    if (START.tunnel && Number.isFinite(START.tunnel.c)) S.tunnelC = START.tunnel.c;
-    if (START.tunnel && START.tunnel.across === false) S.tunnelAcross = false;
-    if (START.tunnel && Number.isFinite(START.tunnel.lag)) S.tunnelLag = Math.max(0, START.tunnel.lag);
-    if (START.tunnel && Number.isFinite(START.tunnel.k)) S.tunnelK = Math.max(K_MIN, Math.min(K_MAX, START.tunnel.k));
-    refreshTunnel();
-    if (START.tunnel && START.tunnel.on && !(START.tube && START.tube.on)) setTunnel(true, false);
-    // ?tunnel=<circumference m> (test mode): straight into the tunnel at
-    // the given pose, for the render tests
-    if (TEST && QS.has('tunnel')) {
-      const c = parseFloat(QS.get('tunnel'));
-      if (Number.isFinite(c) && c > 0) { S.tunnelC = c; refreshTunnel(); setTunnel(true, false); }
-    }
+    restoreView();
     // a track dropped (or restored) before the planet metadata arrived is
     // still sitting in js: its ecef points need the planetoid radius, and
     // so does the spine's tangent plane
@@ -103,26 +55,26 @@ const tick = (now) => {
   const rot = (slow ? 0.1 : 1) * dt / 1000;
   // on the rails the arrows swing the camera around the track instead of
   // aiming it, and W/S run along the track instead of flying
-  const railed = followOn && spine && view.ready();
-  const orbitH = S.ortho ? ((keys.ArrowRight ? 1 : 0) - (keys.ArrowLeft ? 1 : 0)) : 0;
-  const orbitV = S.ortho ? ((keys.ArrowUp ? 1 : 0) - (keys.ArrowDown ? 1 : 0)) : 0;
+  const railed = mode === 'follow' && spine && view.ready();
+  const orbitH = ortho ? ((keys.ArrowRight ? 1 : 0) - (keys.ArrowLeft ? 1 : 0)) : 0;
+  const orbitV = ortho ? ((keys.ArrowUp ? 1 : 0) - (keys.ArrowDown ? 1 : 0)) : 0;
   if ((orbitH || orbitV) && view.ready()) view.orbit(orbitH * 45 * rot, orbitV * 34 * rot); // deg
-  if (!S.ortho && !railed && keys.ArrowRight) S.yaw += 1.2 * rot;
-  if (!S.ortho && !railed && keys.ArrowLeft) S.yaw -= 1.2 * rot;
-  if (!S.ortho && !railed && keys.ArrowUp) S.pitch += 0.9 * rot;
-  if (!S.ortho && !railed && keys.ArrowDown) S.pitch -= 0.9 * rot;
+  if (!ortho && !railed && keys.ArrowRight) S.yaw += 1.2 * rot;
+  if (!ortho && !railed && keys.ArrowLeft) S.yaw -= 1.2 * rot;
+  if (!ortho && !railed && keys.ArrowUp) S.pitch += 0.9 * rot;
+  if (!ortho && !railed && keys.ArrowDown) S.pitch -= 0.9 * rot;
   // z/x zoom like the wheel; in ortho R/F join them as zoom too (below),
   // since a parallel projection has no meaningful elevation to pedestal
   // along — so the up/down keys would otherwise sit dead there
   if (!!keys.KeyZ !== !!keys.KeyX) {
-    if (S.ortho) {
+    if (ortho) {
       view.zoomOrtho(Math.pow(0.9, (dt / 150) * (keys.KeyZ ? 1 : -1)));
     } else {
       const p = view.getPose();
       view.setFov(p.fov * Math.pow(0.9, (dt / 150) * (keys.KeyZ ? -1 : 1)));
     }
   }
-  if (S.ortho && !railed && !!keys.KeyR !== !!keys.KeyF) {
+  if (ortho && !railed && !!keys.KeyR !== !!keys.KeyF) {
     view.zoomOrtho(Math.pow(0.9, (dt / 150) * (keys.KeyR ? 1 : -1))); // R out, F in
   }
 
@@ -133,15 +85,15 @@ const tick = (now) => {
 
   // in tube mode Q/E become the roll axis (airplane style) and R/F boom
   // along the camera's own up — the body-frame counterpart of A/D
-  const roll = S.tubeOn ? ((keys.KeyE ? 1 : 0) - (keys.KeyQ ? 1 : 0)) * 1.5 * rot : 0;
+  const roll = inTube() ? ((keys.KeyE ? 1 : 0) - (keys.KeyQ ? 1 : 0)) * 1.5 * rot : 0;
   // thrusting steadies the hand: turning (keys and drag alike) drops to
   // a fifth while W is held, so forward flight curves instead of veers
   const turn = keys.KeyW ? 0.2 : 1;
   if (railed) followStep(dt, slow);
   else view.fly(S.yaw * turn, S.pitch * turn, roll * turn,
     !!keys.KeyW, !!keys.KeyS, !!keys.KeyA, !!keys.KeyD,
-    (S.tubeOn || !S.ortho) && !!keys.KeyR,
-    (S.tubeOn || !S.ortho) && !!keys.KeyF,
+    (inTube() || !ortho) && !!keys.KeyR,
+    (inTube() || !ortho) && !!keys.KeyF,
     slow, !!keys.Space, S.gain, dt);
   S.yaw = 0;
   S.pitch = 0;
@@ -154,31 +106,18 @@ const tick = (now) => {
   frameTiming.engineMs += performance.now() - tFrame0;
 
   if (view.ready() && posed) {
-    // stage 2+3 of the tube pipeline: the engine locks ground level as
-    // soon as the rect is covered at measurement resolution (well before
-    // full res), then we fly in and roll while the rest keeps streaming
-    // into the rolled tube. after 20s (a download stuck or failed), force
-    // the measurement with what's resident
+    // the tube's staged load (tube.js), and what the tube, the tunnel or
+    // the body is still waiting on
     const tubeInfoEl = document.getElementById('tubeinfo');
-    if (S.tubeOn) {
-      let ti = view.getTubeInfo();
-      if (S.tubePending) {
-        if (now - tubePendingSince > 20000 && !ti.groundLocked) {
-          view.lockTubeGround();
-          ti = view.getTubeInfo();
-        }
-        if (ti.groundLocked) {
-          if (S.tubePending === 'fly') (S.tubeBody ? flyOntoBody : flyIntoTube)(S.tubeRect);
-          S.tubePending = null;
-        }
-      }
+    if (inTube()) {
+      const ti = advanceTube(now);
       const parts = [];
-      if (S.tubePending || ti.nodesLoaded < ti.nodesWanted)
+      if (tubePending || ti.nodesLoaded < ti.nodesWanted)
         parts.push(`loading ${ti.nodesLoaded}/${ti.nodesWanted} tiles`);
-      if (!S.tubePending && S.curl !== curlTarget) parts.push(S.tubeBody ? 'wrapping…' : 'rolling…');
+      if (!tubePending && S.curl !== curlTarget) parts.push(mode === 'body' ? 'wrapping…' : 'rolling…');
       tubeInfoEl.style.display = parts.length ? '' : 'none';
-      if (parts.length) tubeInfoEl.textContent = (S.tubeBody ? 'body: ' : 'tube: ') + parts.join(' · ');
-    } else if (tunnelOn) {
+      if (parts.length) tubeInfoEl.textContent = (mode === 'body' ? 'body: ' : 'tube: ') + parts.join(' · ');
+    } else if (mode === 'tunnel') {
       const ti = view.getTunnelInfo();
       const loading = ti.nodesLoaded < ti.nodesWanted;
       tubeInfoEl.style.display = loading ? '' : 'none';
@@ -195,8 +134,8 @@ const tick = (now) => {
     // the flatter the sheet, the more of the rect's edge (and the nothing
     // past it) is in view, so it goes straight to the ground in ~half a
     // second rather than easing all the way
-    if ((S.tubeOn && !S.tubePending || tunnelOn) && S.curl !== curlTarget) {
-      const tau = tunnelClosing ? 150 : tunnelOn ? 300 : 700;
+    if ((inTube() && !tubePending || mode === 'tunnel') && S.curl !== curlTarget) {
+      const tau = tunnelClosing ? 150 : mode === 'tunnel' ? 300 : 700;
       S.curl += (curlTarget - S.curl) * (1 - Math.exp(-dt / tau));
       if (Math.abs(curlTarget - S.curl) < 0.001) S.curl = curlTarget;
       view.setTubeCurl(S.curl);
@@ -206,7 +145,7 @@ const tick = (now) => {
     // in tube mode the marker shows the camera in unrolled tube
     // coordinates — the spot on the rect whose imagery is wrapped around
     // the camera — rather than the now-meaningless ecef point under it
-    const tp = (S.tubeOn || tunnelOn) ? view.getTubePose() : null;
+    const tp = (inTube() || mode === 'tunnel') ? view.getTubePose() : null;
     const m = tp || p;
     setMarkerHeading(m.heading);
     if (Math.abs(m.lat - lastSynced.lat) > 1e-7 || Math.abs(m.lon - lastSynced.lon) > 1e-7) {

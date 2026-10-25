@@ -3,15 +3,14 @@ import { S } from './state.js';
 import { D2R, planetR, vsub, vmul, vadd, vdot, vcross, vnorm, geoUpV, geoNorthV } from './geo.js';
 import { smoothSpine, makeSpine, spineAt, rawAt, spineLatLon, spineHeading,
   nearestS } from './spine.js';
+import { loadStore, saveStore } from './persist.js';
 import { idbGet, idbPutChecked, idbDel } from './idb.js';
 import { view, canvas } from './engine.js';
 import { map } from './map.js';
-import { updateHint } from './hud.js';
 import { keys } from './input.js';
-import { tunnelOn } from './tunnel.js';
-import { storageFrozen } from './session.js';
+import { mode, ortho, defineMode, setMode } from './mode.js';
 
-export { path, followOn, parseGpx, pushPath, savePath, setPath, loadGpxFile, spine, buildSpine,
+export { path, parseGpx, pushPath, savePath, setPath, loadGpxFile, spine, buildSpine,
   debugSmooth, setDebugSmooth, setFollow, toggleFollow, followStep, initPath };
 
 // --- dropped track (gpx) --------------------------------------------------
@@ -22,7 +21,6 @@ export { path, followOn, parseGpx, pushPath, savePath, setPath, loadGpxFile, spi
 // the ✕ that gets rid of it. like the reference photo, the file never
 // leaves the browser but is kept in indexeddb so a reload comes back to it
 let path = null;   // { name, segs: [[{lat, lon, ele}, ...], ...], pts, km }
-let followOn = false; // riding the dropped track (V)
 const pathStyle = { color: '#ff7f0e', opacity: 0.9, width: 3, drape: true };
 const pathEls = {};
 for (const k of ['name', 'stats', 'progress', 'color', 'opacity', 'width', 'drape',
@@ -147,19 +145,14 @@ const setCursor = (ll) => {
   if (!cursorOn) { cursorMarker.addTo(map); cursorOn = true; }
 };
 
-const savePath = () => {
-  if (storageFrozen) return;
-  try {
-    localStorage.setItem('earth-path', JSON.stringify({
-      style: pathStyle, name: path ? path.name : null,
-      // how you like to stand relative to the track, but neither the mode
-      // itself (coming back to a reload already on rails would be a shock)
-      // nor where along it you were: entering follow always re-derives that
-      // from where the camera actually is, so saving it reads back as dead
-      follow: { az: fol.az, el: fol.el, dist: fol.dist },
-    }));
-  } catch (e) {}
-};
+const savePath = () => saveStore('earth-path', {
+  style: pathStyle, name: path ? path.name : null,
+  // how you like to stand relative to the track, but neither the mode
+  // itself (coming back to a reload already on rails would be a shock)
+  // nor where along it you were: entering follow always re-derives that
+  // from where the camera actually is, so saving it reads back as dead
+  follow: { az: fol.az, el: fol.el, dist: fol.dist },
+});
 const pathBounds = () => {
   if (!path) return null;
   const b = new maplibregl.LngLatBounds();
@@ -199,7 +192,7 @@ const refreshPathPanel = () => {
   pathEls.drape.parentElement.title = pathEls.drape.disabled
     ? 'this file records no elevations, so the track has to be laid on the mesh'
     : 'lay the track on the mesh instead of at the elevations the file records';
-  pathEls.follow.classList.toggle('primary', followOn);
+  pathEls.follow.classList.toggle('primary', mode === 'follow');
   if (!path) return;
   pathEls.name.textContent = path.name || 'path';
   pathEls.name.title = path.name || '';
@@ -338,7 +331,7 @@ const buildSpine = () => {
 // in perspective it comes from the standoff and the fov, so both the R/F
 // standoff and the Z/X zoom feed it
 const followSpan = () => {
-  if (S.ortho) {
+  if (ortho) {
     const e = view.getOrthoExtent();
     if (e > 0) return 2 * e;
   }
@@ -396,30 +389,37 @@ const setDebugSmooth = (on) => {
   canvas.focus();
 };
 
-const setFollow = (on) => {
-  if (on && (!spine || !view.ready() || S.tubeOn || tunnelOn)) on = false;
-  if (on === followOn) { refreshPathPanel(); return; }
-  followOn = on;
-  fol.heading = fol.alt = null; // don't ease out of a stale value
-  if (on) {
-    // terrain hug goes: it re-eases the eye toward a held height above the
-    // mesh inside every fly() call, and the rails write the pose outright,
-    // so the two fight over the same thing. ortho stays — a parallel
-    // projection has no quarrel with the rails, it just changes what R/F
-    // and a drag have to do (see followStep)
-    if (S.hug) { S.hug = false; view.setTerrainFollow(false); }
+// riding the track replaces the flight controls (see the tick). terrain
+// hug goes on the way in (mode.js): it re-eases the eye toward a held
+// height above the mesh inside every fly() call, and the rails write the
+// pose outright, so the two fight over the same thing. ortho stays — a
+// parallel projection has no quarrel with the rails, it just changes what
+// R/F and a drag have to do (see followStep)
+const followHooks = {
+  enter: () => {
+    fol.heading = fol.alt = null; // don't ease out of a stale value
     fol.s = nearestS(spine, view.getPose());
     S.following = true; // let the map track the camera along
     canvas.focus();
-  } else {
+    document.body.classList.add('riding');
+    refreshPathPanel();
+    savePath();
+  },
+  exit: () => {
+    fol.heading = fol.alt = null;
     setCursor(null);
-  }
-  document.body.classList.toggle('riding', on);
-  refreshPathPanel();
-  updateHint();
-  savePath();
+    document.body.classList.remove('riding');
+    refreshPathPanel();
+    savePath();
+  },
 };
-const toggleFollow = () => setFollow(!followOn);
+// only from free flight: not inside the tube or the tunnel
+const setFollow = (on) => {
+  if (on && (!spine || !view.ready() || (mode !== 'fly' && mode !== 'follow'))) on = false;
+  if (on === (mode === 'follow')) { refreshPathPanel(); return; }
+  setMode(on ? 'follow' : 'fly');
+};
+const toggleFollow = () => setFollow(mode !== 'follow');
 
 // one frame of the follow camera; replaces the flight controls entirely
 // while it is on (see the tick)
@@ -457,7 +457,7 @@ const followStep = (dt, slow) => {
     // instead — the way they do outside follow. the standoff still rides
     // along, so the framing survives a switch back to perspective and the
     // travel speed (which scales with it) tracks what you can actually see
-    if (S.ortho) view.zoomOrtho(f);
+    if (ortho) view.zoomOrtho(f);
     fol.dist = Math.min(50000, Math.max(15, fol.dist / f));
   }
 
@@ -529,6 +529,8 @@ const followStep = (dt, slow) => {
 };
 
 const initPath = () => {
+  defineMode('follow', followHooks);
+
   map.on('load', () => {
     map.addSource('gpx', { type: 'geojson', data: pathFC() });
     map.addLayer({ id: 'gpx-line', type: 'line', source: 'gpx',
@@ -581,8 +583,7 @@ const initPath = () => {
   // capture must not depend on what the last interactive session dropped
   (async () => {
     if (TEST) return;
-    let saved = null;
-    try { saved = JSON.parse(localStorage.getItem('earth-path')); } catch (e) {}
+    const saved = loadStore('earth-path');
     if (saved && saved.style) Object.assign(pathStyle, saved.style);
     if (saved && saved.follow) Object.assign(fol, saved.follow, { heading: null, alt: null });
     refreshPathPanel();

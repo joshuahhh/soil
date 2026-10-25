@@ -8,9 +8,10 @@ import { ov, clampScale, overlayBox, layoutOverlay, viewToPhoto,
 import { updateHint, toast } from './hud.js';
 import { toggleKeys } from './keytable.js';
 import { toggleCutPanel } from './nearcut.js';
-import { tunnelOn, tunnelClosing, setTunnel } from './tunnel.js';
-import { setRectData, unrollTube, applyTube } from './tube.js';
-import { followOn, debugSmooth, setDebugSmooth, setFollow, toggleFollow } from './path.js';
+import { mode, setMode, ortho, setOrtho, hug, setHug } from './mode.js';
+import { tunnelClosing, setTunnel } from './tunnel.js';
+import { tubeRect, rollRect, clearRect } from './tube.js';
+import { debugSmooth, setDebugSmooth, setFollow, toggleFollow } from './path.js';
 import { saveAlign, capture, captureClick, stopSolve } from './align.js';
 
 export { keys, miniature, setMiniature, debugLod, setDebugLod, mipmaps, setMipmaps, dragging,
@@ -46,15 +47,15 @@ const setMipmaps = (on) => { mipmaps = on; view.setMipmaps(on); updateHint(); };
 // reset and following again. the tube is left alone: esc clears it
 const resetView = () => {
   if (!view.ready()) return;
-  if (followOn) setFollow(false); // else the rails put the camera straight back
+  if (mode === 'follow') setFollow(false); // else the rails put the camera straight back
   view.setPose(DEFAULT_VIEW.lat, DEFAULT_VIEW.lon, DEFAULT_VIEW.alt,
     DEFAULT_VIEW.heading, DEFAULT_VIEW.tilt);
   view.setFov(DEFAULT_VIEW.fov);
   view.setRoll(0);
   S.gain = DEFAULT_VIEW.gain;
-  if (S.ortho) { S.ortho = false; view.setOrtho(false); }
+  setOrtho(false);
   if (miniature) setMiniature(false);
-  if (S.hug) { S.hug = false; view.setTerrainFollow(false); }
+  setHug(false);
   map.setZoom(DEFAULT_VIEW.zoom);
   S.following = true;
   S.followVel = S.prevMark = null; // a jump, not motion: don't lead the ease
@@ -73,16 +74,11 @@ const initInput = () => {
     keys[e.code] = true;
     if (e.code === 'Minus' && !e.repeat) { S.gain = Math.max(1/128, S.gain/2); updateHint(); }
     if (e.code === 'Equal' && !e.repeat) { S.gain = Math.min(128, S.gain*2); updateHint(); }
-    // no ortho inside the tube: its extent/zoom anchoring assumes normal
-    // terrain below, and a parallel projection of the tube reads as mush
     if (e.code === 'KeyN' && !e.repeat) setMiniature(!miniature);
-    if (e.code === 'KeyO' && !e.repeat && !S.tubeOn && !tunnelOn) { S.ortho = !S.ortho; view.setOrtho(S.ortho); updateHint(); }
-    // terrain hug: cruise at a fixed height above the mesh — over the
-    // sphere normally, radially above the wall inside the tube
-    if (e.code === 'KeyG' && !e.repeat && !followOn && !(S.tubeOn && S.tubeBody)) {
-      S.hug = !S.hug;
-      view.setTerrainFollow(S.hug);
-      if (S.hug) stopSolve(); // the two fight over altitude — see startSolve
+    // the mode decides whether either is allowed (mode.js)
+    if (e.code === 'KeyO' && !e.repeat && setOrtho(!ortho)) updateHint();
+    if (e.code === 'KeyG' && !e.repeat && setHug(!hug)) {
+      if (hug) stopSolve(); // the two fight over altitude — see startSolve
       updateHint();
     }
     if (e.code === 'KeyC' && !e.repeat) setPickDebug(!pickDebug);
@@ -109,38 +105,34 @@ const initInput = () => {
     // ?jpg build where you can see it — and it's motion that shows it, not a
     // still frame: watch distant ground crawl as you fly
     if (e.code === 'KeyM' && !e.repeat) setMipmaps(!mipmaps);
-    // roll/unroll the tube for the current rect (drawn by shift+drag on the
-    // map). rolling up also flies into the tube mouth — watching the roll
-    // from outside mostly shows the back of the sheet
-    // clear the tube entirely: unroll, drop the rect, back to normal flight
-    if (e.code === 'Escape' && followOn) setFollow(false);
-    if (e.code === 'Escape' && tunnelOn) { setTunnel(false); return; }
+    if (e.code === 'Escape' && mode === 'follow') setFollow(false);
+    if (e.code === 'Escape' && mode === 'tunnel') { setTunnel(false); return; }
     // T is the tunnel — unless a rect is drawn on the map, when it rolls
     // that instead (esc clears the rect)
-    if (e.code === 'KeyT' && !e.repeat && !followOn && (tunnelOn || !S.tubeRect)) {
-      setTunnel(!tunnelOn || tunnelClosing);
+    if (e.code === 'KeyT' && !e.repeat && mode !== 'follow' && (mode === 'tunnel' || !tubeRect)) {
+      setTunnel(mode !== 'tunnel' || tunnelClosing);
       return;
     }
-    if (e.code === 'Escape' && S.tubeRect) {
-      S.tubeRect = null;
-      S.tubeBody = false;
-      unrollTube();
-      setRectData(null);
+    // clear the tube entirely: unroll, drop the rect, back to normal flight
+    if (e.code === 'Escape' && tubeRect) {
+      clearRect();
       updateHint();
     }
     // T rolls the rect into a tube, B wraps it onto the body; each key
-    // undoes its own shape and switches from the other's
-    if (e.code === 'KeyT' && !e.repeat && S.tubeRect && !tunnelOn) {
-      if (S.tubeOn && !S.tubeBody) unrollTube();
-      else { S.tubeBody = false; applyTube(S.tubeRect, true); }
+    // undoes its own shape and switches from the other's. rolling up also
+    // flies into the tube mouth — watching the roll from outside mostly
+    // shows the back of the sheet
+    if (e.code === 'KeyT' && !e.repeat && tubeRect && mode !== 'tunnel') {
+      if (mode === 'tube') setMode('fly');
+      else rollRect('tube', true);
       updateHint();
     }
-    if (e.code === 'KeyB' && !e.repeat && S.tubeRect && !tunnelOn && !followOn) {
-      if (S.tubeOn && S.tubeBody) unrollTube();
-      else { S.tubeBody = true; applyTube(S.tubeRect, true); }
+    if (e.code === 'KeyB' && !e.repeat && tubeRect && mode !== 'tunnel' && mode !== 'follow') {
+      if (mode === 'body') setMode('fly');
+      else rollRect('body', true);
       updateHint();
     }
-    if (e.code === 'KeyB' && !e.repeat && !S.tubeRect && !tunnelOn && !followOn)
+    if (e.code === 'KeyB' && !e.repeat && !tubeRect && mode !== 'tunnel' && mode !== 'follow')
       toast('shift-drag a rect on the map first, then B wraps it on the body');
   });
   // the two clicks that mark a pair (photo point, then mesh point); the
@@ -186,7 +178,7 @@ const initInput = () => {
     // camera translation, so the ground follows the pointer)
     // ...except on the rails, where the drag swings the standoff in either
     // projection: a pan would be overwritten by followStep on the same frame
-    if (S.ortho && !followOn) {
+    if (ortho && mode !== 'follow') {
       view.panOrtho(e.movementX, e.movementY, canvas.clientHeight);
       return;
     }
@@ -229,7 +221,7 @@ const initInput = () => {
     }
     // in ortho, zooming is a dolly (elevation is not a real degree of
     // freedom there); in perspective it narrows the fov like the native app
-    if (S.ortho) { view.zoomOrtho(Math.pow(0.9, e.deltaY / 100)); return; }
+    if (ortho) { view.zoomOrtho(Math.pow(0.9, e.deltaY / 100)); return; }
     const p = view.getPose();
     view.setFov(p.fov * Math.pow(0.9, -e.deltaY / 100));
   }, { passive: false });

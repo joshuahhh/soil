@@ -2,9 +2,10 @@ import { S } from './state.js';
 import { view, canvas } from './engine.js';
 import { saveView } from './saveview.js';
 import { updateHint } from './hud.js';
+import { mode, defineMode, setMode } from './mode.js';
 
-export { tunnelOn, K_MIN, K_MAX, refreshTunnel, tunnelClosing, curlTarget, endTunnel, setTunnel,
-  initTunnel };
+export { refreshTunnel, tunnelClosing, curlTarget, endTunnel, setTunnel, tunnelState,
+  restoreTunnel, initTunnel };
 
 // --- tunnel mode ----------------------------------------------------------
 // the tube without the rect: the ground ahead curls up in front of the
@@ -12,7 +13,6 @@ export { tunnelOn, K_MIN, K_MAX, refreshTunnel, tunnelClosing, curlTarget, endTu
 // on the axis, looking along the circle, new land rolling up ahead as
 // you fly (earth_core tunnelUpdate). one parameter, the circumference;
 // T toggles it, the panel's slider sets it
-let tunnelOn = false;
 const tunnelAxisBtn = document.getElementById('tunnelaxis');
 const TUNNEL_MIN = 200, TUNNEL_MAX = 20000;
 const tunnelSlider = document.getElementById('tunnelc');
@@ -52,38 +52,40 @@ const refreshTunnel = () => {
 // a reload lands straight in the tunnel it left
 let tunnelClosing = false;
 let curlTarget = 1; // 0 only while the tunnel unrolls on its way out
-const endTunnel = () => {
-  tunnelOn = false;
-  tunnelClosing = false;
-  curlTarget = 1;
-  view.setTunnel(false, S.tunnelC);
-  view.setTubeEnabled(false);
-  updateHint();
+const tunnelHooks = {
+  enter: ({ animate = true }) => {
+    view.setTubeBody(false); // the tunnel is always the cylinder
+    view.setTunnelAcross(S.tunnelAcross);
+    view.setTunnelLag(S.tunnelLag * 1000);
+    view.setTunnelLength(S.tunnelK);
+    view.setTunnel(true, S.tunnelC);
+    S.curl = animate ? 0 : 1;
+    curlTarget = 1;
+    view.setTubeCurl(S.curl);
+    S.following = true;
+  },
+  exit: () => {
+    tunnelClosing = false;
+    curlTarget = 1;
+    view.setTunnel(false, S.tunnelC);
+    view.setTubeEnabled(false);
+    document.body.classList.remove('tunnel');
+  },
 };
+// the end of the way out, once the frame loop has eased the curl down
+const endTunnel = () => setMode('fly');
 const setTunnel = (on, animate = true) => {
   if (on) {
-    if (tunnelOn && !tunnelClosing) return;
+    if (mode === 'tunnel' && !tunnelClosing) return;
     if (tunnelClosing) {
       // caught on the way out: back up from wherever it got to
       tunnelClosing = false;
       curlTarget = 1;
     } else {
-      tunnelOn = true;
-      // the rect tube and the tunnel are the same machinery; only one
-      if (S.tubeOn) { S.tubeOn = false; S.tubePending = null; view.setAirplane(false); }
-      view.setTubeBody(false); // the tunnel is always the cylinder
-      if (S.ortho) { S.ortho = false; view.setOrtho(false); }
-      view.setTunnelAcross(S.tunnelAcross);
-      view.setTunnelLag(S.tunnelLag * 1000);
-      view.setTunnelLength(S.tunnelK);
-      view.setTunnel(true, S.tunnelC);
-      S.curl = animate ? 0 : 1;
-      curlTarget = 1;
-      view.setTubeCurl(S.curl);
-      S.following = true;
+      setMode('tunnel', { animate });
     }
   } else {
-    if (!tunnelOn || tunnelClosing) return;
+    if (mode !== 'tunnel' || tunnelClosing) return;
     if (animate) {
       tunnelClosing = true;
       curlTarget = 0;
@@ -97,7 +99,22 @@ const setTunnel = (on, animate = true) => {
   saveView();
   canvas.focus();
 };
+// the tunnel's part of the saved view: its settings, and whether it was on
+// (not if it was on its way out)
+const tunnelState = () => ({ on: mode === 'tunnel' && !tunnelClosing, c: S.tunnelC,
+  across: S.tunnelAcross, lag: S.tunnelLag, k: S.tunnelK });
+// tubeRolled: the saved view also had the rect rolled, which wins
+const restoreTunnel = (t, tubeRolled) => {
+  if (t && Number.isFinite(t.c)) S.tunnelC = t.c;
+  if (t && t.across === false) S.tunnelAcross = false;
+  if (t && Number.isFinite(t.lag)) S.tunnelLag = Math.max(0, t.lag);
+  if (t && Number.isFinite(t.k)) S.tunnelK = Math.max(K_MIN, Math.min(K_MAX, t.k));
+  refreshTunnel();
+  if (t && t.on && !tubeRolled) setTunnel(true, false);
+};
 const initTunnel = () => {
+  defineMode('tunnel', tunnelHooks);
+
   tunnelAxisBtn.addEventListener('click', () => {
     S.tunnelAcross = !S.tunnelAcross;
     view.setTunnelAcross(S.tunnelAcross);

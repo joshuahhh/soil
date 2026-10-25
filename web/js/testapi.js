@@ -3,7 +3,9 @@ import { clearTiles } from './tiles.js';
 import { view, canvas } from './engine.js';
 import { map, marker } from './map.js';
 import { setMipmaps } from './input.js';
+import { inTube } from './mode.js';
 import { refreshTunnel } from './tunnel.js';
+import { tubeRect, rectShape } from './tube.js';
 import { setBodyMesh } from './body.js';
 import { path, parseGpx, setPath } from './path.js';
 import { pairs, lastErrs, dofCount, solving, startSolve } from './align.js';
@@ -22,7 +24,7 @@ const initTestApi = () => {
     sky: (patch) => { Object.assign(sky, patch); applySky(); return { ...sky }; },
     glamour: (patch) => { Object.assign(glamour, patch); applyGlamour(); return { ...glamour }; },
     lod: (v) => { if (v != null) view.setLodScale(v); return view.getLodScale(); },
-    tube: () => ({ rect: S.tubeRect, on: S.tubeOn, body: S.tubeBody, curl: S.curl }),
+    tube: () => ({ rect: tubeRect, on: inTube(), body: rectShape === 'body', curl: S.curl }),
     body: (text) => text ? setBodyMesh(text) : view.bodyReady(),
     tunnel: (c) => { if (c != null) { S.tunnelC = c; view.setTunnelCircumference(c); refreshTunnel(); } return view.getTunnelInfo(); },
     path: () => path, loadGpx: (text) => setPath(parseGpx(text), true),

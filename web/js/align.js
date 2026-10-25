@@ -1,13 +1,13 @@
 import { S } from './state.js';
 import { ecefOf, poseBasis, projectWith } from './geo.js';
 import { paramSpecs, lmStep } from './solver.js';
+import { loadStore, saveStore } from './persist.js';
 import { idbGet } from './idb.js';
 import { view, canvas, rightEl } from './engine.js';
 import { overlayBlend, ov, applyOverlayBlend, viewToPhoto, clampLens, distortUV, photoToViewK,
   setLens, fitOverlay, setOverlay, clearOverlay } from './photo.js';
 import { updateHint } from './hud.js';
-import { tunnelOn } from './tunnel.js';
-import { storageFrozen } from './session.js';
+import { mode, ortho, setHug } from './mode.js';
 
 export { pairs, svgEl, saveAlign, clearPairs, alignRefresh, lastErrs, updateMarkers, updateStatus,
   dofCount, capture, captureClick, solving, solveStep, stopSolve, startSolve, initAlign };
@@ -60,13 +60,10 @@ const setHover = (i) => {
 };
 
 function saveAlign() {
-  if (storageFrozen) return;
-  try {
-    localStorage.setItem('earth-align', JSON.stringify({
-      pairs, ov, free: freeFlags, key: S.refImageKey,
-      opacity: +overlayBlend.value,
-    }));
-  } catch (e) {}
+  saveStore('earth-align', {
+    pairs, ov, free: freeFlags, key: S.refImageKey,
+    opacity: +overlayBlend.value,
+  });
 }
 function clearPairs() {
   pairs = [];
@@ -83,7 +80,7 @@ function alignRefresh() {
   // pairs come with the photo, except where they can't (ortho, or inside
   // the tube) — and then the panel says so rather than silently dropping
   // half of itself
-  const on = document.body.classList.contains('overlay') && !S.ortho && !S.tubeOn && !tunnelOn;
+  const on = document.body.classList.contains('overlay') && !ortho && (mode === 'fly' || mode === 'follow');
   document.body.classList.toggle('align', on);
   if (!on) { cancelCapture(); stopSolve(); }
   document.getElementById('apfreepos').checked = freeFlags.pos;
@@ -415,11 +412,7 @@ const startSolve = () => {
   // zero-input one the tick always makes, so it partly undoes each step
   // before the next one measures its residual. drop it rather than restore
   // it afterwards — putting it back would just pull the camera off the fit
-  if (S.hug) {
-    S.hug = false;
-    view.setTerrainFollow(false);
-    updateHint();
-  }
+  if (setHug(false)) updateHint();
   solving = true;
   lm.lambda = 1e-3;
   lm.iters = 0;
@@ -477,8 +470,7 @@ const initAlign = () => {
   // pairs, photo placement and solver settings ride in localstorage next to
   // the view; the photo's bytes are too big for that and live in indexeddb
   (async () => {
-    let saved = null;
-    try { saved = JSON.parse(localStorage.getItem('earth-align')); } catch (e) {}
+    const saved = loadStore('earth-align');
     if (saved) {
       if (saved.ov) Object.assign(ov, saved.ov);
       if (!Number.isFinite(ov.k)) ov.k = 0;
