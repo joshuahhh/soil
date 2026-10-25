@@ -1,5 +1,4 @@
-import { START } from './config.js';
-import { S } from './state.js';
+import { START, S } from './config.js';
 import { view, canvas, resize } from './engine.js';
 
 export { map, marker, setMarkerHeading, full3d, pickDebug, setPickDebug, updatePickDebug,

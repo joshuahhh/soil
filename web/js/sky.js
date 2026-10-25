@@ -1,8 +1,8 @@
 import { QS, TEST, START } from './config.js';
-import { sunPosition } from './sun.js';
+import { sunPosition } from './math.js';
 import { view, canvas } from './engine.js';
-import { saveView } from './saveview.js';
-import { logScale, percent, bindRange, bindCheck, gate } from './ui.js';
+import { saveView } from './view.js';
+import { logScale, percent, bindRange, bindCheck, gate } from './hud.js';
 
 export { sky, glamour, applyGlamour, applySky, initSky };
 

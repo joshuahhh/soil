@@ -1,19 +1,14 @@
-import { TEST } from './config.js';
-import { S } from './state.js';
-import { D2R, planetR, vsub, vmul, vadd, vdot, vcross, vnorm, geoUpV, geoNorthV } from './geo.js';
-import { smoothSpine, makeSpine, spineAt, rawAt, spineLatLon, spineHeading,
-  nearestS } from './spine.js';
-import { loadStore, saveStore } from './persist.js';
-import { idbGet, idbPutChecked, idbDel } from './idb.js';
+import { TEST, S, loadStore, saveStore } from './config.js';
+import { D2R, planetR, vsub, vmul, vadd, vdot, vcross, vnorm, geoUpV, geoNorthV, smoothSpine,
+  makeSpine, spineAt, rawAt, spineLatLon, spineHeading, nearestS } from './math.js';
+import { idbGet, idbPutChecked, idbDel } from './tiles.js';
 import { view, canvas } from './engine.js';
+import { keys, mode, ortho, defineMode, setMode } from './view.js';
+import { updateHint, percent, bindRange, bindCheck } from './hud.js';
 import { map } from './map.js';
-import { updateHint } from './hud.js';
-import { keys } from './input.js';
-import { mode, ortho, defineMode, setMode } from './mode.js';
-import { percent, bindRange, bindCheck } from './ui.js';
 
-export { path, parseGpx, pushPath, savePath, setPath, loadGpxFile, spine, buildSpine,
-  debugSmooth, setDebugSmooth, setFollow, toggleFollow, followStep, initPath };
+export { path, parseGpx, pushPath, savePath, setPath, loadGpxFile, spine, buildSpine, debugSmooth,
+  setDebugSmooth, setFollow, toggleFollow, followStep, initPath };
 
 // --- dropped track (gpx) --------------------------------------------------
 // drop a .gpx on the window and the track is drawn twice: as a line on the

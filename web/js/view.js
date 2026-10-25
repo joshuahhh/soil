@@ -1,21 +1,137 @@
-import { DEFAULT_VIEW } from './config.js';
-import { S } from './state.js';
+import { QS, TEST, START, S, saveStore, DEFAULT_VIEW } from './config.js';
 import { view, canvas, rightEl } from './engine.js';
-import { saveView } from './saveview.js';
-import { map, pickDebug, setPickDebug } from './map.js';
-import { ov, photoShown, clampScale, overlayBox, layoutOverlay, viewToPhoto,
-  toggleOverlayBlend } from './photo.js';
-import { updateHint, toast } from './hud.js';
-import { keysOpen, showKeys, toggleKeys } from './keytable.js';
-import { toggleCutPanel } from './nearcut.js';
-import { mode, setMode, ortho, setOrtho, hug, setHug } from './mode.js';
-import { tunnelClosing, setTunnel } from './tunnel.js';
-import { tubeRect, rollRect, clearRect } from './tube.js';
+import { updateHint, showCut, toast, keysOpen, showKeys, toggleKeys, toggleCutPanel } from './hud.js';
+import { ov, photoShown, clampScale, overlayBox, layoutOverlay, viewToPhoto, toggleOverlayBlend,
+  saveAlign, capture, captureClick, stopSolve } from './photo.js';
+import { refreshTunnel, setTunnel, tunnelState, restoreTunnel, tubeState, restoreTube,
+  tunnelClosing, tubeRect, rollRect, clearRect } from './tube.js';
+import { map, full3d, pickDebug, setPickDebug } from './map.js';
 import { debugSmooth, setDebugSmooth, setFollow, toggleFollow } from './path.js';
-import { saveAlign, capture, captureClick, stopSolve } from './align.js';
+import { sky, glamour, applySky, applyGlamour } from './sky.js';
 
-export { keys, miniature, setMiniature, debugLod, setDebugLod, mipmaps, setMipmaps, dragging,
-  initInput };
+export { initView, mode, inTube, viewName, defineMode, setMode, ortho, hug, setHug, saveView,
+  restoreView, keys, miniature, mipmaps, setMipmaps, dragging };
+
+// --- the view's mode -----------------------------------------------------
+// what the camera is doing, exactly one at a time:
+//   fly     free flight over the globe
+//   follow  on rails along the dropped track (path.js)
+//   tunnel  the ground ahead curled up around the camera (tunnel.js)
+//   tube    the drawn rect rolled into a tube (tube.js)
+//   body    the drawn rect wrapped onto the figure (tube.js)
+// setMode is the one place it changes, so whatever asks for a switch — a
+// key, a button, a rect drawn on the map, the saved view coming back — the
+// mode being left is always left properly before the next is entered.
+//
+// what isn't a mode: the projection (ortho, which only fly and follow
+// allow), terrain hug (fly, tube and tunnel), and the rect (tube.js),
+// which stays drawn whether or not it is rolled. and two states that live
+// inside a mode and with its module: the tube's staged load before it
+// rolls (tubePending), and the tunnel's animated way out (tunnelClosing),
+// during which the mode is still tunnel
+let mode = 'fly';
+const inTube = () => mode === 'tube' || mode === 'body';
+// the name the hint and the key table go by: fly splits by projection
+const viewName = () => mode === 'fly' ? (ortho ? 'ortho' : 'persp') : mode;
+
+// each mode but fly brings its own { enter(opts), exit() }. two modes may
+// share one: the tube and the body are the same machinery with a different
+// warp, so going from one to the other re-enters without leaving, and so
+// does asking again for the mode already in force (the tube re-rolls when
+// its axis flips)
+const modes = {};
+const defineMode = (name, hooks) => { modes[name] = hooks; };
+
+// no ortho inside the tube or the tunnel: the ortho extent and zoom are
+// anchored on normal terrain below, and a parallel projection of the tube
+// reads as mush. the hug fights the rails over altitude (they write the
+// pose outright), and the wall hug is the cylinder's, not the body's
+const ORTHO_OK = new Set(['fly', 'follow']);
+const HUG_OK = new Set(['fly', 'tube', 'tunnel']);
+
+// by the time either hook runs the mode is already the new one, so an exit
+// that redraws its panel draws it as it now is
+const setMode = (next, opts = {}) => {
+  const from = mode, a = modes[from], b = modes[next];
+  mode = next;
+  if (from !== next && a !== b && a) a.exit();
+  if (!ORTHO_OK.has(next)) setOrtho(false);
+  if (!HUG_OK.has(next)) setHug(false);
+  if (b) b.enter(opts);
+  updateHint();
+};
+
+// the two switches the mode constrains. asking for one the mode doesn't
+// allow does nothing; each says whether it changed anything
+let ortho = false, hug = false;
+const setOrtho = (on) => {
+  if (on === ortho || (on && !ORTHO_OK.has(mode))) return false;
+  ortho = on;
+  view.setOrtho(on);
+  return true;
+};
+// terrain hug: cruise at a fixed height above the mesh — over the sphere
+// normally, radially above the wall inside the tube
+const setHug = (on) => {
+  if (on === hug || (on && !HUG_OK.has(mode))) return false;
+  hug = on;
+  view.setTerrainFollow(on);
+  return true;
+};
+
+// --- the saved view -------------------------------------------------------
+// the camera pose and the view's switches, to localstorage's 'earth-view'
+// (config.js reads it back as START, and restoreView applies it). the tube
+// and the tunnel keep their own parts, next to their state
+const saveView = () => {
+  if (TEST) return; // captures never write back over the user's saved view
+  if (!view.ready()) return;
+  const p = view.getPose();
+  saveStore('earth-view', {
+    lat: p.lat, lon: p.lon, alt: p.alt, heading: p.heading, tilt: p.tilt,
+    roll: p.roll, fov: p.fov, zoom: map.getZoom(), gain: S.gain, ortho, hug,
+    miniature, full3d,
+    nearCut: view.getNearCut(),
+    lod: debugLod,
+    sky, glamour,
+    tube: tubeState(),
+    tunnel: tunnelState(),
+  });
+};
+// the same, applied, from the first frame the engine is ready in. the map's
+// centre, zoom and full3d are taken at its creation (map.js), and the sky
+// and glamour settings at load (sky.js)
+const restoreView = () => {
+  view.setPose(START.lat, START.lon, START.alt, START.heading, START.tilt);
+  view.setFov(START.fov);
+  if (Number.isFinite(START.nearCut) && START.nearCut > 0) {
+    view.setNearCut(START.nearCut);
+    showCut();
+  }
+  S.gain = START.gain;
+  setOrtho(!!START.ortho);
+  setHug(!!START.hug);
+  if (START.miniature) setMiniature(true);
+  if (START.lod) setDebugLod(true);
+  applySky();
+  applyGlamour();
+  // a banked camera comes back banked. inside the tube the bank belongs to
+  // the airplane frame and is restored after the roll-up instead, because
+  // that is what creates the frame to bank
+  const tubeRolled = !!(START.tube && START.tube.on);
+  if (START.roll && !tubeRolled) view.setRoll(START.roll);
+  if (restoreTube(START.tube) && START.roll) view.setRoll(START.roll);
+  restoreTunnel(START.tunnel, tubeRolled);
+  // ?tunnel=<circumference m> (test mode): straight into the tunnel at
+  // the given pose, for the render tests
+  if (TEST && QS.has('tunnel')) {
+    const c = parseFloat(QS.get('tunnel'));
+    if (Number.isFinite(c) && c > 0) { S.tunnelC = c; refreshTunnel(); setTunnel(true, false); }
+  }
+};
+const initSaveView = () => {
+  addEventListener('beforeunload', saveView);
+};
 
 // --- keyboard -> built-in flying controls -----------------------------------
 // ground frame: WASD cruise/truck, Q/E pedestal. hold Space for the view
@@ -225,4 +341,9 @@ const initInput = () => {
     const p = view.getPose();
     view.setFov(p.fov * Math.pow(0.9, -e.deltaY / 100));
   }, { passive: false });
+};
+
+const initView = () => {
+  initSaveView();
+  initInput();
 };
