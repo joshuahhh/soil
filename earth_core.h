@@ -4,9 +4,24 @@
 // (earth_web.cpp, on a web canvas) owns the camera and the frame lifecycle
 // and calls updateAndDraw between renderFrameBegin/renderFrameEnd.
 //
-// single-tu style: include after rocktree_util.h and earth_camera.h.
 // process-wide singletons remain in rocktree_util.h (thread pools, request
 // maps), so one instance per process for now.
+
+#pragma once
+
+#include <algorithm>
+#include <atomic>
+#include <chrono>
+#include <math.h>
+#include <memory>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string>
+#include <unordered_map>
+#include <utility>
+#include <vector>
+#include "rocktree_util.h"
+#include "earth_camera.h"
 
 struct earth_core_t {
 	rocktree_t *planetoid = nullptr;

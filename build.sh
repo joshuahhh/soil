@@ -11,12 +11,18 @@ cd "$(dirname "$0")"
 source config_emscripten.sh
 echo build: weblib
 
-# both of these inputs are effectively frozen, and regenerating them costs
-# most of a local rebuild. `-nt` is also true when the target is missing, so a
-# fresh checkout (ci, always) still does the full work. crn.o doesn't track
-# crn's headers — delete it by hand on the rare occasion you touch them.
+# these inputs are effectively frozen, so they're only rebuilt when they
+# change. `-nt` is also true when the target is missing, so a fresh checkout
+# (ci, always) still does the full work. crn.o doesn't track crn's headers —
+# delete it by hand on the rare occasion you touch them.
 if [ proto/rocktree.proto -nt proto/rocktree.pb.h ]; then
 	$EMSCRIPTEN_PROTOBUF_EXE --cpp_out=. proto/rocktree.proto
+fi
+# the generated code runs on the decode threads, so it gets -pthread like the
+# engine and libprotobuf
+if [ proto/rocktree.pb.cc -nt proto/rocktree.pb.o ]; then
+	em++ -std=c++17 -O2 -pthread -c proto/rocktree.pb.cc -o proto/rocktree.pb.o \
+		-I. -I$EMSCRIPTEN_PROTOBUF_SRC
 fi
 if [ crn/crn.cc -nt crn/crn.o ]; then
 	(cd crn && emcc -std=c++14 -O2 -c crn.cc -w)
@@ -31,7 +37,7 @@ cp coi-serviceworker.js web/
 # showing wasm-function[1234]. a little bigger, so not the default
 em++ earth_web.cpp -O2 -std=c++17 -Wno-deprecated-declarations -I. -Ideps/eigen \
 	${EARTH_PROFILE:+--profiling-funcs} \
-	-I$EMSCRIPTEN_PROTOBUF_SRC $EMSCRIPTEN_PROTOBUF_LIB crn/crn.o \
+	-I$EMSCRIPTEN_PROTOBUF_SRC proto/rocktree.pb.o $EMSCRIPTEN_PROTOBUF_LIB crn/crn.o \
 	-s MALLOC=mimalloc -Wno-pthreads-mem-growth \
 	-s FETCH=1 -s USE_PTHREADS=1 \
 	-s MAX_WEBGL_VERSION=2 -s MIN_WEBGL_VERSION=2 \

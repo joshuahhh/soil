@@ -1,4 +1,14 @@
+#pragma once
+
 #include <GLES3/gl3.h>
+#include <atomic>
+#include <map>
+#include <memory>
+#include <stdint.h>
+#include <string>
+#include <vector>
+#include "rocktree_proto.h"
+#include "rocktree_math.h"
 
 // whether the gpu can take dxt1 uploads. set by the render backend at init;
 // without it (android gpus, generally) node requests ask for jpg textures

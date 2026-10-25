@@ -1,5 +1,11 @@
+#pragma once
+
+#include <atomic>
 #include <functional>
+#include <stdint.h>
+#include <string.h>
 #include <string>
+#include "rocktree_types.h"
 
 // fetch backend interface: resolve a resource path ("BulkMetadata/pb=...",
 // "NodeData/pb=...", "PlanetoidMetadata") to bytes, calling done when it has
@@ -15,20 +21,20 @@ struct fetcher_t {
 	virtual void fetch(const std::string &path, fetch_done_t done, std::atomic<int> *phase) = 0;
 	virtual ~fetcher_t() {}
 };
-fetcher_t *earth_fetcher = nullptr; // set below; shells may override
+inline fetcher_t *earth_fetcher = nullptr; // set below; shells may override
 
 #include <emscripten/fetch.h>
 
 // userData is the request's fetch_done_t, owned by the request
 // if you want to retain the data you need to copy it
-void downloadSucceeded(emscripten_fetch_t *fetch) {
+inline void downloadSucceeded(emscripten_fetch_t *fetch) {
   auto done = (fetch_done_t*)(fetch->userData);
   (*done)(true, (const uint8_t*)fetch->data, (size_t)fetch->numBytes);
   delete done;
   emscripten_fetch_close(fetch);
 }
 
-void downloadFailed(emscripten_fetch_t *fetch) {
+inline void downloadFailed(emscripten_fetch_t *fetch) {
   //fprintf(stderr, "Downloading %s failed, HTTP failure status code: %d.\n", fetch->url, fetch->status);  
   auto done = (fetch_done_t*)(fetch->userData);
   (*done)(false, NULL, 0);
@@ -59,7 +65,7 @@ struct emscripten_fetcher_t : fetcher_t {
 static emscripten_fetcher_t default_fetcher;
 
 // route requests through the active backend
-void fetchData(const std::string &path, fetch_done_t done, std::atomic<int> *phase = nullptr) {
+inline void fetchData(const std::string &path, fetch_done_t done, std::atomic<int> *phase = nullptr) {
 	if (!earth_fetcher) earth_fetcher = &default_fetcher;
 	earth_fetcher->fetch(path, std::move(done), phase);
 }

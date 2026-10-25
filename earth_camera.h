@@ -1,6 +1,11 @@
+#pragma once
+
 // camera state and flying controls, independent of any windowing or input
-// backend. included after eigen (see earth_web.cpp); part of the platform-free
-// core so the embedding shell can own and drive the camera directly
+// backend. part of the platform-free core so the embedding shell can own and
+// drive the camera directly
+
+#include <math.h>
+#include "rocktree_math.h"
 
 struct camera_t {
 	Vector3d eye;       // ecef meters
@@ -35,7 +40,7 @@ struct camera_t {
 
 // (re)level the airplane frame: body up from the planet's up at the current
 // position. used on mode entry and after teleports
-void alignAirplaneUp(camera_t &cam) {
+inline void alignAirplaneUp(camera_t &cam) {
 	auto up = cam.eye.normalized();
 	Vector3d right = cam.direction.cross(up);
 	if (right.norm() < 1e-9) right = Vector3d::UnitX().cross(cam.direction); // looking straight down
@@ -59,7 +64,7 @@ static inline Vector3d geoNorth(double lat, double lon) {
 	return { -sin(lat) * cos(lon), -sin(lat) * sin(lon), cos(lat) };
 }
 
-camera_t poseToCamera(const geo_pose_t &p, double planet_radius, double fov) {
+inline camera_t poseToCamera(const geo_pose_t &p, double planet_radius, double fov) {
 	auto up = geoUp(p.lat, p.lon);
 	auto north = geoNorth(p.lat, p.lon);
 	auto east = north.cross(up);
@@ -71,7 +76,7 @@ camera_t poseToCamera(const geo_pose_t &p, double planet_radius, double fov) {
 	return cam;
 }
 
-geo_pose_t cameraToPose(const camera_t &cam, double planet_radius) {
+inline geo_pose_t cameraToPose(const camera_t &cam, double planet_radius) {
 	geo_pose_t p;
 	auto r = cam.eye.norm();
 	p.lat = asin(cam.eye.z() / r);
@@ -90,7 +95,7 @@ geo_pose_t cameraToPose(const camera_t &cam, double planet_radius) {
 // distance along the boresight to the reference sphere, with the altitude as
 // a fallback when the view misses it (looking at the sky). the anchor both
 // for the ortho view extent and for ortho zooming, so the two stay in step
-double centerDistance(const camera_t &cam, double planet_radius) {
+inline double centerDistance(const camera_t &cam, double planet_radius) {
 	auto od = cam.eye.dot(cam.direction);
 	auto disc = od * od - (cam.eye.dot(cam.eye) - planet_radius * planet_radius);
 	auto altitude = cam.eye.norm() - planet_radius;
@@ -104,7 +109,7 @@ double centerDistance(const camera_t &cam, double planet_radius) {
 // at least this far below the horizon while in ortho mode
 static const double ortho_min_tilt = -10.0 * M_PI / 180.0;
 
-void clampOrthoTilt(camera_t &cam) {
+inline void clampOrthoTilt(camera_t &cam) {
 	if (!cam.ortho) return;
 	auto up = cam.eye.normalized();
 	auto vertical = cam.direction.dot(up);
@@ -119,7 +124,7 @@ void clampOrthoTilt(camera_t &cam) {
 // the screen), turning about the pivot's local up. that axis passes through
 // the planet center, so the orbit preserves altitude exactly, and the pivot
 // itself is invariant: whatever was at the screen center stays there
-void orbitCamera(camera_t &cam, const Vector3d &pivot, double angle) {
+inline void orbitCamera(camera_t &cam, const Vector3d &pivot, double angle) {
 	AngleAxisd rot(angle, pivot.normalized());
 	cam.eye = rot * cam.eye;
 	cam.direction = (rot * cam.direction).normalized();
@@ -131,7 +136,7 @@ void orbitCamera(camera_t &cam, const Vector3d &pivot, double angle) {
 // oblique. the angle is clamped against the tilt limits (straight down, and
 // the ortho horizon floor) before applying, so hitting a limit stops the
 // orbit instead of un-pinning the pivot
-void orbitCameraTilt(camera_t &cam, const Vector3d &pivot, double angle) {
+inline void orbitCameraTilt(camera_t &cam, const Vector3d &pivot, double angle) {
 	auto up = cam.eye.normalized();
 	Vector3d right = cam.direction.cross(up);
 	if (right.norm() < 1e-9) return; // looking straight down: right is undefined
@@ -169,7 +174,7 @@ struct camera_input_t {
 	double altitude_override = NAN;
 };
 
-void applyCameraInput(camera_t &cam, const camera_input_t &in, double planet_radius) {
+inline void applyCameraInput(camera_t &cam, const camera_input_t &in, double planet_radius) {
 	// up is the vec from the planetoid's center towards the sky
 	auto up = cam.eye.normalized();
 

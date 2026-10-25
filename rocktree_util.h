@@ -1,8 +1,8 @@
 
+#pragma once
+
 // protobuf
-#include "proto/rocktree.pb.h"
-#include "proto/rocktree.pb.cc"
-using namespace geo_globetrotter_proto_rocktree;
+#include "rocktree_proto.h"
 
 // further decoding for protobuf
 #include "rocktree_decoder.h"
@@ -19,11 +19,21 @@ using namespace geo_globetrotter_proto_rocktree;
 // opengl helpers
 #include "rocktree_gl.h"
 
+// extended data structure using decoders
+#include "rocktree_ex.h"
+
+#include "threads.h"
+
 // nice
 #include <thread>
 #include <algorithm>
 #include <chrono>
 #include <atomic>
+#include <functional>
+#include <memory>
+#include <stdio.h>
+#include <string>
+#include <vector>
 
 
 // per-tile decode timing, off by default: it is one line per node and a
@@ -39,69 +49,8 @@ static inline uint32_t timing_ms() {
 	return (uint32_t)duration_cast<milliseconds>(steady_clock::now().time_since_epoch()).count();
 }
 
-BulkMetadataRequest createBulkMetadataRequest(const std::string &base_path, const std::string &path, int epoch);
-NodeDataRequest createNodeDataRequest(const std::string &base_path, const BulkMetadata &bulk, const NodeMetadata &node_meta);
-
-// extended data structure using decoders
-#include "rocktree_ex.h"
-
-// createBulkMetadataRequest creates a object for requesting bulk data. can be re-used
-BulkMetadataRequest createBulkMetadataRequest(const std::string &base_path, const std::string &path, int epoch)
-{
-	BulkMetadataRequest req;
-	auto key = new NodeKey();
-	key->set_allocated_path(new std::string(base_path + path));
-	key->set_epoch(epoch);
-	req.set_allocated_node_key(key);
-	return req;
-}
-
-// createNodeDataRequest creates a object for requesting node data. can be re-used
-NodeDataRequest createNodeDataRequest(const std::string &base_path, const BulkMetadata &bulk, const NodeMetadata &node_meta) {
-	auto aux = unpackPathAndFlags(node_meta);	
-	assert(!(aux.flags & NodeMetadata_Flags_NODATA));
-	//assert(node_meta.has_epoch());
-	NodeDataRequest req;
-
-	// set texture format based on supported formats. crn/dxt1 preferred
-	// (smaller, gpu-native) unless the render backend reported no s3tc
-	req.set_texture_format(([&]() {
-		static Texture_Format with_s3tc[] = { Texture_Format_CRN_DXT1, Texture_Format_JPG };
-		static Texture_Format without_s3tc[] = { Texture_Format_JPG, Texture_Format_CRN_DXT1 };
-		auto supported = texture_s3tc_supported ? with_s3tc : without_s3tc;
-
-		int available = node_meta.has_available_texture_formats()
-			? node_meta.available_texture_formats()
-			: bulk.default_available_texture_formats();
-
-		for (auto i = 0; i < 2; i++) {
-			if (available & (1 << (supported[i] - 1))) return supported[i];
-		}
-		return supported[0];
-	})());
-	
-	// set imagery epoch if flags say it should be used
-	if (aux.flags & NodeMetadata_Flags_USE_IMAGERY_EPOCH) {
-		auto imagery_epoch = node_meta.has_imagery_epoch() ?
-			node_meta.imagery_epoch() :
-			bulk.default_imagery_epoch();
-		req.set_imagery_epoch(imagery_epoch);
-	}
-
-	// set path and epoch
-	req.set_allocated_node_key(([&](){
-		auto key = new NodeKey();
-		key->set_allocated_path(new std::string(base_path + std::string(aux.path)));	
-		assert(bulk.has_head_node_key() && bulk.head_node_key().has_epoch());
-		key->set_epoch(node_meta.has_epoch() ? node_meta.epoch() : bulk.head_node_key().epoch());
-		return key;
-	})());
-
-	return req;
-}
-
 // getPlanetoid fetches planetoid from web and calls cb when it's done.
-void getPlanetoid(std::function<void(std::unique_ptr<PlanetoidMetadata>)> cb) {
+inline void getPlanetoid(std::function<void(std::unique_ptr<PlanetoidMetadata>)> cb) {
 	fetchData("PlanetoidMetadata", [cb](bool ok, const uint8_t *data, size_t len) {
   		if (!ok) {
 			fprintf(stderr, "%s", "could not load planetoid\n");
@@ -114,12 +63,11 @@ void getPlanetoid(std::function<void(std::unique_ptr<PlanetoidMetadata>)> cb) {
 	});
 }
 
-#include "threads.h"
 // decode pool: protobuf parse + mesh/texture decompression. populateNode /
 // populateBulk only write their own node/bulk and publish it with the atomic
 // dl_state store, so decodes of distinct nodes can run concurrently. decode
 // dominates warm-cache load time, so use most of the machine
-ThreadPool pool(std::max(2, (int)std::thread::hardware_concurrency() - 2));
+inline ThreadPool pool(std::max(2, (int)std::thread::hardware_concurrency() - 2));
 
 // fetchAndDecode fetches url for x (a node or bulk), then parses it as a Msg
 // and populates x on the decode pool. any failure — transport, parse, or the
@@ -179,7 +127,7 @@ void fetchAndDecode(const std::string &url, const char *kind, T *x,
 
 // getBulk fetches bulk b (b->request: path and epoch) from web or cache, and
 // calls done when it's populated or has failed back to a stub.
-void getBulk(rocktree_t::bulk_t *b, std::function<void()> done = nullptr) {
+inline void getBulk(rocktree_t::bulk_t *b, std::function<void()> done = nullptr) {
 	const auto &key = b->request.node_key();
 	auto url = "BulkMetadata/pb=!1m2!1s" + key.path() + "!2u" + std::to_string(key.epoch());
 	fetchAndDecode<BulkMetadata>(url, "bulk", b, populateBulk, nullptr, done);
@@ -188,7 +136,7 @@ void getBulk(rocktree_t::bulk_t *b, std::function<void()> done = nullptr) {
 // getNode fetches node n (n->request: path, epoch, texture_format and
 // imagery_epoch, if any) and calls done when it's populated or has failed back
 // to a stub.
-void getNode(rocktree_t::node_t *n, std::function<void()> done) {
+inline void getNode(rocktree_t::node_t *n, std::function<void()> done) {
 	const auto &req = n->request;
 	auto url = "NodeData/pb=!1m2!1s" + req.node_key().path()
 		+ "!2u" + std::to_string(req.node_key().epoch())

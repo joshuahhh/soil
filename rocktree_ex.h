@@ -1,15 +1,83 @@
+#pragma once
+
 #include <unordered_map>
 #include <algorithm>
+#include <assert.h>
+#include <math.h>
+#include <memory>
+#include <stdio.h>
+#include <string.h>
+#include <string>
+#include <vector>
 #include "crn/crn.h"
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"
+#include "rocktree_proto.h"
+#include "rocktree_decoder.h"
+#include "rocktree_math.h"
+#include "rocktree_types.h"
+
+// createBulkMetadataRequest creates a object for requesting bulk data. can be re-used
+inline BulkMetadataRequest createBulkMetadataRequest(const std::string &base_path, const std::string &path, int epoch)
+{
+	BulkMetadataRequest req;
+	auto key = new NodeKey();
+	key->set_allocated_path(new std::string(base_path + path));
+	key->set_epoch(epoch);
+	req.set_allocated_node_key(key);
+	return req;
+}
+
+// createNodeDataRequest creates a object for requesting node data. can be re-used
+inline NodeDataRequest createNodeDataRequest(const std::string &base_path, const BulkMetadata &bulk, const NodeMetadata &node_meta) {
+	auto aux = unpackPathAndFlags(node_meta);	
+	assert(!(aux.flags & NodeMetadata_Flags_NODATA));
+	//assert(node_meta.has_epoch());
+	NodeDataRequest req;
+
+	// set texture format based on supported formats. crn/dxt1 preferred
+	// (smaller, gpu-native) unless the render backend reported no s3tc
+	req.set_texture_format(([&]() {
+		static Texture_Format with_s3tc[] = { Texture_Format_CRN_DXT1, Texture_Format_JPG };
+		static Texture_Format without_s3tc[] = { Texture_Format_JPG, Texture_Format_CRN_DXT1 };
+		auto supported = texture_s3tc_supported ? with_s3tc : without_s3tc;
+
+		int available = node_meta.has_available_texture_formats()
+			? node_meta.available_texture_formats()
+			: bulk.default_available_texture_formats();
+
+		for (auto i = 0; i < 2; i++) {
+			if (available & (1 << (supported[i] - 1))) return supported[i];
+		}
+		return supported[0];
+	})());
+	
+	// set imagery epoch if flags say it should be used
+	if (aux.flags & NodeMetadata_Flags_USE_IMAGERY_EPOCH) {
+		auto imagery_epoch = node_meta.has_imagery_epoch() ?
+			node_meta.imagery_epoch() :
+			bulk.default_imagery_epoch();
+		req.set_imagery_epoch(imagery_epoch);
+	}
+
+	// set path and epoch
+	req.set_allocated_node_key(([&](){
+		auto key = new NodeKey();
+		key->set_allocated_path(new std::string(base_path + std::string(aux.path)));	
+		assert(bulk.has_head_node_key() && bulk.head_node_key().has_epoch());
+		key->set_epoch(node_meta.has_epoch() ? node_meta.epoch() : bulk.head_node_key().epoch());
+		return key;
+	})());
+
+	return req;
+}
 
 // populateBulk and populateNode fill in a bulk or node from its parsed
 // message and publish it (setFinishedDownloading). they run on the decode
 // pool. tile data that doesn't add up fails the decode instead: they return
 // what was wrong, leave nothing behind, and the caller puts it back to a stub
 
-const char *populateBulk(rocktree_t::bulk_t *bulk, const BulkMetadata &bulk_metadata) {
+inline const char *populateBulk(rocktree_t::bulk_t *bulk, const BulkMetadata &bulk_metadata) {
 
 	for (int i = 0; i < 3; i++) bulk->head_node_center[i] = bulk_metadata.head_node_center()[i];			
 
@@ -58,7 +126,7 @@ const char *populateBulk(rocktree_t::bulk_t *bulk, const BulkMetadata &bulk_meta
 	return nullptr;
 }
 
-void populatePlanetoid(rocktree_t *planetoid, std::unique_ptr<PlanetoidMetadata> planetoid_metadata) {
+inline void populatePlanetoid(rocktree_t *planetoid, std::unique_ptr<PlanetoidMetadata> planetoid_metadata) {
 	auto bulk = new rocktree_t::bulk_t();
 	bulk->parent = nullptr;
 	bulk->request = createBulkMetadataRequest("", "", planetoid_metadata->root_node_metadata().epoch());
@@ -70,7 +138,7 @@ void populatePlanetoid(rocktree_t *planetoid, std::unique_ptr<PlanetoidMetadata>
 	planetoid->downloaded = true;
 }
 
-const char *populateNode(rocktree_t::node_t *node, const NodeData &node_data) {
+inline const char *populateNode(rocktree_t::node_t *node, const NodeData &node_data) {
 	assert(node->can_have_data);
 
 	for (int i = 0; i < 16; i++) node->matrix_globe_from_mesh.data()[i] = node_data.matrix_globe_from_mesh(i);					

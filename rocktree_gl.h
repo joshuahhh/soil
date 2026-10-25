@@ -1,8 +1,16 @@
+#pragma once
+
 #include <GLES3/gl3.h>
 // gl3.h has no extension enums; the s3tc/dxt formats live here (gl2ext is the
 // shared extension header — it applies to gles3 contexts too)
 #include <GLES2/gl2ext.h>
+#include <iostream>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <vector>
 #include "earth_shaders.h"
+#include "rocktree_types.h"
 
 // the dropped-track overlay. gl line width is clamped to 1 in webgl (and the
 // crack-fill lines are the only thing that ever wanted more), so a polyline
@@ -182,7 +190,7 @@ static float texture_max_aniso = 1.0f;
 // switch to, so this does nothing on dxt tiles
 static bool texture_mipmaps_on = true;
 
-void meshTexImage2d(const rocktree_t::node_t::mesh_t &mesh) {
+inline void meshTexImage2d(const rocktree_t::node_t::mesh_t &mesh) {
 	switch (mesh.texture_format) {
 	case rocktree_t::texture_format_rgb:
 		// tightly packed rgb rows; without this, widths whose row size isn't
@@ -199,7 +207,7 @@ void meshTexImage2d(const rocktree_t::node_t::mesh_t &mesh) {
 	}	
 }
 
-void bufferMesh(rocktree_t::node_t::mesh_t &mesh, const gl_ctx_t &ctx) {
+inline void bufferMesh(rocktree_t::node_t::mesh_t &mesh, const gl_ctx_t &ctx) {
 	if (mesh.buffered) fprintf(stderr, "mesh already buffered\n"), abort();
 
 	// this runs mid-draw, with the last drawn mesh's vao still bound, and
@@ -285,7 +293,7 @@ void bufferMesh(rocktree_t::node_t::mesh_t &mesh, const gl_ctx_t &ctx) {
 	mesh.buffered = true;
 }
 
-void bindAndDrawMesh(rocktree_t::node_t::mesh_t &mesh, uint8_t octant_mask, uint32_t stale_mask, const gl_ctx_t &ctx) {
+inline void bindAndDrawMesh(rocktree_t::node_t::mesh_t &mesh, uint8_t octant_mask, uint32_t stale_mask, const gl_ctx_t &ctx) {
 	glUniform2fv(ctx.uv_offset_loc, 1, mesh.uv_offset.data());
 	glUniform2fv(ctx.uv_scale_loc, 1, mesh.uv_scale.data());
 	// the masks go up as the bytes they are; the shader picks the bit
@@ -315,7 +323,7 @@ void bindAndDrawMesh(rocktree_t::node_t::mesh_t &mesh, uint8_t octant_mask, uint
 	}
 }
 
-void unbufferMesh(rocktree_t::node_t::mesh_t &mesh) {
+inline void unbufferMesh(rocktree_t::node_t::mesh_t &mesh) {
 	if (!mesh.buffered) fprintf(stderr, "mesh isn't buffered\n"), abort();
 
 	mesh.buffered = false;
@@ -335,7 +343,7 @@ typedef gl_ctx_t render_ctx_t;
 // the offscreen targets' storage. a texture (generated the first time) at
 // w x h, one level, clamped at the edges, filtered by filter both ways; left
 // bound on the active unit
-void makeTex2D(GLuint &tex, GLenum internal, GLenum format, GLenum type, int w, int h, GLenum filter) {
+inline void makeTex2D(GLuint &tex, GLenum internal, GLenum format, GLenum type, int w, int h, GLenum filter) {
 	if (!tex) glGenTextures(1, &tex);
 	glBindTexture(GL_TEXTURE_2D, tex);
 	glTexImage2D(GL_TEXTURE_2D, 0, internal, w, h, 0, format, type, NULL);
@@ -346,7 +354,7 @@ void makeTex2D(GLuint &tex, GLenum internal, GLenum format, GLenum type, int w, 
 }
 
 // the same, as a multisampled renderbuffer; left bound
-void makeRenderbuffer(GLuint &rb, int samples, GLenum internal, int w, int h) {
+inline void makeRenderbuffer(GLuint &rb, int samples, GLenum internal, int w, int h) {
 	if (!rb) glGenRenderbuffers(1, &rb);
 	glBindRenderbuffer(GL_RENDERBUFFER, rb);
 	glRenderbufferStorageMultisample(GL_RENDERBUFFER, samples, internal, w, h);
@@ -355,7 +363,7 @@ void makeRenderbuffer(GLuint &rb, int samples, GLenum internal, int w, int h) {
 // a framebuffer (generated the first time) with color and depth attached, 0
 // for none: textures, or renderbuffers if target says so. depth only, it
 // draws and reads no colour. left bound; returns its completeness
-GLenum makeFbo(GLuint &fbo, GLuint color, GLuint depth, GLenum target = GL_TEXTURE_2D) {
+inline GLenum makeFbo(GLuint &fbo, GLuint color, GLuint depth, GLenum target = GL_TEXTURE_2D) {
 	if (!fbo) glGenFramebuffers(1, &fbo);
 	glBindFramebuffer(GL_FRAMEBUFFER, fbo);
 	auto attach = [&](GLenum point, GLuint name) {
@@ -373,7 +381,7 @@ GLenum makeFbo(GLuint &fbo, GLuint color, GLuint depth, GLenum target = GL_TEXTU
 	return glCheckFramebufferStatus(GL_FRAMEBUFFER);
 }
 
-void renderDofEnsure(render_ctx_t &ctx, int w, int h) {
+inline void renderDofEnsure(render_ctx_t &ctx, int w, int h) {
 	auto &d = ctx.dof;
 	if (d.fbo && d.w == w && d.h == h) return;
 	makeTex2D(d.color, GL_RGBA8, GL_RGBA, GL_UNSIGNED_BYTE, w, h, GL_LINEAR);
@@ -390,7 +398,7 @@ void renderDofEnsure(render_ctx_t &ctx, int w, int h) {
 }
 
 // end whatever section is running and start s (-1: just end it)
-void gpuSection(render_ctx_t &ctx, int s) {
+inline void gpuSection(render_ctx_t &ctx, int s) {
 	auto &g = ctx.gpu;
 	if (!g.ok || s == g.active_section) return;
 	if (g.active) {
@@ -408,7 +416,7 @@ void gpuSection(render_ctx_t &ctx, int s) {
 
 // once a frame, before its first section: collect what the gpu has
 // finished, and fold a second's worth into the averages
-void gpuFrameStart(render_ctx_t &ctx, double dt_ms) {
+inline void gpuFrameStart(render_ctx_t &ctx, double dt_ms) {
 	auto &g = ctx.gpu;
 	if (!g.ok) return;
 	g.frame++;
@@ -441,12 +449,12 @@ void gpuFrameStart(render_ctx_t &ctx, double dt_ms) {
 
 // the occlusion runs in real time (outside glamour mode, which has its own
 // way in, and not under the miniature, whose blur reads the scene directly)
-bool renderAoLive(render_ctx_t &ctx) {
+inline bool renderAoLive(render_ctx_t &ctx) {
 	auto &a = ctx.accum;
 	return a.ao_on && a.ao_strength > 0 && !a.on && !ctx.dof.on;
 }
 
-void renderMsaaEnsure(render_ctx_t &ctx, int w, int h) {
+inline void renderMsaaEnsure(render_ctx_t &ctx, int w, int h) {
 	if (ctx.msaa_fbo && ctx.msaa_w == w && ctx.msaa_h == h) return;
 	GLint max_samples = 0;
 	glGetIntegerv(GL_MAX_SAMPLES, &max_samples);
@@ -466,7 +474,7 @@ void renderMsaaEnsure(render_ctx_t &ctx, int w, int h) {
 	ctx.msaa_h = h;
 }
 
-void renderAoEnsure(render_ctx_t &ctx, int w, int h) {
+inline void renderAoEnsure(render_ctx_t &ctx, int w, int h) {
 	auto &a = ctx.accum;
 	if (a.ao_fbo && a.ao_w == w && a.ao_h == h) return;
 	auto make = [&](GLuint &fbo, GLuint &tex) {
@@ -482,7 +490,7 @@ void renderAoEnsure(render_ctx_t &ctx, int w, int h) {
 	a.ao_h = h;
 }
 
-void renderFrameBegin(render_ctx_t &ctx, int width, int height, int sky) {
+inline void renderFrameBegin(render_ctx_t &ctx, int width, int height, int sky) {
 	gpuSection(ctx, gpu_scene);
 	// the scene goes to the offscreen target whenever a pass reads it back
 	auto offscreen = ctx.dof.on || ctx.accum.on || renderAoLive(ctx);
@@ -497,13 +505,13 @@ void renderFrameBegin(render_ctx_t &ctx, int width, int height, int sky) {
 	glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 }
 
-void renderSetMipmaps(render_ctx_t &ctx, bool on) { texture_mipmaps_on = on; }
+inline void renderSetMipmaps(render_ctx_t &ctx, bool on) { texture_mipmaps_on = on; }
 
-void renderSetDebugLod(render_ctx_t &ctx, bool debug_lod) {
+inline void renderSetDebugLod(render_ctx_t &ctx, bool debug_lod) {
 	glUniform1i(ctx.debug_lod_loc, debug_lod);
 }
 
-void renderSetTransform(render_ctx_t &ctx, const float *m16) {
+inline void renderSetTransform(render_ctx_t &ctx, const float *m16) {
 	glUniformMatrix4fv(ctx.transform_loc, 1, GL_FALSE, m16);
 }
 
@@ -511,7 +519,7 @@ void renderSetTransform(render_ctx_t &ctx, const float *m16) {
 // parameters (effective roll radius, rect half length/width in meters).
 // fade, in rect units along the axis: where the walls start darkening, to
 // black at the rect's ends; 0 is no fade
-void renderSetTube(render_ctx_t &ctx, bool on, const float *local_to_clip16,
+inline void renderSetTube(render_ctx_t &ctx, bool on, const float *local_to_clip16,
 		float r_eff, float half_len, float half_wid, float wid_offset, float fade = 0) {
 	glUniform1i(ctx.tube_on_loc, on);
 	glDisable(GL_POLYGON_OFFSET_FILL); // body mode's flat pass turns it on per node
@@ -536,7 +544,7 @@ void renderSetTube(render_ctx_t &ctx, bool on, const float *local_to_clip16,
 // perspective projection nearly all of the ground is already within a
 // fraction of a thousandth of the far plane in ndc, and a constant added
 // there pushes it past the plane and clips it away entirely
-void renderSetTubePass(render_ctx_t &ctx, int pass) {
+inline void renderSetTubePass(render_ctx_t &ctx, int pass) {
 	glUniform1i(ctx.tube_pass_loc, pass);
 	if (pass == 2) {
 		glEnable(GL_POLYGON_OFFSET_FILL);
@@ -547,7 +555,7 @@ void renderSetTubePass(render_ctx_t &ctx, int pass) {
 }
 
 // per-node mesh-to-local-frame matrix (tube mode only)
-void renderSetTubeNode(render_ctx_t &ctx, const float *m16) {
+inline void renderSetTubeNode(render_ctx_t &ctx, const float *m16) {
 	glUniformMatrix4fv(ctx.tube_mesh_to_local_loc, 1, GL_FALSE, m16);
 }
 
@@ -556,7 +564,7 @@ void renderSetTubeNode(render_ctx_t &ctx, const float *m16) {
 // textures are core webgl2; linear filtering of them is not, so the shader
 // fetches texels and interpolates by hand. units 5 and 6, clear of the
 // terrain texture on 0 and the dof pass's pair on 0/1
-void renderBodyUpload(render_ctx_t &ctx, int w, int h, const float *pos, const float *nrm) {
+inline void renderBodyUpload(render_ctx_t &ctx, int w, int h, const float *pos, const float *nrm) {
 	if (!ctx.body_tex[0]) glGenTextures(2, ctx.body_tex);
 	const float *data[2] = {pos, nrm};
 	for (auto k = 0; k < 2; k++) {
@@ -578,7 +586,7 @@ void renderBodyUpload(render_ctx_t &ctx, int w, int h, const float *pos, const f
 
 // per frame: whether the tube warp is the figure rather than the cylinder,
 // and how far along the sheet is from flat (0) to wrapped (1)
-void renderSetBody(render_ctx_t &ctx, bool on, float curl, const float *bands4) {
+inline void renderSetBody(render_ctx_t &ctx, bool on, float curl, const float *bands4) {
 	glUniform1i(ctx.body_on_loc, on && ctx.body_tex[0]);
 	glUniform1f(ctx.body_curl_loc, curl);
 	glUniform4fv(ctx.body_bands_loc, 1, bands4);
@@ -590,7 +598,7 @@ void renderSetBody(render_ctx_t &ctx, bool on, float curl, const float *bands4) 
 // holding the running average (not the sum: a half float summing 128 frames
 // rounds every addition to a sixteenth once past 64, and the error, varying
 // with the value, drew contour bands across the sky)
-void renderAccumEnsure(render_ctx_t &ctx, int w, int h) {
+inline void renderAccumEnsure(render_ctx_t &ctx, int w, int h) {
 	auto &a = ctx.accum;
 	if (a.fbo && a.w == w && a.h == h) return;
 	makeTex2D(a.tex, GL_RGBA16F, GL_RGBA, GL_HALF_FLOAT, w, h, GL_NEAREST);
@@ -607,9 +615,9 @@ void renderAccumEnsure(render_ctx_t &ctx, int w, int h) {
 	a.samples = 0;
 }
 
-GLuint makeShader(const char* vert_src, const char* frag_src);
+inline GLuint makeShader(const char* vert_src, const char* frag_src);
 
-void renderAccumInit(render_ctx_t &ctx) {
+inline void renderAccumInit(render_ctx_t &ctx) {
 	auto &a = ctx.accum;
 	a.present_program = makeShader(fullscreen_vs, present_fs);
 	a.present_tex_loc = glGetUniformLocation(a.present_program, "tex");
@@ -635,7 +643,7 @@ void renderAccumInit(render_ctx_t &ctx) {
 
 // the occlusion's passes before the composite: computed, then (blur)
 // smoothed. leaves an occlusion fbo bound
-void aoCompute(render_ctx_t &ctx, bool blur) {
+inline void aoCompute(render_ctx_t &ctx, bool blur) {
 	auto &a = ctx.accum;
 	auto &d = ctx.dof;
 	gpuSection(ctx, gpu_occlusion);
@@ -667,7 +675,7 @@ void aoCompute(render_ctx_t &ctx, bool blur) {
 }
 
 // the second: the scene times the occlusion, into whatever is bound
-void aoComposite(render_ctx_t &ctx) {
+inline void aoComposite(render_ctx_t &ctx) {
 	auto &a = ctx.accum;
 	auto &d = ctx.dof;
 	glUseProgram(a.ao_comp_program);
@@ -690,13 +698,13 @@ void aoComposite(render_ctx_t &ctx) {
 	glActiveTexture(GL_TEXTURE0);
 }
 
-void dofDraw(render_ctx_t &ctx);
+inline void dofDraw(render_ctx_t &ctx);
 
 // the scene is drawn; put it on the screen. plain frames go straight there.
 // with the miniature on, the scene was drawn offscreen and the blur pass
 // writes it out. in glamour mode the pass (or a copy) is summed into the
 // accumulator instead, and the average of the samples so far is presented
-void renderFrameEnd(render_ctx_t &ctx) {
+inline void renderFrameEnd(render_ctx_t &ctx) {
 	auto &d = ctx.dof;
 	auto &a = ctx.accum;
 	auto ao_live = renderAoLive(ctx);
@@ -779,7 +787,7 @@ void renderFrameEnd(render_ctx_t &ctx) {
 
 // the miniature's blur pass over the offscreen scene, into whatever
 // framebuffer is bound
-void dofDraw(render_ctx_t &ctx) {
+inline void dofDraw(render_ctx_t &ctx) {
 	auto &d = ctx.dof;
 	glUseProgram(d.program);
 	glBindVertexArray(d.vao);
@@ -796,7 +804,7 @@ void dofDraw(render_ctx_t &ctx) {
 }
 
 
-void checkCompileShaderError(GLuint shader) {
+inline void checkCompileShaderError(GLuint shader) {
 	GLint is_compiled = 0;
 	glGetShaderiv(shader, GL_COMPILE_STATUS, &is_compiled);
 	if(is_compiled == GL_TRUE) return;
@@ -811,7 +819,7 @@ void checkCompileShaderError(GLuint shader) {
 
 // both stages compiled can still fail to link (a varying or a shared
 // uniform the two disagree on); the program is useless then too
-void checkLinkProgramError(GLuint program) {
+inline void checkLinkProgramError(GLuint program) {
 	GLint is_linked = 0;
 	glGetProgramiv(program, GL_LINK_STATUS, &is_linked);
 	if(is_linked == GL_TRUE) return;
@@ -824,7 +832,7 @@ void checkLinkProgramError(GLuint program) {
 	abort();
 }
 
-GLuint makeShader(const char* vert_src, const char* frag_src) {
+inline GLuint makeShader(const char* vert_src, const char* frag_src) {
 	GLuint vert_shader = glCreateShader(GL_VERTEX_SHADER);
 	glShaderSource(vert_shader, 1, &vert_src, NULL);
 	glCompileShader(vert_shader);
@@ -845,7 +853,7 @@ GLuint makeShader(const char* vert_src, const char* frag_src) {
 	return program;
 }
 
-void renderDofInit(render_ctx_t &ctx) {
+inline void renderDofInit(render_ctx_t &ctx) {
 	auto &d = ctx.dof;
 	d.program = makeShader(fullscreen_vs, dof_fs);
 	d.color_loc = glGetUniformLocation(d.program, "color_tex");
@@ -865,7 +873,7 @@ void renderDofInit(render_ctx_t &ctx) {
 // the *projected* segment, which neither endpoint knows on its own.
 // a degenerate quad (pos_a == pos_b) is a join: the square patch that fills
 // the wedge two segments leave open at a bend.
-void renderPathInit(render_ctx_t &ctx) {
+inline void renderPathInit(render_ctx_t &ctx) {
 	auto &p = ctx.path;
 	p.program = makeShader(path_vs, path_fs);
 	p.transform_loc = glGetUniformLocation(p.program, "transform");
@@ -899,7 +907,7 @@ void renderPathInit(render_ctx_t &ctx) {
 }
 
 // replace the ribbon's geometry (floats, 8 per vertex)
-void renderPathUpload(render_ctx_t &ctx, const float *data, int vert_count) {
+inline void renderPathUpload(render_ctx_t &ctx, const float *data, int vert_count) {
 	auto &p = ctx.path;
 	p.vert_count = vert_count;
 	glBindBuffer(GL_ARRAY_BUFFER, p.vbo);
@@ -912,7 +920,7 @@ void renderPathUpload(render_ctx_t &ctx, const float *data, int vert_count) {
 // into a screen-space disc — the marker for where you are along the track.
 // same depth treatment as the ribbon it sits on, so a shoulder of terrain
 // hides it exactly when it hides the line
-void renderPathCursorDraw(render_ctx_t &ctx, const float *transform16, const float *rgba,
+inline void renderPathCursorDraw(render_ctx_t &ctx, const float *transform16, const float *rgba,
 		float size_px, float bias, int w, int h, const float *pos3) {
 	auto &p = ctx.path;
 	float v[6 * 8];
@@ -953,7 +961,7 @@ void renderPathCursorDraw(render_ctx_t &ctx, const float *transform16, const flo
 // blotchy. culling is off because a quad's winding follows which way the
 // segment happens to run on screen — renderSetTube re-establishes it at the
 // top of the next frame, and nothing else draws after this one
-void renderPathDraw(render_ctx_t &ctx, const float *transform16, const float *rgba,
+inline void renderPathDraw(render_ctx_t &ctx, const float *transform16, const float *rgba,
 		float width_px, float bias, int w, int h) {
 	auto &p = ctx.path;
 	if (!p.vert_count) return;
@@ -980,7 +988,7 @@ void renderPathDraw(render_ctx_t &ctx, const float *transform16, const float *rg
 // backend init
 // the terrain program's aerial-perspective uniforms, once per frame. the
 // terrain program must be current
-void renderSetAtmosphere(render_ctx_t &ctx, bool on, float visibility_m, const float *haze3,
+inline void renderSetAtmosphere(render_ctx_t &ctx, bool on, float visibility_m, const float *haze3,
 		const float *tint3, float near, float far, bool ortho,
 		const float *cam9, const float *eye3, float tan_half_fov, float aspect, float planet_r, float scale_h,
 		int width, int height) {
@@ -995,7 +1003,7 @@ void renderSetAtmosphere(render_ctx_t &ctx, bool on, float visibility_m, const f
 }
 
 // (re)allocate the shadow map at size x size. the placeholder is 1x1
-void renderShadowEnsure(render_ctx_t &ctx, int size) {
+inline void renderShadowEnsure(render_ctx_t &ctx, int size) {
 	auto &s = ctx.shadow;
 	if (s.tex && s.size == size) return;
 	glActiveTexture(GL_TEXTURE0 + shadow_unit);
@@ -1009,7 +1017,7 @@ void renderShadowEnsure(render_ctx_t &ctx, int size) {
 	s.size = size;
 }
 
-void renderShadowInit(render_ctx_t &ctx) {
+inline void renderShadowInit(render_ctx_t &ctx) {
 	auto &s = ctx.shadow;
 	s.program = makeShader(shadow_vs, shadow_fs);
 	s.mv_loc = glGetUniformLocation(s.program, "shadow_mv");
@@ -1021,7 +1029,7 @@ void renderShadowInit(render_ctx_t &ctx) {
 // the shadow pass: into the map, depth only, both faces (terrain is a
 // sheet, not a solid), with a slope-scaled depth offset against acne
 static bool shadow_cull_was = true;
-void renderShadowBegin(render_ctx_t &ctx, int size, const float *box4) {
+inline void renderShadowBegin(render_ctx_t &ctx, int size, const float *box4) {
 	auto &s = ctx.shadow;
 	gpuSection(ctx, gpu_shadow);
 	renderShadowEnsure(ctx, size);
@@ -1036,17 +1044,17 @@ void renderShadowBegin(render_ctx_t &ctx, int size, const float *box4) {
 	glPolygonOffset(2.0f, 2.0f);
 }
 
-void renderShadowNode(render_ctx_t &ctx, const float *mv16, uint8_t octant_mask) {
+inline void renderShadowNode(render_ctx_t &ctx, const float *mv16, uint8_t octant_mask) {
 	glUniformMatrix4fv(ctx.shadow.mv_loc, 1, GL_FALSE, mv16);
 	glUniform1i(ctx.shadow.mask_loc, octant_mask);
 }
 
-void renderShadowMesh(const rocktree_t::node_t::mesh_t &mesh) {
+inline void renderShadowMesh(const rocktree_t::node_t::mesh_t &mesh) {
 	glBindVertexArray(mesh.vao);
 	glDrawElements(GL_TRIANGLE_STRIP, mesh.indices.size(), GL_UNSIGNED_SHORT, NULL);
 }
 
-void renderShadowEnd(render_ctx_t &ctx) {
+inline void renderShadowEnd(render_ctx_t &ctx) {
 	glBindVertexArray(0);
 	glDisable(GL_POLYGON_OFFSET_FILL);
 	glPolygonOffset(0.0f, 0.0f);
@@ -1058,7 +1066,7 @@ void renderShadowEnd(render_ctx_t &ctx) {
 }
 
 // the terrain program's shadow uniforms: per frame, then per node
-void renderSetShadow(render_ctx_t &ctx, bool on, const float *box4, float strength, float texel_uv, float bias,
+inline void renderSetShadow(render_ctx_t &ctx, bool on, const float *box4, float strength, float texel_uv, float bias,
 		const float *up3, const float *rot9, const float *eye3) {
 	glUniform4f(ctx.shadow_params_loc, on ? (float)shadow_debug : 0.0f, strength, texel_uv, bias);
 	if (box4) glUniform4fv(ctx.shadow_box_loc, 1, box4);
@@ -1067,11 +1075,11 @@ void renderSetShadow(render_ctx_t &ctx, bool on, const float *box4, float streng
 	if (eye3) glUniform3fv(ctx.eye_sun_loc, 1, eye3);
 }
 
-void renderSetShadowNode(render_ctx_t &ctx, const float *mv16) {
+inline void renderSetShadowNode(render_ctx_t &ctx, const float *mv16) {
 	glUniformMatrix4fv(ctx.shadow_mv_loc, 1, GL_FALSE, mv16);
 }
 
-void renderSkyInit(render_ctx_t &ctx) {
+inline void renderSkyInit(render_ctx_t &ctx) {
 	auto &s = ctx.sky;
 	s.program = makeShader(sky_vs, sky_fs);
 	s.right_loc = glGetUniformLocation(s.program, "cam_right");
@@ -1087,7 +1095,7 @@ void renderSkyInit(render_ctx_t &ctx) {
 
 // after the terrain: the sky fills whatever the depth buffer still has at
 // the far plane. leaves the terrain program current
-void renderSkyDraw(render_ctx_t &ctx, const float *right3, const float *up3, const float *fwd3,
+inline void renderSkyDraw(render_ctx_t &ctx, const float *right3, const float *up3, const float *fwd3,
 		const float *local_up3, const float *sun3, float tan_half_fov, float aspect,
 		float horizon_dip, float sun_el, const float *zenith3, const float *haze3,
 		float sky_amount, float limb_angle) {
@@ -1115,7 +1123,7 @@ void renderSkyDraw(render_ctx_t &ctx, const float *right3, const float *up3, con
 	glUseProgram(ctx.program);
 }
 
-void renderInit(render_ctx_t &ctx) {
+inline void renderInit(render_ctx_t &ctx) {
 	// gles 3.0 dropped the single-string GL_EXTENSIONS query — it returns null
 	// here, and taking that as "no s3tc" would silently push every texture
 	// down the jpeg path. enumerate with glGetStringi instead

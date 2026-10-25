@@ -1,7 +1,31 @@
+#pragma once
+
 #include <array>
+#include <assert.h>
+#include <math.h>
+#include <Eigen/Dense>
+
+// the eigen types the engine uses, under their bare names
+using Eigen::Affine3d;
+using Eigen::AngleAxisd;
+using Eigen::Matrix3d;
+using Eigen::Matrix3f;
+using Eigen::Matrix4d;
+using Eigen::Matrix4f;
+using Eigen::Vector2d;
+using Eigen::Vector2f;
+using Eigen::Vector3d;
+using Eigen::Vector3f;
+using Eigen::Vector4d;
+
+struct OrientedBoundingBox {
+	Vector3d center;
+	Vector3d extents;
+	Matrix3d orientation;
+};
 
 // based on @fabioarnold's impl of "https://fgiesen.wordpress.com/2012/08/31/frustum-planes-from-the-projection-matrix/"
-auto getFrustumPlanes(Matrix4d projection) {
+inline auto getFrustumPlanes(Matrix4d projection) {
 	std::array<Vector4d, 6> planes;
 	for (int i = 0; i < 3; ++i) {
 		planes[i + 0] = projection.row(3) + projection.row(i);
@@ -17,7 +41,7 @@ enum obb_frustum : int {
 };
 
 // based on @fabioarnold's impl of "Real-Time Collision Detection 5.2.3 Testing Box Against Plane"
-auto classifyObbFrustum(OrientedBoundingBox* obb, std::array<Vector4d, 6> planes) {
+inline auto classifyObbFrustum(OrientedBoundingBox* obb, std::array<Vector4d, 6> planes) {
 	auto result = obb_frustum_inside;
 	auto obb_orientation_t = obb->orientation;
 	obb_orientation_t.transposeInPlace();
@@ -35,7 +59,7 @@ auto classifyObbFrustum(OrientedBoundingBox* obb, std::array<Vector4d, 6> planes
 	return result;
 }
 
-Matrix4d perspective (double fov_rad, double aspect_ratio, double near, double far)
+inline Matrix4d perspective (double fov_rad, double aspect_ratio, double near, double far)
 {
     assert(aspect_ratio > 0);
     assert(far > near);
@@ -51,7 +75,7 @@ Matrix4d perspective (double fov_rad, double aspect_ratio, double near, double f
     return res;
 }
 
-Matrix4d orthographic (double half_width, double half_height, double near, double far)
+inline Matrix4d orthographic (double half_width, double half_height, double near, double far)
 {
     assert(half_width > 0);
     assert(half_height > 0);
@@ -66,7 +90,7 @@ Matrix4d orthographic (double half_width, double half_height, double near, doubl
     return res;
 }
 
-Matrix4d lookAt(Vector3d eye, Vector3d center, Vector3d up) {
+inline Matrix4d lookAt(Vector3d eye, Vector3d center, Vector3d up) {
 
     auto f = (center - eye).normalized();
     auto u = up.normalized();

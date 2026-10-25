@@ -1,3 +1,5 @@
+#pragma once
+
 // the renderer's glsl, compiled in rocktree_gl.h. raw strings, so each
 // shader keeps its lines and a compile error's line number means something;
 // a piece several of them share is a macro, spliced in by literal
