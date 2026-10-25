@@ -6,11 +6,9 @@
 
 void populateBulk(rocktree_t::bulk_t *bulk, std::unique_ptr<BulkMetadata> bulk_metadata) {
 
-	bulk->_metadata = std::move(bulk_metadata);
+	for (int i = 0; i < 3; i++) bulk->head_node_center[i] = bulk_metadata->head_node_center()[i];			
 
-	for (int i = 0; i < 3; i++) bulk->head_node_center[i] = bulk->_metadata->head_node_center()[i];			
-
-	for (auto node_meta : bulk->_metadata->node_metadata()) {						
+	for (auto node_meta : bulk_metadata->node_metadata()) {						
 		
 		auto aux = unpackPathAndFlags(node_meta);	   
 		auto has_data = !(aux.flags & NodeMetadata_Flags_NODATA);
@@ -19,7 +17,7 @@ void populateBulk(rocktree_t::bulk_t *bulk, std::unique_ptr<BulkMetadata> bulk_m
 		if (has_bulk) {													
 			auto epoch = node_meta.has_bulk_metadata_epoch()
 				? node_meta.bulk_metadata_epoch()
-				: bulk->_metadata->head_node_key().epoch();
+				: bulk_metadata->head_node_key().epoch();
 			
 			auto b = std::make_unique<rocktree_t::bulk_t>();
 			b->setNotDownloadedYet();
@@ -29,30 +27,23 @@ void populateBulk(rocktree_t::bulk_t *bulk, std::unique_ptr<BulkMetadata> bulk_m
 			assert(bulk->bulks.insert(std::make_pair(aux.path,std::move(b))).second);
 		}
 
-		if ((has_data || !(aux.flags & NodeMetadata_Flags_LEAF)) && !node_meta.has_oriented_bounding_box()) {
-#ifndef EMSCRIPTEN
-			printf("skip unknown node\n");
-#endif
-		}
-
 		if ((has_data || !(aux.flags & NodeMetadata_Flags_LEAF)) && node_meta.has_oriented_bounding_box()) {
 			auto meters_per_texel = node_meta.has_meters_per_texel()
 				? node_meta.meters_per_texel()
-				: bulk->_metadata->meters_per_texel(aux.level - 1);		
+				: bulk_metadata->meters_per_texel(aux.level - 1);		
 			
 			auto n = std::make_unique<rocktree_t::node_t>();
 			n->setNotDownloadedYet();
 			n->parent = bulk;
 			n->can_have_data = has_data;
 			if (has_data) {
-				n->request = createNodeDataRequest(bulk->request.node_key().path(), *(bulk->_metadata), node_meta);
+				n->request = createNodeDataRequest(bulk->request.node_key().path(), *bulk_metadata, node_meta);
 			}
 			n->meters_per_texel = meters_per_texel;
 			n->obb = unpackObb(node_meta.oriented_bounding_box(), bulk->head_node_center, meters_per_texel);
 			assert(bulk->nodes.insert(std::make_pair(aux.path,std::move(n))).second);
 		}
 	}	
-	bulk->_metadata = nullptr;
 	bulk->setFinishedDownloading();
 }
 
@@ -98,7 +89,7 @@ void populateNode(rocktree_t::node_t *node, std::unique_ptr<NodeData> node_data)
 		unpackOctantMaskAndOctantCountsAndLayerBounds(mesh.layer_and_octant_counts(), m.indices.data(), m.indices.size(), m.vertices.data(), m.vertices.size(), layer_bounds);
 		assert(0 <= layer_bounds[3] && layer_bounds[3] <= m.indices.size());
 		//m.indices_len = layer_bounds[3]; // enable
-		if (!getenv("EARTH_FULL_LAYERS")) m.indices.resize(layer_bounds[3]);
+		m.indices.resize(layer_bounds[3]);
 
 		// vertex normals, in the globe frame: each triangle's edges taken
 		// through the mesh's linear transform (its axes are scaled

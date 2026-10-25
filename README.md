@@ -793,8 +793,17 @@ unwrapped into the repo root; the paths below are the historical ones.)
   octant → textured `.obj` dump for Blender), untouched since upstream
 - `header.png` — the old README header image
 
-Note the web build still uses `rocktree_gl.h` (GLES2), `http.h`,
-`rocktree_http.h`, and `threads.h` — those look native-ish but are shared.
+Removed later (`git log -- http.h` finds the commit):
+
+- the native fetch path: `http.h`, the `./cache` disk cache in
+  `rocktree_http.h`, and the thread pool that fetched through it
+- the `EARTH_*` environment switches (`EARTH_AUDIT` with `EARTH_DUMP_TEX` and
+  `EARTH_PROBE`, `EARTH_TRACE`, `EARTH_NO_MASK`, `EARTH_NO_LINES`,
+  `EARTH_FULL_LAYERS`, `EARTH_LINE_WIDTH`, `EARTH_LOD_SCALE`), which nothing
+  sets in the wasm build
+
+Note the web build still uses `rocktree_gl.h` (GLES2), `rocktree_http.h`, and
+`threads.h` — those look native-ish but are shared.
 
 #### Reverse-engineering notes (upstream)
 

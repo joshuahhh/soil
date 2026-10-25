@@ -33,8 +33,7 @@ using namespace geo_globetrotter_proto_rocktree;
 // from the decode threads, hence atomic
 static std::atomic<bool> g_log_timing{false};
 
-// ms timestamp for the timing: log lines (sdl-free so the web library can
-// compile this header without sdl)
+// ms timestamp for the timing: log lines
 static inline uint32_t timing_ms() {
 	using namespace std::chrono;
 	return (uint32_t)duration_cast<milliseconds>(steady_clock::now().time_since_epoch()).count();
@@ -129,9 +128,6 @@ void getPlanetoid(std::function<void(std::unique_ptr<PlanetoidMetadata>)> cb) {
 // dl_state store, so decodes of distinct nodes can run concurrently. decode
 // dominates warm-cache load time, so use most of the machine
 ThreadPool pool(std::max(2, (int)std::thread::hardware_concurrency() - 2));
-#ifndef EMSCRIPTEN
-ThreadPool webpool(4);
-#endif
 
 // getBulk fetches a bulk using path and epoch from web or cache and calls cb when it's done.
 void getBulk(BulkMetadataRequest req, rocktree_t::bulk_t *b, std::function<void(std::unique_ptr<BulkMetadata>)> cb) {		
@@ -139,7 +135,6 @@ void getBulk(BulkMetadataRequest req, rocktree_t::bulk_t *b, std::function<void(
 	auto path = req.node_key().path().c_str();
 	auto epoch = req.node_key().epoch();
 
-	static std::mutex m;
 	using p = std::pair<std::function<void(std::unique_ptr<BulkMetadata>)>, rocktree_t::bulk_t *>;
 	static std::map<int, p> map;
 	static int i = 0;
@@ -147,9 +142,6 @@ void getBulk(BulkMetadataRequest req, rocktree_t::bulk_t *b, std::function<void(
 	auto thunk = [](int i, int error, uint8_t *data, size_t len){
 		p pair;	
 		{	
-#ifndef EMSCRIPTEN
-			std::lock_guard<std::mutex> lockGuard(m);
-#endif
 			auto it = map.find(i);
 			pair = it->second;
 			map.erase(it);
@@ -198,26 +190,14 @@ void getBulk(BulkMetadataRequest req, rocktree_t::bulk_t *b, std::function<void(
 	char *url_buf = new char[200];
 	sprintf(url_buf, "BulkMetadata/pb=!1m2!1s%s!2u%d", path, epoch);	
 
-#ifndef EMSCRIPTEN
-	auto result = webpool.enqueue([](auto url_buf, auto i, auto thunk, auto cb, auto b) {
-		{	
-			std::lock_guard<std::mutex> lockGuard(m);
-			map[i] = std::make_pair(cb, b);
-		}
-		fetchData(url_buf, i, thunk);
-		delete [] url_buf;
-	}, url_buf, ++i, thunk, cb, b);
-#else
 	++i;
 	map[i] = std::make_pair(cb, b);
 	fetchData(url_buf, i, thunk);
-#endif
 }
 
 // getNode fetches a node from path, epoch, texture_format and imagery_epoch (none if -1) and calls cb when it's done.
 void getNode(NodeDataRequest req, rocktree_t::node_t *n, std::function<void(std::unique_ptr<NodeData>)> cb) {
 
-	static std::mutex m;
 	using p = std::pair<std::function<void(std::unique_ptr<NodeData>)>, rocktree_t::node_t *>;
 	static std::map<int, p> map;
 	static int i = 0;	
@@ -225,9 +205,6 @@ void getNode(NodeDataRequest req, rocktree_t::node_t *n, std::function<void(std:
 	auto thunk = [](int i, int error, uint8_t *data, size_t len){
 		p pair;	
 		{	
-#ifndef EMSCRIPTEN
-			std::lock_guard<std::mutex> lockGuard(m);
-#endif
 			auto it = map.find(i);
 			pair = it->second;
 			map.erase(it);
@@ -283,65 +260,8 @@ void getNode(NodeDataRequest req, rocktree_t::node_t *n, std::function<void(std:
 		sprintf(url_buf, "NodeData/pb=!1m2!1s%s!2u%d!2e%d!3u%d!4b0", path, req.node_key().epoch(), req.texture_format(), req.imagery_epoch());
 	}	
 	
-#ifndef EMSCRIPTEN
-	//fetchData(url_buf, i, thunk);
-	auto result = webpool.enqueue([](auto url_buf, auto i, auto thunk, auto cb, auto n) {
-		{	
-			std::lock_guard<std::mutex> lockGuard(m);
-			map[i] = std::make_pair(cb, n);
-		}
-		fetchData(url_buf, i, thunk, &n->fetch_phase);
-		delete [] url_buf;
-	}, url_buf, ++i, thunk, cb, n);
-#else
 	++i;
 	map[i] = std::make_pair(cb, n);
 	n->fetch_phase = fetch_phase_none;
 	fetchData(url_buf, i, thunk, &n->fetch_phase);
-#endif
-}
-
-struct llbounds_t {
-	double n, s, w, e;
-};
-
-// latLonToOctant converts lat-lon to octant. incorrectly?
-void latLonToOctant(double lat, double lon, char octant[MAX_LEVEL + 1]) {
-	octant[0] = 0;
-	octant[1] = 0;
-	llbounds_t box;
-
-	if (lat < 0.0) { octant[1] |= 2; box.n = 0.0; box.s = -90.0;}
-	else { octant[0] |= 2; box.n = 90.0; box.s = 0.0; }
-
-	if (lon < -90.0) { box.w = -180.0; box.e = -90.0; }
-	else if (lon < 0.0) { octant[1] |= 1; box.w = -90.0; box.e = 0.0; }
-	else if (lon < 90.0) { octant[0] |= 1; box.w = 0.0; box.e = 90.0; }
-	else { octant[0] |= 1; octant[1] |= 1; box.w = 90.0; box.e = 180.0; }
-
-	int level = MAX_LEVEL;
-	for (int i = 2; i < level; i++) {
-		octant[i] = 0;
-
-		double mid_lat = (box.n + box.s) / 2.0;
-		double mid_lon = (box.w + box.e) / 2.0;
-
-		if (lat < mid_lat) {
-			box.n = mid_lat;
-		} else {
-			box.s = mid_lat;
-			octant[i] |= 2;
-		}
-
-		if (lon < mid_lon) {
-			box.e = mid_lon;
-		} else {
-			box.w = mid_lon;
-			octant[i] |= 1;
-		}
-	}
-
-	// to ascii
-	for (int i = 0; i < level; i++) octant[i] += '0';
-	octant[MAX_LEVEL] = 0;
 }

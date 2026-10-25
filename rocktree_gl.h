@@ -125,7 +125,6 @@ struct gpu_timer_t {
 };
 
 struct gl_ctx_t {
-	int width, height; // weblib: canvas drawable size, set by the shell
 	gpu_timer_t gpu;
 	dof_gl_t dof;
 	sky_gl_t sky;
@@ -307,8 +306,7 @@ void bindAndDrawMesh(rocktree_t::node_t::mesh_t &mesh, uint8_t octant_mask, uint
 	// crack fill: re-draw the mesh's boundary edges as lines. in the slit
 	// pixels along tile seams nothing has been drawn, so the lines win the
 	// depth test there and nowhere else
-	static const bool no_lines_debug = getenv("EARTH_NO_LINES") != nullptr;
-	if (!no_lines_debug && mesh.boundary_indices.size()) {
+	if (mesh.boundary_indices.size()) {
 		// the vao's element binding, swapped for the lines and put back
 		glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, mesh.boundary_index_buffer);
 		glDrawElements(GL_LINES, mesh.boundary_indices.size(), GL_UNSIGNED_SHORT, NULL);
@@ -332,19 +330,6 @@ void unbufferMesh(rocktree_t::node_t::mesh_t &mesh) {
 // backend-neutral wrappers (a removed metal backend once provided the same
 // interface; the indirection is kept in case another backend returns)
 typedef gl_ctx_t render_ctx_t;
-
-#ifdef EARTH_WEBLIB
-// no sdl in the web library: the shell tracks the canvas drawable size in
-// the ctx and the browser presents implicitly when the frame callback returns
-void renderDrawableSize(render_ctx_t &ctx, void *window, int *w, int *h) {
-	*w = ctx.width;
-	*h = ctx.height;
-}
-#else
-void renderDrawableSize(render_ctx_t &ctx, void *window, int *w, int *h) {
-	SDL_GL_GetDrawableSize((SDL_Window *)window, w, h);
-}
-#endif
 
 void renderDofEnsure(render_ctx_t &ctx, int w, int h) {
 	auto &d = ctx.dof;
@@ -488,7 +473,7 @@ void renderAoEnsure(render_ctx_t &ctx, int w, int h) {
 	a.ao_h = h;
 }
 
-void renderFrameBegin(render_ctx_t &ctx, void *window, int width, int height, int sky) {
+void renderFrameBegin(render_ctx_t &ctx, int width, int height, int sky) {
 	gpuSection(ctx, gpu_scene);
 	// the scene goes to the offscreen target whenever a pass reads it back
 	auto offscreen = ctx.dof.on || ctx.accum.on || renderAoLive(ctx);
@@ -971,18 +956,6 @@ void dofDraw(render_ctx_t &ctx) {
 	glDrawArrays(GL_TRIANGLES, 0, 3);
 }
 
-
-bool renderReadPixels(render_ctx_t &ctx, int w, int h, uint8_t *rgb) {
-	glPixelStorei(GL_PACK_ALIGNMENT, 1);
-	glReadPixels(0, 0, w, h, GL_RGB, GL_UNSIGNED_BYTE, rgb);
-	return true;
-}
-
-void renderPresent(render_ctx_t &ctx, void *window) {
-#ifndef EARTH_WEBLIB
-	SDL_GL_SwapWindow((SDL_Window *)window);
-#endif
-}
 
 void checkCompileShaderError(GLuint shader) {
 	GLint is_compiled = 0;
@@ -1498,7 +1471,7 @@ void renderSkyDraw(render_ctx_t &ctx, const float *right3, const float *up3, con
 	glUseProgram(ctx.program);
 }
 
-void renderInit(render_ctx_t &ctx, void *) {
+void renderInit(render_ctx_t &ctx) {
 	// gles 3.0 dropped the single-string GL_EXTENSIONS query — it returns null
 	// here, and taking that as "no s3tc" would silently push every texture
 	// down the jpeg path. enumerate with glGetStringi instead
@@ -1526,8 +1499,7 @@ void renderInit(render_ctx_t &ctx, void *) {
 	// crack-fill boundary lines (see bindAndDrawMesh) can only land on
 	// background pixels, so width just sets how wide a slit they can plug
 	// (wider also costs more fill rate). webgl typically clamps this to 1
-	auto lw = getenv("EARTH_LINE_WIDTH");
-	glLineWidth(lw ? (float)atof(lw) : 2.0f);
+	glLineWidth(2.0f);
 	ctx.program = makeShader(
 		"#version 300 es\n"
 		"uniform mat4 transform;"

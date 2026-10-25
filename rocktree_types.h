@@ -1,7 +1,5 @@
 #include <GLES3/gl3.h>
 
-typedef GLuint render_handle_t;
-
 // whether the gpu can take dxt1 uploads. set by the render backend at init;
 // without it (android gpus, generally) node requests ask for jpg textures
 // instead — an unsupported compressed upload samples as solid black
@@ -82,8 +80,6 @@ struct rocktree_t {
 		float meters_per_texel;
 		OrientedBoundingBox obb;
 
-		std::unique_ptr<NodeData> _data;
-
 		Matrix4d matrix_globe_from_mesh;
 		struct mesh_t {
 			std::vector<uint8_t> vertices;
@@ -104,13 +100,13 @@ struct rocktree_t {
 			int texture_width;
 			int texture_height;
 
-			render_handle_t vertex_buffer;
-			render_handle_t index_buffer;
-			render_handle_t boundary_index_buffer;
-			render_handle_t texture_buffer;
-			render_handle_t normal_buffer;
+			GLuint vertex_buffer;
+			GLuint index_buffer;
+			GLuint boundary_index_buffer;
+			GLuint texture_buffer;
+			GLuint normal_buffer;
 			// the vertex setup for a draw, in one bind (see bufferMesh)
-			render_handle_t vao;
+			GLuint vao;
 			// the min filter the texture was last given (the M key flips
 			// texture_mipmaps_on live; the parameter is re-sent only when it
 			// no longer matches, not on every draw)
@@ -162,7 +158,6 @@ struct rocktree_t {
 
 		Vector3f head_node_center;
 
-		std::unique_ptr<BulkMetadata> _metadata;
 		std::atomic<int> busy_ctr;
 
 		std::map<std::string, std::unique_ptr<node_t>> nodes;
@@ -170,6 +165,5 @@ struct rocktree_t {
 	};
 	float radius;
 	bulk_t *root_bulk;
-	std::unique_ptr<PlanetoidMetadata> _metadata;
 	std::atomic<bool> downloaded;
 };

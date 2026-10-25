@@ -1,7 +1,7 @@
 // web library shell: attach the renderer to any canvas element and drive it
-// from js. unlike the classic emscripten app build (main.cpp), this owns no
-// window, no input, and no main loop — the host page schedules frames and
-// optionally supplies a fetch function to control transport and caching.
+// from js. this owns no window, no input, and no main loop — the host page
+// schedules frames and optionally supplies a fetch function to control
+// transport and caching.
 //
 // build: ./build.sh  ->  web/earth.js + web/earth.wasm
 // usage: see web/index.html
@@ -120,7 +120,7 @@ struct EarthView {
 		emscripten_webgl_make_context_current(gl);
 		ctx.msaa_samples = g_antialias ? 4 : 0; // the offscreen passes match the context
 		ctx.gpu.ok = emscripten_webgl_enable_extension(gl, "EXT_disjoint_timer_query_webgl2");
-		renderInit(ctx, nullptr);
+		renderInit(ctx);
 		earth.load();
 	}
 
@@ -441,8 +441,6 @@ struct EarthView {
 		int w, h;
 		emscripten_webgl_get_drawing_buffer_size(gl, &w, &h);
 		if (w <= 0 || h <= 0) return;
-		ctx.width = w;
-		ctx.height = h;
 		// terrain hug wants the finest tiles under the camera selected even
 		// when the view frustum culls them (see earth_core ground column)
 		earth.ground_column_on = terrain_follow && !camera.ortho && !camera.airplane;
@@ -497,7 +495,7 @@ struct EarthView {
 			earth.jitter_x = earth.jitter_y = earth.lens_x = earth.lens_y = 0;
 			earth.sun_jitter_x = earth.sun_jitter_y = earth.shadow_jitter_x = earth.shadow_jitter_y = 0;
 		}
-		renderFrameBegin(ctx, nullptr, w, h, sky);
+		renderFrameBegin(ctx, w, h, sky);
 		auto t1 = earth_core_t::ticksMs();
 		earth.updateAndDraw(ctx, camera, w, h, dt_ms);
 		if (a.on) {
