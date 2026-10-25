@@ -1,5 +1,6 @@
 import { S } from './state.js';
-import { D2R, planetR, ecefOf, poseBasis, projectWith } from './geo.js';
+import { ecefOf, poseBasis, projectWith } from './geo.js';
+import { paramSpecs, lmStep } from './solver.js';
 import { idbGet } from './idb.js';
 import { view, canvas, rightEl } from './engine.js';
 import { overlayBlend, ov, applyOverlayBlend, viewToPhoto, clampLens, distortUV, photoToViewK,
@@ -361,62 +362,8 @@ const captureClick = (x, y, ndcX, ndcY) => {
 };
 
 // --- the solver -----------------------------------------------------------
-// levenberg–marquardt on the pose: gauss-newton where the local model is
-// trusted, gradient descent where it isn't, with a numeric jacobian (the
-// projection is six cheap parameters, so finite differences cost nothing).
-// it's a local method by design — this is for fine-tuning a view that is
-// already roughly right, not for solving the pose from scratch.
-//
-// the parameters are local deltas rather than the pose itself: metres east /
-// north / up instead of degrees of latitude and longitude, so every column
-// of the jacobian has comparable scale and the normal equations stay
-// conditioned wherever on the globe you are
-const paramSpecs = () => {
-  const s = [];
-  if (freeFlags.pos) s.push('e', 'n', 'u');
-  if (freeFlags.aim) s.push('h', 't');
-  if (freeFlags.fov) s.push('f');
-  // off by default: a hand-held photo is usually a little banked, but so is
-  // a fit that has gone wrong, and a free roll will happily take a bad
-  // solution the rest of the way. tick it when the horizon in the picture
-  // isn't level
-  if (freeFlags.roll) s.push('r');
-  // off by default for the same reason, and one more: it is the twin of
-  // fov (a barrel lens looks like a wider field at the edges), and pairs
-  // near the centre of the picture say nothing about it at all. tick it
-  // when the pairs at the edges won't settle while the middle has
-  if (freeFlags.dist) s.push('k');
-  return s;
-};
-const stepFor = (spec, base) => (spec === 'e' || spec === 'n' || spec === 'u')
-  ? Math.max(0.02, Math.abs(base.alt) * 1e-4) // metres
-  : spec === 'k' ? 2e-3 // lens, dimensionless
-  : 1e-3; // degrees
-const applyDelta = (base, specs, d) => {
-  const p = { lat: base.lat, lon: base.lon, alt: base.alt,
-    heading: base.heading, tilt: base.tilt, fov: base.fov,
-    roll: base.roll || 0, k: base.k || 0 };
-  const mPerDeg = (planetR + Math.max(0, base.alt)) * D2R;
-  specs.forEach((s, i) => {
-    const x = d[i];
-    if (s === 'e') p.lon += x / Math.max(1e-6, mPerDeg * Math.cos(base.lat * D2R));
-    else if (s === 'n') p.lat += x / mPerDeg;
-    else if (s === 'u') p.alt += x;
-    else if (s === 'h') p.heading += x;
-    else if (s === 't') p.tilt += x;
-    else if (s === 'f') p.fov += x;
-    else if (s === 'r') p.roll += x;
-    else if (s === 'k') p.k += x;
-  });
-  p.k = clampLens(p.k); // see lensLimits
-  // the same limits the engine enforces, so an accepted step survives
-  // being handed to setPose/setFov unchanged
-  p.lat = Math.max(-89.9, Math.min(89.9, p.lat));
-  p.alt = Math.max(1, p.alt);
-  p.tilt = Math.max(-89.5, Math.min(89.5, p.tilt));
-  p.fov = Math.max(1, Math.min(150, p.fov));
-  return p;
-};
+// the method is solver.js; what it fits (the pairs, through the photo's
+// lens) and what an accepted step moves (the camera) are here
 // residual vector: signed pixel offsets, mesh point minus photo point.
 // null if any pair is unusable in this pose (behind the camera) — such a
 // step is simply rejected rather than fitted to a wrapped-around projection
@@ -432,99 +379,29 @@ const residuals = (p, W, H) => {
   }
   return out.length ? out : null;
 };
-const costOf = (r) => r ? r.reduce((a, x) => a + x * x, 0) : Infinity;
-// dense gauss-jordan with partial pivoting; k is at most 6
-const solveLinear = (A, b) => {
-  const k = b.length;
-  const M = A.map((row, i) => row.concat([b[i]]));
-  for (let c = 0; c < k; c++) {
-    let piv = c;
-    for (let r = c + 1; r < k; r++)
-      if (Math.abs(M[r][c]) > Math.abs(M[piv][c])) piv = r;
-    if (!(Math.abs(M[piv][c]) > 1e-14)) return null; // singular
-    [M[c], M[piv]] = [M[piv], M[c]];
-    for (let r = 0; r < k; r++) {
-      if (r === c) continue;
-      const f = M[r][c] / M[c][c];
-      for (let j = c; j <= k; j++) M[r][j] -= f * M[c][j];
-    }
-  }
-  const x = [];
-  for (let i = 0; i < k; i++) x.push(M[i][k] / M[i][i]);
-  return x.every(Number.isFinite) ? x : null;
-};
-let solving = false, lambda = 1e-3, solveIters = 0, stalls = 0;
+let solving = false;
+const lm = { lambda: 1e-3, iters: 0, stalls: 0 }; // the solver's damping and progress
 // one accepted step (or one give-up) per call; the tick runs it a few times
 // a frame so the camera visibly settles onto the answer. returns true when
 // there's nothing left to do
 const solveStep = () => {
   if (!view.ready() || !pairs.length) return true;
-  const specs = paramSpecs();
-  const k = specs.length;
-  if (!k) return true;
+  const specs = paramSpecs(freeFlags);
+  if (!specs.length) return true;
   const W = rightEl.clientWidth, H = rightEl.clientHeight;
   const base = view.getPose();
   base.k = ov.k || 0; // the lens is the photo's, not the camera's
-  const r0 = residuals(base, W, H);
-  if (!r0) return true; // nothing usable to fit from here
-  const cost0 = costOf(r0);
-  const n = r0.length;
-
-  const J = [];
-  for (let j = 0; j < k; j++) {
-    const h = stepFor(specs[j], base);
-    const d = new Array(k).fill(0);
-    d[j] = h;
-    let rp = residuals(applyDelta(base, specs, d), W, H);
-    let denom = h;
-    if (!rp) { // forward step fell off a clamp: difference backwards instead
-      d[j] = -h;
-      rp = residuals(applyDelta(base, specs, d), W, H);
-      denom = -h;
-    }
-    const col = new Array(n).fill(0);
-    if (rp) for (let i = 0; i < n; i++) col[i] = (rp[i] - r0[i]) / denom;
-    J.push(col);
+  const { cand, done } = lmStep(base, specs, (p) => residuals(p, W, H), clampLens, lm);
+  if (cand) {
+    view.setPose(cand.lat, cand.lon, cand.alt, cand.heading, cand.tilt);
+    view.setFov(cand.fov);
+    // setPose carries the old roll over, so this only has to run when
+    // roll is one of the parameters being fitted
+    if (freeFlags.roll) view.setRoll(cand.roll);
+    if (freeFlags.dist) setLens(cand.k); // redraws the warp: only on an accepted step
+    S.following = true; // the map should come along
   }
-  const A = [], g = [];
-  for (let a = 0; a < k; a++) {
-    A.push(new Array(k).fill(0));
-    let ga = 0;
-    for (let i = 0; i < n; i++) ga += J[a][i] * r0[i];
-    g.push(-ga);
-  }
-  for (let a = 0; a < k; a++) for (let b = a; b < k; b++) {
-    let s = 0;
-    for (let i = 0; i < n; i++) s += J[a][i] * J[b][i];
-    A[a][b] = A[b][a] = s;
-  }
-  // raise the damping until a step actually improves the fit; each failure
-  // pulls the step shorter and more gradient-like
-  for (let attempt = 0; attempt < 8; attempt++) {
-    const Ad = A.map((row, a) => row.map((x, b) =>
-      a === b ? x * (1 + lambda) + 1e-9 : x));
-    const step = solveLinear(Ad, g);
-    if (step) {
-      const cand = applyDelta(base, specs, step);
-      const cost = costOf(residuals(cand, W, H));
-      if (cost < cost0) {
-        view.setPose(cand.lat, cand.lon, cand.alt, cand.heading, cand.tilt);
-        view.setFov(cand.fov);
-        // setPose carries the old roll over, so this only has to run when
-        // roll is one of the parameters being fitted
-        if (freeFlags.roll) view.setRoll(cand.roll);
-        if (freeFlags.dist) setLens(cand.k); // redraws the warp: only on an accepted step
-        S.following = true; // the map should come along
-        lambda = Math.max(1e-9, lambda / 3);
-        const rel = (cost0 - cost) / Math.max(cost0, 1e-12);
-        stalls = rel < 1e-7 ? stalls + 1 : 0;
-        return stalls >= 3 || ++solveIters >= 400;
-      }
-    }
-    lambda *= 6;
-    if (lambda > 1e12) return true; // no downhill direction left: converged
-  }
-  return false;
+  return done;
 };
 function stopSolve() {
   solving = false;
@@ -544,9 +421,9 @@ const startSolve = () => {
     updateHint();
   }
   solving = true;
-  lambda = 1e-3;
-  solveIters = 0;
-  stalls = 0;
+  lm.lambda = 1e-3;
+  lm.iters = 0;
+  lm.stalls = 0;
   solveBtn.textContent = 'stop';
   canvas.focus();
 };

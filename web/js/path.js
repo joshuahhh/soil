@@ -1,6 +1,8 @@
 import { TEST } from './config.js';
 import { S } from './state.js';
 import { D2R, planetR, vsub, vmul, vadd, vdot, vcross, vnorm, geoUpV, geoNorthV } from './geo.js';
+import { smoothSpine, makeSpine, spineAt, rawAt, spineLatLon, spineHeading,
+  nearestS } from './spine.js';
 import { idbGet, idbPutChecked, idbDel } from './idb.js';
 import { view, canvas } from './engine.js';
 import { map } from './map.js';
@@ -281,7 +283,6 @@ const loadGpxFile = async (file) => {
 // boxcar-smoothed twice (two passes ≈ gaussian), and the heading comes from
 // a chord across a couple hundred meters of *that* rather than from any one
 // segment. a temporal ease on top absorbs what survives.
-const SPINE_STEP = 10;       // m between resampled points
 // the smoothing windows are fractions of what the view spans, not fixed
 // distances. a fixed window is only ever right at one zoom: 20 m of
 // smoothing is the difference between a steady camera and a shaky one from
@@ -308,18 +309,6 @@ let spine = null;
 // values actually used, null until the first frame seeds them
 const fol = { s: 0, az: 0, el: 22, dist: 250, heading: null, alt: null };
 
-// box filter by prefix sum, O(n) whatever the window; the window shrinks at
-// the ends rather than the values being clamped into it
-const boxcar = (a, half) => {
-  const n = a.length, pre = new Float64Array(n + 1), out = new Float64Array(n);
-  for (let i = 0; i < n; i++) pre[i + 1] = pre[i] + a[i];
-  for (let i = 0; i < n; i++) {
-    const lo = Math.max(0, i - half), hi = Math.min(n - 1, i + half);
-    out[i] = (pre[hi + 1] - pre[lo]) / (hi - lo + 1);
-  }
-  return out;
-};
-const halfFor = (win) => Math.max(1, Math.round(win / SPINE_STEP / 2));
 // the smoothed copies, filtered once and kept until the window they were
 // filtered at has moved appreciably. the window follows the zoom, so it
 // technically changes every frame — but quantizing it costs a sub-metre
@@ -331,10 +320,7 @@ const smoothCache = new Map(); // 'aim' | 'head' -> { win, xs, ys }
 const smoothed = (key, win) => {
   const c = smoothCache.get(key);
   if (c && Math.abs(win - c.win) < SMOOTH_STALE * c.win) return c;
-  const half = halfFor(win);
-  let xs = spine.rx, ys = spine.ry;
-  for (let pass = 0; pass < 2; pass++) { xs = boxcar(xs, half); ys = boxcar(ys, half); }
-  const built = { win, xs, ys };
+  const built = smoothSpine(spine, win);
   smoothCache.set(key, built);
   // the debug line is the aim copy itself, not a second filtering of it:
   // a debug view that can disagree with the thing it depicts is worse than
@@ -344,85 +330,10 @@ const smoothed = (key, win) => {
 };
 
 const buildSpine = () => {
-  spine = null;
-  if (!path) return;
-  // one line to follow: the gaps between track segments are crossed rather
-  // than jumped, since the camera has to travel through them somehow
-  const raw = [];
-  for (const seg of path.segs) for (const p of seg) raw.push(p);
-  if (raw.length < 2) return;
-  // one local tangent plane for the whole track: meters east/north of its
-  // mean latitude. the east scale drifts with cos(lat) away from that — a
-  // percent over a degree — which is nothing against a camera standoff, and
-  // it keeps resampling and smoothing to plain 2d arithmetic
-  const lat0 = raw.reduce((t, p) => t + p.lat, 0) / raw.length;
-  const lon0 = raw[0].lon;
-  const mLat = D2R * planetR, mLon = mLat * Math.cos(lat0 * D2R);
-  const xy = raw.map((p) => [(p.lon - lon0) * mLon, (p.lat - lat0) * mLat]);
-  // resample at a fixed step, remembering which original point each sample
-  // came from — the engine's altitudes are indexed by that
-  const samples = [{ x: xy[0][0], y: xy[0][1], i: 0 }];
-  let dAcc = 0, dNext = SPINE_STEP;
-  for (let i = 1; i < xy.length; i++) {
-    const dx = xy[i][0] - xy[i - 1][0], dy = xy[i][1] - xy[i - 1][1];
-    const len = Math.hypot(dx, dy);
-    if (!(len > 0)) continue;
-    while (dNext <= dAcc + len) {
-      const t = (dNext - dAcc) / len;
-      samples.push({ x: xy[i - 1][0] + dx * t, y: xy[i - 1][1] + dy * t, i });
-      dNext += SPINE_STEP;
-    }
-    dAcc += len;
-  }
-  if (samples.length < 2) return;
-  // resampled but *unsmoothed*: the smoothing happens per frame now, at
-  // whatever window the current view scale asks for
-  const rx = Float64Array.from(samples, (p) => p.x);
-  const ry = Float64Array.from(samples, (p) => p.y);
-  // arc length along the *raw* points, which is what the ribbon is drawn
-  // through and therefore what the cursor and the progress readout have to
-  // speak. the spine is only ever consulted for which way the track heads
+  spine = makeSpine(path);
   smoothCache.clear();
-  const cum = new Float64Array(xy.length);
-  for (let i = 1; i < xy.length; i++)
-    cum[i] = cum[i - 1] + Math.hypot(xy[i][0] - xy[i - 1][0], xy[i][1] - xy[i - 1][1]);
-  spine = { rx, ry, idx: samples.map((p) => p.i), raw, cum, step: SPINE_STEP,
-    len: (samples.length - 1) * SPINE_STEP, rawLen: cum[cum.length - 1],
-    lat0, lon0, mLat, mLon };
 };
 
-// the smoothing leaves the samples very slightly unevenly spaced, so s/step
-// is an approximation of arc length — by well under a percent, and nothing
-// here needs it to be exact
-// a point on one of the smoothed copies, interpolated between the samples
-// either side so it doesn't step as s crosses one
-const spineAt = (s, sm) => {
-  const n = sm.xs.length;
-  const u = Math.min(n - 1, Math.max(0, s / spine.step));
-  const i = Math.min(n - 2, Math.floor(u)), f = u - i;
-  return [sm.xs[i] + (sm.xs[i + 1] - sm.xs[i]) * f,
-    sm.ys[i] + (sm.ys[i + 1] - sm.ys[i]) * f];
-};
-// metres along the raw track -> fractional point index, and the point
-// itself. this is the number the ribbon is built from, so a cursor placed
-// with it sits on the drawn line by construction
-const rawAt = (s) => {
-  const cum = spine.cum;
-  let lo = 0, hi = cum.length - 1;
-  const d = Math.max(0, Math.min(s, spine.rawLen));
-  while (lo < hi) { // first index whose cumulative length is >= d
-    const mid = (lo + hi) >> 1;
-    if (cum[mid] < d) lo = mid + 1; else hi = mid;
-  }
-  const i = Math.max(0, lo - 1);
-  const leg = cum[i + 1] - cum[i];
-  const f = leg > 0 ? (d - cum[i]) / leg : 0;
-  const a = spine.raw[i], b = spine.raw[Math.min(i + 1, spine.raw.length - 1)];
-  return { idx: i + f,
-    lat: a.lat + (b.lat - a.lat) * f, lon: a.lon + (b.lon - a.lon) * f };
-};
-const spineIdx = (s) => spine.idx[Math.min(spine.idx.length - 1,
-  Math.max(0, Math.round(s / spine.step)))];
 // how much ground the view spans at the target, in metres — the scale the
 // smoothing windows are cut from. a parallel projection says so outright;
 // in perspective it comes from the standoff and the fov, so both the R/F
@@ -437,16 +348,6 @@ const followSpan = () => {
 };
 const winFor = (frac, span) =>
   Math.min(SMOOTH_MAX, Math.max(SMOOTH_MIN, frac * span));
-const spineLatLon = (xy) => ({ lat: spine.lat0 + xy[1] / spine.mLat,
-  lon: spine.lon0 + xy[0] / spine.mLon });
-// which way the track heads at s, degrees clockwise from north, over a
-// chord rather than a segment (this is the anti-jitter measurement)
-const spineHeading = (s, sm, chord) => {
-  const a = spineAt(Math.max(0, s - chord), sm);
-  const b = spineAt(Math.min(spine.len, s + chord), sm);
-  const dx = b[0] - a[0], dy = b[1] - a[1];
-  return Math.hypot(dx, dy) < 1e-6 ? null : Math.atan2(dx, dy) / D2R;
-};
 // the ground the camera should be looking at, averaged over a stretch of
 // track so one bad fix doesn't dip the view. the engine answers with the
 // draped altitude where the mesh under that point has been measured and
@@ -455,7 +356,7 @@ const spineHeading = (s, sm, chord) => {
 // averaging the two together would split the difference and park the
 // target inside the hillside
 const spineAlt = (s) => {
-  const at = (j) => Math.round(rawAt(s + j * 25).idx);
+  const at = (j) => Math.round(rawAt(spine, s + j * 25).idx);
   let sum = 0, n = 0;
   for (let j = -3; j <= 3; j++) {
     const a = view.getPathGroundAlt(at(j));
@@ -468,21 +369,6 @@ const spineAlt = (s) => {
   }
   return n ? sum / n : null;
 };
-// where on the spine the camera is standing now, so V picks you up where
-// you are rather than teleporting to the trailhead
-const nearestS = () => {
-  const p = view.getPose();
-  const x = (p.lon - spine.lon0) * spine.mLon, y = (p.lat - spine.lat0) * spine.mLat;
-  let best = 0, bd = Infinity;
-  for (let i = 0; i < spine.raw.length; i++) {
-    const rx = (spine.raw[i].lon - spine.lon0) * spine.mLon;
-    const ry = (spine.raw[i].lat - spine.lat0) * spine.mLat;
-    const d = (rx - x) ** 2 + (ry - y) ** 2;
-    if (d < bd) { bd = d; best = i; }
-  }
-  return spine.cum[best];
-};
-
 // --- debug: draw what the camera is actually following ---------------------
 // the smoothed copy is invisible by construction — it exists only as the
 // thing the camera aims down — so when the marker floats off-centre there
@@ -495,7 +381,7 @@ const drawSmoothLayer = (sm) => {
   if (!src || !spine) return;
   const coords = [];
   for (let i = 0; i < sm.xs.length; i++) {
-    const ll = spineLatLon([sm.xs[i], sm.ys[i]]);
+    const ll = spineLatLon(spine, [sm.xs[i], sm.ys[i]]);
     coords.push([ll.lon, ll.lat]);
   }
   src.setData({ type: 'Feature', properties: { win: sm.win },
@@ -523,7 +409,7 @@ const setFollow = (on) => {
     // projection has no quarrel with the rails, it just changes what R/F
     // and a drag have to do (see followStep)
     if (S.hug) { S.hug = false; view.setTerrainFollow(false); }
-    fol.s = nearestS();
+    fol.s = nearestS(spine, view.getPose());
     S.following = true; // let the map track the camera along
     canvas.focus();
   } else {
@@ -588,7 +474,7 @@ const followStep = (dt, slow) => {
   // their positions. its arc length runs a hair short of the raw track's
   // (smoothing cuts corners), so the position is scaled across
   const sSpine = fol.s * (spine.len / Math.max(1, spine.rawLen));
-  const h = spineHeading(sSpine, headSm, chord);
+  const h = spineHeading(spine, sSpine, headSm, chord);
   if (h !== null) {
     if (fol.heading === null) fol.heading = h;
     else {
@@ -607,7 +493,7 @@ const followStep = (dt, slow) => {
   // visibly leaves the line at every bend. the 3d disc is placed by point
   // index so the engine can put it on the drawn geometry exactly, drape and
   // all; the map dot and the camera get the interpolated position
-  const ll = rawAt(fol.s);
+  const ll = rawAt(spine, fol.s);
   setCursor(ll);
   view.setPathCursorIndex(ll.idx);
   pathEls.progress.textContent = `${(fol.s / 1000).toFixed(2)} of `
@@ -617,7 +503,7 @@ const followStep = (dt, slow) => {
   // the camera aims down its own lightly smoothed copy, never the raw
   // track: the marker has to be on the drawn line, the camera has to not
   // shake, and those are different requirements
-  const aim = spineLatLon(spineAt(sSpine, aimSm));
+  const aim = spineLatLon(spine, spineAt(spine, sSpine, aimSm));
   const lat = aim.lat * D2R, lon = aim.lon * D2R;
   const up = geoUpV(lat, lon), north = geoNorthV(lat, lon), east = vcross(north, up);
   const bearing = ((fol.heading || 0) + fol.az) * D2R;
