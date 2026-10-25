@@ -432,6 +432,7 @@ uniform mat4 shadow_mv;
 uniform mat3 sun_rot; // the globe frame's axes in the sun's frame
 out vec3 v_sunv;
 out vec3 v_nsun;
+out vec3 v_nglobe;
 // fixed locations: the shadow pass's program reads the same vaos
 layout(location = 0) in vec3 position;
 layout(location = 1) in float octant;
@@ -534,6 +535,7 @@ void main() {
 	gl_Position = p;
 	v_sunv = (shadow_mv * vec4(position, 1.0)).xyz;
 	v_nsun = sun_rot * normal;
+	v_nglobe = normal;
 	// view depth: w in perspective; in ortho w is 1 and ndc z is linear
 	v_dist = fog_planes.z > 0.5
 		? fog_planes.x + (p.z / p.w * 0.5 + 0.5) * (fog_planes.y - fog_planes.x) : p.w;
@@ -577,6 +579,13 @@ in vec3 v_sunv;
 in vec3 v_nsun;
 uniform float tube_fade;
 uniform bool body_on;
+// clay (U key): rgb the one colour, w on. lit by the sun (globe
+// frame) and the sky; ortho_half the ortho view's half height (m),
+// to put the fragment back where it is
+uniform vec4 clay;
+uniform vec3 sun_dir;
+uniform float ortho_half;
+in vec3 v_nglobe;
 in vec2 v_texcoords;
 in float v_loop;
 in vec3 v_local;
@@ -606,6 +615,7 @@ void main() {
 		if (body_on && tube_pass == 1 && abs(v_loop - 1000.0 * floor(v_loop / 1000.0 + 0.5)) > 0.5) discard;
 	}
 	vec3 c = texture(tex, v_texcoords).rgb * tint;
+	float sun_vis = 1.0;
 	// the sun: faces turned away from it are in their own shade (the
 	// face normal from the screen-space slope of the sun-frame
 	// position, which points at the camera, so +z is toward the sun),
@@ -639,7 +649,7 @@ void main() {
 		float steep = 1.0 - smoothstep(0.75, 0.92, dot(n, shadow_up));
 		float lit = mix(1.0, smoothstep(-0.25, 0.3, n.z), steep);
 		// debug (?shadowdebug=): 2 the facing term alone, 3 cast shadows alone
-		if (shadow_params.x > 2.5) lit = 1.0;
+		if (shadow_params.x > 2.5 || clay.w > 0.5) lit = 1.0;
 		// normal offset: look the map up off the surface, so it doesn't
 		// shadow itself -- a texel and a half facing the sun, up to four
 		// times that where the sun only skims it. raising the lookup by h
@@ -663,8 +673,30 @@ void main() {
 			float edge = smoothstep(0.0, 0.04, min(e.x, e.y));
 			lit = min(lit, mix(1.0, s / 9.0, edge));
 		}
-		vec3 shade = (1.0 - shadow_params.y) * vec3(0.88, 0.95, 1.12);
-		c *= mix(shade, vec3(1.0), lit);
+		if (clay.w > 0.5) sun_vis = mix(1.0 - shadow_params.y, 1.0, lit);
+		else {
+			vec3 shade = (1.0 - shadow_params.y) * vec3(0.88, 0.95, 1.12);
+			c *= mix(shade, vec3(1.0), lit);
+		}
+	}
+	// clay: every face its own normal, from the screen-space slope of
+	// its position relative to the eye (globe frame); a crack-fill line
+	// has no face and takes the vertices'. the sun, and a sky dome
+	// brighter overhead, all through the sun's tint
+	if (clay.w > 0.5) {
+		vec2 ndc = gl_FragCoord.xy / viewport * 2.0 - 1.0;
+		vec3 off = fog_planes.z > 0.5
+			? vec3(ndc.x * ortho_half * cam_params.y, ndc.y * ortho_half, v_dist)
+			: vec3(ndc.x * cam_params.x * cam_params.y, ndc.y * cam_params.x, 1.0) * v_dist;
+		vec3 pw = cam * off;
+		vec3 ddx = dFdx(pw), ddy = dFdy(pw);
+		vec3 cr = cross(ddx, ddy);
+		vec3 n = dot(cr, cr) > 0.0025 * dot(ddx, ddx) * dot(ddy, ddy) ? normalize(cr)
+			: dot(v_nglobe, v_nglobe) > 1e-6 ? normalize(v_nglobe) : normalize(eye);
+		if (dot(n, pw) > 0.0) n = -n;
+		float key = max(dot(n, sun_dir), 0.0) * sun_vis;
+		float dome = 0.5 + 0.5 * dot(n, normalize(eye));
+		c = clay.rgb * tint * (0.8 * key + (0.2 + 0.25 * dome) * vec3(0.88, 0.95, 1.12));
 	}
 	// aerial perspective: light from a distance is scattered out on the
 	// way and the sky's light scattered in takes its place, so what is

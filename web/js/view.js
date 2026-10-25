@@ -10,7 +10,7 @@ import { debugSmooth, setDebugSmooth, setFollow, toggleFollow } from './path.js'
 import { sky, glamour, applySky, applyGlamour } from './sky.js';
 
 export { initView, mode, inTube, viewName, defineMode, setMode, ortho, hug, setHug, saveView,
-  restoreView, keys, miniature, mipmaps, setMipmaps, dragging };
+  restoreView, keys, miniature, mipmaps, setMipmaps, clay, dragging };
 
 // --- the view's mode -----------------------------------------------------
 // exactly one of: fly, follow (path.js), tunnel, tube, body (tube.js).
@@ -92,6 +92,7 @@ const restoreView = () => {
   setHug(!!START.hug);
   if (START.miniature) setMiniature(true);
   if (START.lod) setDebugLod(true);
+  if (QS.has('clay')) setClay(true);
   applySky();
   applyGlamour();
   // in the tube, roll is relative to the airplane frame, which only exists
@@ -117,7 +118,7 @@ const keys = {};
 const typingIn = (t) => !!t && (t.tagName === 'TEXTAREA' || t.isContentEditable
   || t.tagName === 'SELECT'
   || (t.tagName === 'INPUT' && !['range', 'checkbox', 'color', 'button', 'radio'].includes(t.type)));
-const handled = new Set(['KeyW','KeyA','KeyS','KeyD','KeyQ','KeyE','KeyR','KeyF','KeyZ','KeyX','KeyG','KeyO','KeyC','KeyK','KeyL','KeyM','KeyT','KeyP','KeyV','KeyN','KeyB','KeyY','KeyI',
+const handled = new Set(['KeyW','KeyA','KeyS','KeyD','KeyQ','KeyE','KeyR','KeyF','KeyZ','KeyX','KeyG','KeyO','KeyC','KeyK','KeyL','KeyM','KeyT','KeyP','KeyV','KeyN','KeyB','KeyY','KeyI','KeyU',
   'Space','ArrowLeft','ArrowRight','ArrowUp','ArrowDown','Minus','Equal','Digit0','Numpad0','Home','KeyH']);
 let miniature = false; // the tilt-shift look (N)
 const setMiniature = (on) => { miniature = on; view.setMiniature(on, 0.015, 0.35); updateHint(); };
@@ -130,6 +131,8 @@ const setDebugLod = (on) => {
 };
 let mipmaps = true;
 const setMipmaps = (on) => { mipmaps = on; view.setMipmaps(on); updateHint(); };
+let clay = false; // every mesh one colour, lit (U)
+const setClay = (on) => { clay = on; view.setClay(on, 0xccc7bd); updateHint(); };
 // leaves the tube alone: esc clears it
 const resetView = () => {
   if (!view.ready()) return;
@@ -160,6 +163,7 @@ const initInput = () => {
     if (e.code === 'Minus' && !e.repeat) { S.gain = Math.max(1/128, S.gain/2); updateHint(); }
     if (e.code === 'Equal' && !e.repeat) { S.gain = Math.min(128, S.gain*2); updateHint(); }
     if (e.code === 'KeyN' && !e.repeat) setMiniature(!miniature);
+    if (e.code === 'KeyU' && !e.repeat) setClay(!clay);
     if (e.code === 'KeyO' && !e.repeat && setOrtho(!ortho)) updateHint();
     if (e.code === 'KeyG' && !e.repeat && setHug(!hug)) {
       if (hug) stopSolve(); // the two fight over altitude — see startSolve

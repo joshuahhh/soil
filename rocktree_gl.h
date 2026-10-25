@@ -180,6 +180,7 @@ struct gl_ctx_t {
 	GLint shadow_mv_loc, shadow_box_loc, shadow_params_loc, shadow_map_loc, shadow_up_loc, sun_rot_loc, eye_sun_loc;
 	// aerial perspective: see renderTerrainBegin
 	GLint fog_loc, haze_loc, tint_loc, fog_planes_loc, cam_loc, eye_loc, cam_params_loc, viewport_loc;
+	GLint clay_loc, sun_dir_loc, ortho_half_loc;
 	GLuint program;
 	GLint transform_loc;
 	GLint tube_on_loc;
@@ -213,6 +214,9 @@ struct gl_ctx_t {
 	// live A/B switch (M key). only the uncompressed path has a mip chain to
 	// switch to, so this does nothing on dxt tiles
 	bool mipmaps_on = true;
+	// clay (U key): every mesh one colour, lit by the sun and the sky
+	bool clay_on = false;
+	float clay_rgb[3] = {0.8f, 0.78f, 0.74f};
 };
 
 inline void meshTexImage2d(const rocktree_t::node_t::mesh_t &mesh) {
@@ -562,6 +566,10 @@ inline void renderTerrainBegin(render_ctx_t &ctx, const frame_t &f) {
 	glUniform4f(ctx.cam_params_loc, (float)f.tan_half, f.aspect_ratio, (float)f.planet_radius, (float)f.scale_height);
 	glUniform2f(ctx.viewport_loc, (float)f.width, (float)f.height);
 	glUniform1i(ctx.debug_lod_loc, f.debug_lod);
+	glUniform4f(ctx.clay_loc, ctx.clay_rgb[0], ctx.clay_rgb[1], ctx.clay_rgb[2], ctx.clay_on ? 1.0f : 0.0f);
+	Vector3f sun = f.sun_dir.cast<float>();
+	glUniform3fv(ctx.sun_dir_loc, 1, sun.data());
+	glUniform1f(ctx.ortho_half_loc, (float)f.ortho_half_extent);
 }
 
 inline void renderSetTransform(render_ctx_t &ctx, const float *m16) {
@@ -1187,6 +1195,9 @@ inline void renderInit(render_ctx_t &ctx) {
 	ctx.cam_loc = glGetUniformLocation(ctx.program, "cam");
 	ctx.eye_loc = glGetUniformLocation(ctx.program, "eye");
 	ctx.cam_params_loc = glGetUniformLocation(ctx.program, "cam_params");
+	ctx.clay_loc = glGetUniformLocation(ctx.program, "clay");
+	ctx.sun_dir_loc = glGetUniformLocation(ctx.program, "sun_dir");
+	ctx.ortho_half_loc = glGetUniformLocation(ctx.program, "ortho_half");
 	ctx.viewport_loc = glGetUniformLocation(ctx.program, "viewport");
 	ctx.shadow_mv_loc = glGetUniformLocation(ctx.program, "shadow_mv");
 	ctx.shadow_box_loc = glGetUniformLocation(ctx.program, "shadow_box");

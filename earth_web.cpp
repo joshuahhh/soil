@@ -316,6 +316,14 @@ struct EarthView {
 	// glGenerateMipmap rejects compressed textures), so pair this with ?jpg
 	// to actually see the difference
 	void setMipmaps(bool on) { ctx.mipmaps_on = on; }
+	// U key: every mesh one colour (0xrrggbb), lit, for the shapes alone
+	void setClay(bool on, int rgb) {
+		ctx.clay_on = on;
+		ctx.clay_rgb[0] = (rgb >> 16 & 0xff) / 255.0f;
+		ctx.clay_rgb[1] = (rgb >> 8 & 0xff) / 255.0f;
+		ctx.clay_rgb[2] = (rgb & 0xff) / 255.0f;
+		ctx.accum.samples = 0;
+	}
 
 	// --- test/profiling hooks -------------------------------------------
 	// the engine's own frame accounting, read back rather than only printed
@@ -996,6 +1004,7 @@ EMSCRIPTEN_BINDINGS(earth) {
 		.function("setLodScale", &EarthView::setLodScale)
 		.function("getLodScale", &EarthView::getLodScale)
 		.function("setMipmaps", &EarthView::setMipmaps)
+		.function("setClay", &EarthView::setClay)
 		.function("getStats", &EarthView::getStats)
 		.function("getDrawnNodes", &EarthView::getDrawnNodes)
 		.function("getPendingNodes", &EarthView::getPendingNodes)

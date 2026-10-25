@@ -1,6 +1,6 @@
 import { S } from './config.js';
 import { view, canvas } from './engine.js';
-import { saveView, miniature, mipmaps, mode, inTube, viewName, ortho, hug } from './view.js';
+import { saveView, miniature, mipmaps, clay, mode, inTube, viewName, ortho, hug } from './view.js';
 import { alignRefresh, photoShown } from './photo.js';
 import { tubeRect } from './tube.js';
 import { path } from './path.js';
@@ -76,6 +76,7 @@ const updateHint = () => {
     HINTS[viewName()],
     mipmaps ? '' : 'mipmaps off',
     miniature ? 'miniature' : '',
+    clay ? 'clay' : '',
     !inTube() && tubeRect ? 'rect drawn (T rolls it into a tube, B wraps it on a body)' : '',
   ].filter(Boolean).join(' · ');
   updateSpeed();
@@ -177,6 +178,7 @@ const keysFor = () => {
   if (mode !== 'tube' && mode !== 'body' && mode !== 'tunnel') viewRows.push([K('O'), ortho ? 'perspective' : 'orthographic']);
   if (mode === 'persp' && !tubeRect) viewRows.push([K('T'), 'tunnel']);
   viewRows.push([K('N'), miniature ? 'miniature off' : 'miniature (tilt-shift)']);
+  viewRows.push([K('U'), clay ? 'textures' : 'clay: one colour, lit']);
   if (!ortho) viewRows.push([K('H'), 'near cut']);
   viewRows.push([K('Y'), 'sky: time of day, haze, shadows']);
   viewRows.push([K('I'), 'glamour: refine a still frame']);
