@@ -484,11 +484,6 @@ struct earth_core_t {
 		path_cursor_on = true;
 	}
 
-	void setPathCursor(double lat, double lon, double alt) {
-		auto R = planetRadius();
-		path_cursor = geoUp(lat * M_PI / 180.0, lon * M_PI / 180.0) * (R + alt);
-		path_cursor_on = true;
-	}
 	void clearPathCursor() { path_cursor_on = false; }
 
 	void setPathStyle(float r, float g, float b, float alpha, float width, bool drape) {

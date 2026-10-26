@@ -504,7 +504,7 @@ to it are categorical:
   but the node set is identical, it's almost certainly new imagery.
 - **the tile-load badge** — `nodesLoaded/nodesWanted` on every shot.
 
-That second one matters more than it looks. `sceneComplete()` is not something
+That second one matters more than it looks. `getStats().sceneComplete` is not something
 you can simply wait on: a download that keeps failing resets its node to a
 *stub* rather than to a failed state (`setFailedDownloading` in
 [rocktree_types.h](./rocktree_types.h)), so it is retried forever and the flag

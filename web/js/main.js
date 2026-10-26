@@ -34,7 +34,8 @@ const initTestApi = () => {
     pendingNodes: () => view.ready() ? view.getPendingNodes() : [],
     // ms accumulated since the last call; reading resets it
     frameTiming: () => {
-      const r = { engineMs: frameTiming.engineMs, tickMs: frameTiming.tickMs, gapMs: frameTiming.gapMs, frames: frameCount };
+      const r = { engineMs: frameTiming.engineMs, tickMs: frameTiming.tickMs, gapMs: frameTiming.gapMs, frames: frameCount,
+        ...(view.ready() ? view.takeFrameTiming() : { frameMs: 0, beginMs: 0 }) };
       frameTiming.engineMs = frameTiming.tickMs = frameTiming.gapMs = 0;
       return r;
     },

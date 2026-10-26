@@ -124,7 +124,7 @@ for (;;) {
     + `  ${String(st.bulksBlocked).padStart(8)} ${String(st.bulksInflight).padStart(4)} ${String(st.bulksStarted).padStart(4)}`
     + `  ${String(fs_.inflight).padStart(10)} ${String(fs_.idbHits).padStart(3)} ${String(fs_.netHits).padStart(3)}`
     + ` ${String(fs_.failed).padStart(4)}  ${(nf / dtPoll).toFixed(0).padStart(4)}  ${per(ft.engineMs)}/${per(ft.tickMs)}/${per(ft.gapMs)}`
-    + `  engine: frame ${st.frameMs.toFixed(1)} = begin ${st.beginMs.toFixed(1)} bfs ${st.bfsMs.toFixed(1)} dl ${st.dlMs.toFixed(1)} evict ${st.evictMs.toFixed(1)} draw ${st.drawMs.toFixed(1)}`);
+    + `  engine: frame ${ft.frameMs.toFixed(1)} = begin ${ft.beginMs.toFixed(1)} bfs ${st.bfsMs.toFixed(1)} dl ${st.dlMs.toFixed(1)} evict ${st.evictMs.toFixed(1)} draw ${st.drawMs.toFixed(1)}`);
   stableRun = st.sceneComplete ? stableRun + 1 : 0;
   if (stableRun >= 3) { complete = true; break; }
   if (t * 1000 > timeoutMs) break;

@@ -51,7 +51,7 @@ const updatePickDebug = () => {
     pickMarker.setLngLat([pick.lon, pick.lat]);
     if (!pickMarkerOn) { pickMarker.addTo(map); pickMarkerOn = true; }
     document.getElementById('pickinfo').textContent =
-      `pick: ${pick.src} · dist ${Math.round(pick.dist)}m · alt ${Math.round(pick.alt)}m`;
+      `pick: dist ${Math.round(pick.dist)}m · alt ${Math.round(pick.alt)}m`;
   } else {
     if (pickMarkerOn) { pickMarker.remove(); pickMarkerOn = false; }
     document.getElementById('pickinfo').textContent = 'pick: miss';

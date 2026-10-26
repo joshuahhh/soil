@@ -107,21 +107,25 @@
   })();
   const saveCal = () => { try { localStorage.setItem('earth-ar', JSON.stringify(cal)); } catch (e) {} };
 
-  // --- module (same idb-cached fetch as the demo) ---------------------------
-  const db = await new Promise((res, rej) => {
-    const r = indexedDB.open('earth-cache', 1);
-    r.onupgradeneeded = () => r.result.createObjectStore('tiles');
-    r.onsuccess = () => res(r.result);
-    r.onerror = () => rej(r.error);
-  });
+  // --- module (reads the demo's tile cache) --------------------------------
+  // read-only and unversioned: the demo owns the schema and the size
+  // bookkeeping, so this page never upgrades or writes. until the open lands,
+  // or if the store isn't there, tiles come off the network
+  let db = null;
+  try {
+    const r = indexedDB.open('earth-cache');
+    r.onsuccess = () => {
+      db = r.result;
+      db.onversionchange = () => { db.close(); db = null; }; // don't block the demo's upgrade
+    };
+  } catch (e) {}
   const idbGet = (key) => new Promise((res) => {
-    const t = db.transaction('tiles').objectStore('tiles').get(key);
-    t.onsuccess = () => res(t.result);
-    t.onerror = () => res(undefined);
+    try {
+      const t = db.transaction('tiles').objectStore('tiles').get(key);
+      t.onsuccess = () => res(t.result);
+      t.onerror = () => res(undefined);
+    } catch (e) { res(undefined); }
   });
-  const idbPut = (key, bytes) => {
-    try { db.transaction('tiles', 'readwrite').objectStore('tiles').put(bytes, key); } catch (e) {}
-  };
   let Module;
   try {
     if (!crossOriginIsolated) {
@@ -151,7 +155,6 @@
         const resp = await fetch('https://kh.google.com/rt/earth/' + path);
         if (!resp.ok) throw new Error('http ' + resp.status);
         bytes = new Uint8Array(await resp.arrayBuffer());
-        if (path[0] !== 'P') idbPut(path, bytes);
       }
       Module.deliverFetch(id, true, bytes);
     } catch (e) {

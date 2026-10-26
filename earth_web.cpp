@@ -4,23 +4,10 @@
 // transport and caching.
 //
 // build: ./build.sh  ->  web/earth.js + web/earth.wasm
-// usage: see web/index.html
-//
-//   const Module = await createEarthModule();
-//   const view = Module.createView('#canvas', async (path, id) => {
-//     ...resolve bytes however you like (indexeddb, proxy, ...)...
-//     Module.deliverFetch(id, true, bytesUint8Array);
-//   });
-//   view.setPose(lat, lon, alt, heading, tilt);   // degrees/meters
-//   view.fly(yaw, pitch, roll, fwd, back, left, right, up, down, slow, viewFrame, gain, dtMs);
-//   view.frame(dtMs);                              // from requestAnimationFrame
-//   view.setOrtho(on);                             // orthographic projection
-//   view.setMiniature(on, strength, range);        // tilt-shift depth-of-field look
-//   view.orbit(headingDeg, tiltDeg);               // revolve around the screen-center point
-//   view.zoomOrtho(factor);                        // ortho zoom (boresight dolly), >1 zooms in
-//   view.pickCenter();                             // {lat,lon,alt,dist,src} under the crosshair, or null
-//   view.pickNdc(nx, ny);                          // the same pick through any viewport point (ndc, perspective only)
-//   view.planetRadius();                           // meters; the datum setPose's alt and the picks are measured from
+// host: web/js/engine.js creates the view; the full api is the binding list
+// at the bottom. setters only store, so they're safe any time. motion and
+// picks no-op (null) until ready(), and setPose before it measures from a
+// stand-in radius, so the host poses the camera once ready() turns true
 
 #include <fstream>
 #include <time.h>
@@ -95,7 +82,6 @@ struct EarthView {
 	};
 	earth_core_t earth;
 	EMSCRIPTEN_WEBGL_CONTEXT_HANDLE gl = 0;
-	int sky_color = 0x83b5fc;
 	// the host's lod scale; the engine gets it times clay_lod in clay mode,
 	// where nothing but the mesh shows and its coarsening is plain to see.
 	// 2^-1.5 is a level and a half finer: ~8x the tiles
@@ -130,7 +116,6 @@ struct EarthView {
 	}
 
 	bool ready() { return earth.ready(); }
-	bool sceneComplete() { return earth.scene_complete; }
 
 	// tube mode (the inception effect): roll a geodetic rectangle of terrain
 	// into a cylinder. corners in degrees, any order; ewAxis picks whether
@@ -269,13 +254,9 @@ struct EarthView {
 		earth.setPath(emscripten::convertJSArrayToNumberVector<double>(lla));
 	}
 	void clearPath() { earth.setPath({}); }
-	// mark one point of the track — where the follow camera is aiming — with
-	// a disc in the path's color. degrees/meters, alt from the sphere
-	void setPathCursor(double lat, double lon, double alt) {
-		earth.setPathCursor(lat, lon, alt);
-	}
-	// the same marker, placed by fractional point index so it lands on the
-	// drawn line itself rather than wherever the caller thinks the line is
+	// mark where the follow camera is aiming with a disc in the path's
+	// color, placed by fractional point index so it lands on the drawn line
+	// itself rather than wherever the caller thinks the line is
 	void setPathCursorIndex(double idx) { earth.setPathCursorIndex(idx); }
 	void clearPathCursor() { earth.clearPathCursor(); }
 	void setPathStyle(int rgb, double opacity, double width_px, bool drape) {
@@ -295,7 +276,6 @@ struct EarthView {
 		return earth.path_ground[i] - planetRadius();
 	}
 
-	void setSkyColor(int rgb) { sky_color = rgb; earth.sky_rgb = rgb; }
 	// the sun at the camera, degrees: azimuth clockwise from north, elevation
 	// above the horizon (negative at night)
 	void setSun(double az_deg, double el_deg) {
@@ -362,8 +342,6 @@ struct EarthView {
 		o.set("bulksBlocked", earth.stat.bulk_blocked);
 		o.set("bulksInflight", (int)earth.bulks_in_flight);
 		o.set("bulksStarted", earth.stat.bulks_started);
-		// per-frame averages since the last call (see frame)
-		o.set("frameMs", acc_frames ? acc_frame_ms / acc_frames : 0.0);
 		// gpu ms per frame by section, averaged over the last second (-1
 		// without the timer extension). total is their sum
 		auto &g = ctx.gpu;
@@ -374,6 +352,14 @@ struct EarthView {
 		o.set("gpuMs", g.ok ? g.avg[0] + g.avg[1] + g.avg[2] + g.avg[3] : -1.0);
 		o.set("accumSamples", ctx.accum.samples);
 		o.set("accumMax", glamour_samples);
+		return o;
+	}
+	// per-frame wall-clock averages since the last call, which resets them —
+	// so one reader only (tools/loadprof.mjs via __test.frameTiming); getStats
+	// is polled from several places and must stay free of side effects
+	val takeFrameTiming() {
+		val o = val::object();
+		o.set("frameMs", acc_frames ? acc_frame_ms / acc_frames : 0.0);
 		o.set("beginMs", acc_frames ? acc_begin_ms / acc_frames : 0.0);
 		acc_begin_ms = acc_frame_ms = 0; acc_frames = 0;
 		return o;
@@ -454,7 +440,7 @@ struct EarthView {
 		earth.ground_column_point = camera.eye;
 		// the clear colour (the tunnel down the heading dims it to black: see tunnelSkyDark)
 		auto dark = earth.tube.tunnelSkyDark(camera.eye);
-		auto sky = sky_color;
+		auto sky = earth.sky_rgb;
 		if (dark > 0) {
 			auto k = 1.0 - dark;
 			sky = (int)((sky >> 16 & 0xff) * k) << 16 | (int)((sky >> 8 & 0xff) * k) << 8 | (int)((sky & 0xff) * k);
@@ -649,7 +635,6 @@ struct EarthView {
 				earth.centerDistanceMesh(camera) * tan(camera.fov / 2.0));
 		clampOrthoTilt(camera);
 	}
-	bool getOrtho() { return camera.ortho; }
 
 	// the miniature look (see dof_gl_t): a depth-of-field blur around the
 	// crosshair distance. strength is the max blur radius as a fraction of
@@ -745,7 +730,6 @@ struct EarthView {
 		o.set("lon", atan2(hit.y(), hit.x()) * 180.0 / M_PI);
 		o.set("alt", r - planetRadius());
 		o.set("dist", (hit - camera.eye).norm());
-		o.set("src", std::string("mesh"));
 		return o;
 	}
 
@@ -941,12 +925,13 @@ void noteFetchPhase(int i, int phase) {
 	js_fetcher.notePhase(i, phase);
 }
 
-// pretend the gpu lacks s3tc (jpg textures); call before createView
+// call before createView: msaa is a context attribute
 void setAntialias(bool on) { g_antialias = on; }
 // per-tile decode timing to the console (?timing). off by default: it is a
 // line per node, and a settling view decodes hundreds of them
 void setLogTiming(bool on) { g_log_timing = on; }
 
+// pretend the gpu lacks s3tc (jpg textures); call before createView
 void forceJpgTextures() {
 	texture_s3tc_supported = false;
 }
@@ -955,7 +940,6 @@ EMSCRIPTEN_BINDINGS(earth) {
 	emscripten::class_<EarthView>("EarthView")
 		.function("frame", &EarthView::frame)
 		.function("ready", &EarthView::ready)
-		.function("sceneComplete", &EarthView::sceneComplete)
 		.function("getPose", &EarthView::getPose)
 		.function("setPose", &EarthView::setPose)
 		.function("setRoll", &EarthView::setRoll)
@@ -964,7 +948,6 @@ EMSCRIPTEN_BINDINGS(earth) {
 		.function("setNearCut", &EarthView::setNearCut)
 		.function("getNearCut", &EarthView::getNearCut)
 		.function("setOrtho", &EarthView::setOrtho)
-		.function("getOrtho", &EarthView::getOrtho)
 		.function("setMiniature", &EarthView::setMiniature)
 		.function("getOrthoExtent", &EarthView::getOrthoExtent)
 		.function("setAirplane", &EarthView::setAirplane)
@@ -993,12 +976,10 @@ EMSCRIPTEN_BINDINGS(earth) {
 		.function("getTubeInfo", &EarthView::getTubeInfo)
 		.function("setPath", &EarthView::setPath)
 		.function("clearPath", &EarthView::clearPath)
-		.function("setPathCursor", &EarthView::setPathCursor)
 		.function("setPathCursorIndex", &EarthView::setPathCursorIndex)
 		.function("clearPathCursor", &EarthView::clearPathCursor)
 		.function("setPathStyle", &EarthView::setPathStyle)
 		.function("getPathGroundAlt", &EarthView::getPathGroundAlt)
-		.function("setSkyColor", &EarthView::setSkyColor)
 		.function("setSun", &EarthView::setSun)
 		.function("setAtmosphere", &EarthView::setAtmosphere)
 		.function("setGlamour", &EarthView::setGlamour)
@@ -1013,6 +994,7 @@ EMSCRIPTEN_BINDINGS(earth) {
 		.function("setMipmaps", &EarthView::setMipmaps)
 		.function("setClay", &EarthView::setClay)
 		.function("getStats", &EarthView::getStats)
+		.function("takeFrameTiming", &EarthView::takeFrameTiming)
 		.function("getDrawnNodes", &EarthView::getDrawnNodes)
 		.function("getPendingNodes", &EarthView::getPendingNodes)
 		.function("fly", &EarthView::fly);

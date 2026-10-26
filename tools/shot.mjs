@@ -70,9 +70,14 @@ if (!errors.length) {
   await fs.writeFile(out, Buffer.from(uri.split(',')[1], 'base64'));
 }
 // the gpu timings are a second's average, read back frames late: give
-// them two seconds of frames at the pose before reading
+// them two seconds of frames at the pose before reading (the cpu frame time
+// is averaged over the same two seconds, from the reset here)
+await page.evaluate(() => window.__test && window.__test.frameTiming()).catch(() => null);
 if (!errors.length) await page.waitForTimeout(2200);
-const st = await page.evaluate(() => window.__test && window.__test.stats()).catch(() => null);
+const st = await page.evaluate(() => {
+  const s = window.__test && window.__test.stats();
+  return s && { ...s, ...window.__test.frameTiming() };
+}).catch(() => null);
 console.log(`${path.basename(out)}: ${settled.complete ? 'complete' : 'INCOMPLETE'}`
   + (st ? ` ${st.nodesLoaded}/${st.nodesWanted} tiles, ${st.nodesDrawn} drawn, frame ${st.frameMs.toFixed(1)} ms cpu` : '')
   + (st && st.gpuMs >= 0 ? `, ${st.gpuMs.toFixed(2)} ms gpu (shadow ${st.gpuShadowMs.toFixed(2)}, scene ${st.gpuSceneMs.toFixed(2)},`
