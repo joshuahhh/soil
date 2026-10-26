@@ -96,6 +96,12 @@ struct EarthView {
 	earth_core_t earth;
 	EMSCRIPTEN_WEBGL_CONTEXT_HANDLE gl = 0;
 	int sky_color = 0x83b5fc;
+	// the host's lod scale; the engine gets it times clay_lod in clay mode,
+	// where nothing but the mesh shows and its coarsening is plain to see.
+	// 2^-1.5 is a level and a half finer: ~8x the tiles
+	double lod_scale = 1.0;
+	static constexpr double clay_lod = 0.35355339059327373;
+	void applyLod() { earth.lod_scale = lod_scale * (ctx.clay_on ? clay_lod : 1.0); }
 
 	void init(const std::string &canvas_selector) {
 		EmscriptenWebGLContextAttributes attr;
@@ -309,8 +315,8 @@ struct EarthView {
 	// quarter of the tiles. the pixel budget of a view is the whole story on
 	// how long it takes to arrive, so this is the knob that decides whether a
 	// deep zoom settles in seconds or minutes
-	void setLodScale(double s) { earth.lod_scale = s > 0.05 ? s : 0.05; }
-	double getLodScale() { return earth.lod_scale; }
+	void setLodScale(double s) { lod_scale = s > 0.05 ? s : 0.05; applyLod(); }
+	double getLodScale() { return lod_scale; }
 	// M key: mipmaps + anisotropy on the uncompressed texture path. the dxt
 	// path has no mip chain to switch to (crn ships a single level and
 	// glGenerateMipmap rejects compressed textures), so pair this with ?jpg
@@ -323,6 +329,7 @@ struct EarthView {
 		ctx.clay_rgb[1] = (rgb >> 8 & 0xff) / 255.0f;
 		ctx.clay_rgb[2] = (rgb & 0xff) / 255.0f;
 		ctx.accum.samples = 0;
+		applyLod();
 	}
 
 	// --- test/profiling hooks -------------------------------------------
