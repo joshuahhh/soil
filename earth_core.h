@@ -42,6 +42,8 @@ struct earth_core_t {
 		int nodes_stub = 0, nodes_stuck = 0, bulk_blocked = 0, max_level = 0;
 		int nodes_failed = 0, bulks_started = 0;
 		int nodes_shadow = 0; // of the wanted, those kept only to cast shadows
+		// the last map: focus, half size, texel (m), depth range
+		double shadow_fit[4] = {0, 0, 0, 0};
 	};
 	download_stats_t stat;
 	// draw n-times coarser than the standard target. the web shell sets it
@@ -1674,7 +1676,10 @@ struct earth_core_t {
 			y0 = fmin(y0, c.dot(sy)); y1 = fmax(y1, c.dot(sy));
 			z0 = fmin(z0, c.dot(L)); z1 = fmax(z1, c.dot(L));
 		}
-		auto half = 0.5 * fmax(x1 - x0, y1 - y0);
+		// the margin keeps the frustum clear of the shader's fade over the
+		// map's outer 4%, which the frustum's eye end touched as a zoom
+		// filled each size step: the shadows under the camera faded and snapped back
+		auto half = 0.5 * fmax(x1 - x0, y1 - y0) / 0.9;
 		half = pow(2.0, ceil(log2(half) * 8.0) / 8.0);
 		s.texel_m = 2.0 * half / shadow_size;
 		auto jx = sample ? glamour.shadow_x : 0.0, jy = sample ? glamour.shadow_y : 0.0;
@@ -1703,6 +1708,7 @@ struct earth_core_t {
 			auto &L = s.L, &sx = s.sx, &sy = s.sy, &O = s.O;
 			auto half = s.half;
 			shadow_texel_m = s.texel_m;
+			stat.shadow_fit[0] = shadow_focus; stat.shadow_fit[1] = half; stat.shadow_fit[2] = s.texel_m; stat.shadow_fit[3] = s.far;
 			for (int k = 0; k < 3; k++) { sun_view(0, k) = sx[k]; sun_view(1, k) = sy[k]; sun_view(2, k) = L[k]; }
 			sun_view(0, 3) = -sx.dot(O); sun_view(1, 3) = -sy.dot(O); sun_view(2, 3) = -L.dot(O);
 			shadow_box_f[0] = shadow_box_f[1] = (float)half;

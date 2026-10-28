@@ -449,6 +449,7 @@ struct EarthView {
 		o.set("nodesWanted", earth.stat.nodes_wanted);
 		o.set("nodesLoaded", earth.stat.nodes_loaded);
 		o.set("nodesShadowOnly", earth.stat.nodes_shadow);
+		o.set("shadowFit", val::array(std::vector<double>(earth.stat.shadow_fit, earth.stat.shadow_fit + 4)));
 		o.set("nodesDrawn", (int)earth.drawn_nodes.size());
 		o.set("sceneComplete", earth.scene_complete);
 		// the rest of the download picture (the 2s "tiles:" console line)
