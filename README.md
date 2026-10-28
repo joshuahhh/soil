@@ -276,7 +276,7 @@ from the sky colour and the sun's height — warm near the horizon, dim past
 it — so the ground fades into the sky it is under. The sun itself is the
 NOAA low-precision position from the date, computed on the page.
 
-**Sun shadows** (the `shadows` row on the same panel) are a 4096² depth map rendered from the sun over what is drawn,
+**Sun shadows** (the `shadows` row on the same panel) are a 4096² depth map rendered from the sun over the casters,
 fitted to the near part of the view — the frustum out to a couple of times
 the distance to the terrain under the crosshair, at most 40 km — with its
 size quantized and its centre snapped to whole texels, so it doesn't crawl
@@ -286,8 +286,19 @@ normal offset, and adds a facing term from the screen-space normal, relative
 to flat ground: only faces actually turned from the sun darken — walls, the
 far side of a ridge — so mountains get relief from the real sun direction
 everywhere, not just inside the map's box. The shade is lit by the sky, so
-it goes a little blue. Casters must be drawn to cast: a tower behind the
-camera, out of the frustum, casts nothing.
+it goes a little blue.
+
+The casters are chosen by where shadows land, not by what is on screen, so a
+shadow doesn't change as its tower leaves the frame. After the view's own walk,
+a second pass keeps whatever lies between that walk's surface (inside the
+map's reach) and the sun: the box around it in the sun's frame, stretched to
+the map's near plane 8 km toward the sun. Those tiles go into the map only,
+at the view's level of detail but no finer than two map texels. Each tile
+carries two octant masks, so a caster's tile hides its parent's octant in the
+map without cutting a hole in the picture. At a low sun this is a lot of tiles:
+at 15° over midtown, about 80% more than the view alone (10% in clay mode,
+which already draws finer). `getStats().nodesShadowOnly` counts them. They
+download behind what's on screen.
 
 Two things the photogrammetry does to it. Its water is bumpy (reflections
 defeat the stereo matching), so a low sun picks out facets and blobs on a

@@ -95,8 +95,14 @@ struct rocktree_t {
 		int level; // full path length
 		int octant; // the path's last digit
 		// the octants a drawn child covers, written children first by the
-		// draw list (render thread only)
-		uint8_t mask = 0;
+		// draw list (render thread only): in the colour pass, and in the
+		// shadow pass, where a caster kept only for the shadow map covers
+		// too
+		uint8_t mask = 0, shadow_mask = 0;
+		// the walk kept it only to cast into the shadow map (see walk)
+		bool shadow_only = false;
+		// when the walk last kept it (render thread only)
+		double kept_ms = 0;
 
 		float meters_per_texel;
 		OrientedBoundingBox obb;

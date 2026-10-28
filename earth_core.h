@@ -41,6 +41,7 @@ struct earth_core_t {
 		// nothing answered
 		int nodes_stub = 0, nodes_stuck = 0, bulk_blocked = 0, max_level = 0;
 		int nodes_failed = 0, bulks_started = 0;
+		int nodes_shadow = 0; // of the wanted, those kept only to cast shadows
 	};
 	download_stats_t stat;
 	// draw n-times coarser than the standard target. the web shell sets it
@@ -82,6 +83,24 @@ struct earth_core_t {
 	double shadow_strength = 0.45;
 	static constexpr int shadow_size = 4096;
 	double shadow_focus = 0; // metres to the terrain under the crosshair, refreshed when the camera moves
+	double sun_soft = 0; // glamour's sun disc radius (radians), which the walk's casters allow for
+	static constexpr double caster_texels = 2; // how coarse an off-screen caster may be, in map texels
+	// the map's box (see shadowFit): square across the sun (sx, sy) about
+	// O, and along it from shadow_near (toward the sun) to far. not live
+	// without shadows
+	static constexpr double shadow_near = -8000.0;
+	struct shadow_fit_t {
+		bool live = false;
+		Vector3d L = Vector3d::Zero(), sx = Vector3d::Zero(), sy = Vector3d::Zero(), O = Vector3d::Zero();
+		double half = 0, texel_m = 1, far = 0;
+		// the frustum it is fitted to: its box in the sun's frame (along
+		// sx, sy, L) and how deep it reaches along the view
+		Vector3d lo = Vector3d::Zero(), hi = Vector3d::Zero();
+		double depth = 0;
+		bool operator==(const shadow_fit_t &o) const {
+			return live == o.live && half == o.half && far == o.far && L == o.L && O == o.O;
+		}
+	};
 	// what the last shadow map was rendered from: when none of it has
 	// changed it is still right, and the pass is skipped
 	Vector3d shadow_key_l = Vector3d::Zero(), shadow_key_o = Vector3d::Zero();
@@ -344,20 +363,27 @@ struct earth_core_t {
 	bool walk_cache_valid = false;
 	// what the cached walk was made from: the unmoved camera's
 	// view-projection and eye, the viewport, the tree, the lod scale,
-	// whether the ground column was on and the export rect
+	// whether the ground column was on, the export rect and the shadow
+	// map's box
 	struct walk_key_t {
 		Matrix4d vp = Matrix4d::Zero();
 		Vector3d eye = Vector3d::Zero();
 		int w = 0, h = 0, epoch = -1, export_epoch = -1;
 		double lod = 0;
 		bool column = false;
+		shadow_fit_t fit;
+		double soft = 0;
 		bool operator==(const walk_key_t &o) const {
 			return epoch == o.epoch && w == o.w && h == o.h && lod == o.lod
 				&& column == o.column && export_epoch == o.export_epoch
-				&& eye == o.eye && vp == o.vp;
+				&& eye == o.eye && vp == o.vp
+				&& fit == o.fit && soft == o.soft;
 		}
 	};
 	walk_key_t walk_key;
+	// the last walk's caster box (see casterPlanes), if it had one
+	std::array<Vector4d, 6> caster_planes;
+	bool caster_planes_live = false;
 
 	// per-section frame timing (ms) and bfs work counters
 	struct section_stats_t {
@@ -761,6 +787,8 @@ struct earth_core_t {
 		// the lens offset (glamour mode): the eye steps sideways on the
 		// aperture and turns to keep the focus point on the boresight
 		auto key_view = lookAt(eye, eye + direction, up); // the unmoved camera, for the walk's cache key
+		Vector3d key_right = direction.cross(up).normalized();
+		Vector3d key_up = key_right.cross(direction).normalized();
 		if ((glamour.lens_x != 0 || glamour.lens_y != 0) && lens_focus > 0) {
 			Vector3d right = direction.cross(up).normalized();
 			Vector3d cup = right.cross(direction).normalized();
@@ -842,6 +870,7 @@ struct earth_core_t {
 		f.tan_half = tan(cam.fov / 2.0);
 		f.aspect_ratio = aspect_ratio;
 		f.viewprojection = viewprojection; f.key_vp = key_vp;
+		f.key_eye = cam.eye; f.key_direction = cam.direction; f.key_right = key_right; f.key_up = key_up;
 		f.tube = tube.on;
 		f.debug_lod = debug_lod;
 		return f;
@@ -893,12 +922,48 @@ struct earth_core_t {
 		next_want = std::move(nw);
 	}
 
+	// where the walk's casters are: whatever is between the colour pass's
+	// surface in the map's reach and the sun, as far as the map's near
+	// plane, at most the box of the frustum the map is fitted to. (the
+	// map's own box is square and spans the frustum's air too: at a low
+	// sun, casting from all of it costs a few times what the view does.)
+	// a box in the sun's frame, as planes (inside: n.p + d >= 0), grown by
+	// how far glamour's sun and texel jitter move the map. false when
+	// nothing in reach can be shaded
+	bool casterPlanes(const shadow_fit_t &fit, const std::vector<const OrientedBoundingBox *> &surface,
+			const Vector3d &eye, const Vector3d &direction, std::array<Vector4d, 6> &planes) const {
+		Vector3d lo = Vector3d::Constant(INFINITY), hi = Vector3d::Constant(-INFINITY);
+		for (auto obb : surface) {
+			if ((obb->center - eye).dot(direction) - obb->extents.norm() > fit.depth) continue;
+			Vector3d a, b;
+			for (int k = 0; k < 3; k++) {
+				auto &ax = k == 0 ? fit.sx : k == 1 ? fit.sy : fit.L;
+				auto c = obb->center.dot(ax), e = obb->extents.dot((obb->orientation.transpose() * ax).cwiseAbs());
+				a[k] = fmax(c - e, fit.lo[k]); b[k] = fmin(c + e, fit.hi[k]);
+			}
+			if (!(a.array() <= b.array()).all()) continue;
+			lo = lo.cwiseMin(a); hi = hi.cwiseMax(b);
+		}
+		if (!(lo.array() < hi.array()).all()) return false;
+		hi.z() = fit.O.dot(fit.L) - shadow_near;
+		auto pad = sun_soft * (hi.z() - lo.z()) + 2.0 * fit.texel_m;
+		auto plane = [](const Vector3d &n, double d) { return Vector4d(n.x(), n.y(), n.z(), d); };
+		planes = {
+			plane(fit.sx, pad - lo.x()), plane(-fit.sx, hi.x() + pad),
+			plane(fit.sy, pad - lo.y()), plane(-fit.sy, hi.y() + pad),
+			plane(fit.L, pad - lo.z()), plane(-fit.L, hi.z() + pad),
+		};
+		return true;
+	}
+
 	// node culling and level of detail: a breadth-first walk of the tree
 	// that stamps what the view wants and collects the nodes and bulks it
 	// wants and doesn't have — or, when nothing it depends on has moved,
 	// last frame's answer, re-stamped. true when no bulk it needed was
-	// missing
-	bool walk(const frame_t &f, const camera_t &cam, double now_ms) {
+	// missing. then, with shadows, a second pass keeps what can cast onto
+	// the first's tiles in the shadow map's reach (see casterPlanes),
+	// wherever the camera looks, to draw into the map only (shadow_only)
+	bool walk(const frame_t &f, const camera_t &cam, double now_ms, const shadow_fit_t &fit) {
 		auto &eye = f.eye, &direction = f.direction;
 		auto &viewprojection = f.viewprojection;
 		auto width = f.width, height = f.height;
@@ -915,7 +980,7 @@ struct earth_core_t {
 		// is last frame's walk still the answer? (see the members)
 		auto epoch = g_tree_epoch.load();
 		auto cacheable = !tube.on && !tube.tunnel_on;
-		walk_key_t key = { f.key_vp, cam.eye, width, height, epoch, export_epoch, lod_scale, ground_column_on };
+		walk_key_t key = { f.key_vp, cam.eye, width, height, epoch, export_epoch, lod_scale, ground_column_on, fit, sun_soft };
 		auto reuse = cacheable && walk_cache_valid && walk_key == key;
 		walk_reused = reuse;
 		if (reuse) {
@@ -931,6 +996,10 @@ struct earth_core_t {
 		stat.bulk_blocked = 0; // counted over this frame's walk only
 
 		auto frustum_planes = getFrustumPlanes(viewprojection); // for obb culling
+
+		auto &cast_planes = caster_planes;
+		caster_planes_live = false;
+		auto caster_mpt = caster_texels * fit.texel_m;
 
 		// the down-ray of the terrain-hug ground column (cast from above any
 		// building, like groundRadiusUnder's)
@@ -949,6 +1018,11 @@ struct earth_core_t {
 		std::vector<rocktree_t::node_t *> valid = { nullptr };
 		decltype(valid) next_valid;
 		std::vector<double> next_want; // tube mode: potential_want's counterpart for next_valid
+		decltype(valid) kept; // every node the colour pass kept, and the root
+		// the colour pass's surface: where it stopped descending in view, a
+		// tile too fine to want (its parent is drawn there), or the end of
+		// the tree or of what it has
+		std::vector<const OrientedBoundingBox *> surface;
 
 		auto potential_bulk_count = 0;
 		bool all_loaded = true;
@@ -960,9 +1034,12 @@ struct earth_core_t {
 		size_t export_count = 0, export_level_count = 0;
 		stat_export_capped = false;
 
-		// node culling and level of detail using breadth-first search
+		// node culling and level of detail using breadth-first search: the
+		// colour pass, then the casters' from where it ends
+		auto casters = false;
 		for (;;) {
 			auto level_pot_start = potential_nodes.size();
+			if (!casters) kept.insert(kept.end(), valid.begin(), valid.end());
 			if (export_floor_open && export_count + 4 * export_level_count > export_node_cap) {
 				export_floor_open = false;
 				stat_export_capped = true;
@@ -971,44 +1048,58 @@ struct earth_core_t {
 			for(auto cur : valid) {
 				auto bulk = cur ? cur->parent : planetoid->root_bulk;
 				auto children = cur ? cur->children : bulk->children;
+				// the colour pass already counted this one's bulks
+				auto seen = casters && (!cur || !cur->shadow_only);
 
 				if (cur && cur->level % 4 == 0) {
 					auto b = cur->child_bulk;
-					if (!b) continue;
-					b->last_wanted_ms = now_ms;
-					walk_bulks.push_back(b);
-					if (b->dl_state == dl_state_stub) {
-						// ranked and issued after the walk, like nodes. the
-						// yardstick is the node this bulk hangs under — the
-						// subtree's own apparent size — so the bulks under
-						// what you are looking at resolve first and the view
-						// refines outward from there instead of every subtree
-						// in the frustum competing at once
-						double pri = 1e300;
-						auto radius = cur->obb.extents.norm();
-						auto dist = fmax(0.0, (cur->obb.center - eye).norm() - radius);
-						if (radius > 0) pri = dist / (2 * radius);
-						to_download_bulks.push_back({ pri, (size_t)cur->level, b });
+					if (!b) {
+						if (!casters) surface.push_back(&cur->obb);
+						continue;
+					}
+					if (!seen) {
+						b->last_wanted_ms = now_ms;
+						walk_bulks.push_back(b);
+						if (b->dl_state == dl_state_stub) {
+							// ranked and issued after the walk, like nodes. the
+							// yardstick is the node this bulk hangs under — the
+							// subtree's own apparent size — so the bulks under
+							// what you are looking at resolve first and the view
+							// refines outward from there instead of every subtree
+							// in the frustum competing at once
+							double pri = 1e300;
+							auto radius = cur->obb.extents.norm();
+							auto dist = fmax(0.0, (cur->obb.center - eye).norm() - radius);
+							if (radius > 0) pri = dist / (2 * radius);
+							to_download_bulks.push_back({ pri, (size_t)cur->level, b });
+						}
 					}
 					if (b->dl_state != dl_state_downloaded) {
 						// the walk cannot see past a bulk it doesn't have: this
 						// is a whole 4-level subtree that stays coarse until it
 						// lands, which is what a deep zoom is waiting on
-						stat.bulk_blocked++;
+						if (!seen) stat.bulk_blocked++;
+						if (!casters) surface.push_back(&cur->obb);
 						all_loaded = false;
 						continue;
 					}
 					bulk = b;
 					children = b->children;
 				}
-				bulk->last_wanted_ms = now_ms;
-				walk_bulks.push_back(bulk);
-				potential_bulk_count++;
+				if (!seen) {
+					bulk->last_wanted_ms = now_ms;
+					walk_bulks.push_back(bulk);
+					potential_bulk_count++;
+				}
+				// the end of the tree: all of it is drawn here
+				if (!casters && cur && std::all_of(children, children + 8, [](auto c) { return !c; }))
+					surface.push_back(&cur->obb);
 
 				for (auto o = 0; o < 8; o++) {
 					sec.oct++;
 					auto node = children[o];
 					if (!node) continue;
+					if (casters && node->kept_ms == now_ms) continue; // the colour pass's
 
 					// cull outside frustum using obb
 					// todo: check if it could cull more
@@ -1016,10 +1107,10 @@ struct earth_core_t {
 					// ground-column nodes skip culling and the lod cutoff:
 					// the ground query wants the finest mesh under the
 					// camera regardless of where the view points
-					auto in_column = ground_column_on
+					auto in_column = !casters && ground_column_on
 						&& rayHitsObb(col_origin, col_dir, node->obb, INFINITY);
 					// the export rect, likewise wanted whatever the view
-					auto in_export = export_on && exportRectTouches(node->obb);
+					auto in_export = !casters && export_on && exportRectTouches(node->obb);
 					auto tn = tube.walkNode(node->obb);
 					// tube mode culls against the rect, not the view: the
 					// whole slab is drawn wherever the camera looks. body
@@ -1029,7 +1120,14 @@ struct earth_core_t {
 					// wrapped) or is in view (drawn flat); a straddler is
 					// drawn both ways
 					auto in_view = false;
-					if (in_column || in_export) {
+					if (casters) {
+						// a caster needn't be finer than the map's texel, which
+						// is all of it the map can hold: past that, its parent
+						// casts. (one under a caster stays a caster, even on
+						// screen: the colour pass draws an ancestor in its place)
+						if (cur && cur->meters_per_texel <= caster_mpt) continue;
+						if (obb_frustum_outside == classifyObbFrustum(&node->obb, cast_planes)) continue;
+					} else if (in_column || in_export) {
 					} else if (tube.on && !tube.body) {
 						if (!tn.in_rect) continue;
 					} else {
@@ -1091,12 +1189,17 @@ struct earth_core_t {
 							r = (2.0*(1.0/s)) * wh * zoom;
 						}
 						r /= lod_scale;
-						if (texels_per_meter > r) continue;
+						if (texels_per_meter > r) {
+							if (!casters) surface.push_back(&node->obb);
+							continue;
+						}
 						// how far past its target this node was requested,
 						// scale-free (1 = barely wanted)
 						tube_want = r * node->meters_per_texel;
 					}
 
+					node->shadow_only = casters;
+					node->kept_ms = now_ms;
 					next_valid.push_back(node);
 					if (tube.on) next_want.push_back(tube_want);
 
@@ -1110,7 +1213,12 @@ struct earth_core_t {
 					}
 				}
 			}
-			if (next_valid.size() == 0) break;
+			if (next_valid.size() == 0) {
+				if (casters || !fit.live || !casterPlanes(fit, surface, eye, direction, cast_planes)) break;
+				casters = caster_planes_live = true;
+				valid = kept;
+				continue;
+			}
 			if (tube.on) {
 				tubeNodeBackstop(level_pot_start, next_valid, next_want);
 				if (next_valid.size() == 0) break;
@@ -1181,9 +1289,10 @@ struct earth_core_t {
 		std::vector<candidate_t> to_download;
 		stat.nodes_wanted = (int)potential_nodes.size();
 		stat.nodes_loaded = stat.nodes_stub = stat.nodes_stuck = 0;
-		stat.nodes_failed = stat.max_level = 0;
+		stat.nodes_failed = stat.max_level = stat.nodes_shadow = 0;
 		pending_nodes.clear();
 		for (auto node : potential_nodes) {
+			if (node->shadow_only) stat.nodes_shadow++;
 			if (node->level > stat.max_level) stat.max_level = node->level;
 			if (node->dl_state != dl_state_downloaded) {
 				all_loaded = false;
@@ -1199,8 +1308,10 @@ struct earth_core_t {
 			auto radius = node->obb.extents.norm();
 			auto dist = fmax(0.0, (node->obb.center - eye).norm() - radius);
 			// (in tube mode the walk measured the distance through the
-			// roll, which is what proximity means there)
-			to_download.push_back({ tube.on ? node->sched_pri : dist / (2 * radius), (size_t)node->level, node });
+			// roll, which is what proximity means there.) a caster off
+			// screen waits behind what is on it the same apparent size
+			auto pri = tube.on ? node->sched_pri : dist / (2 * radius);
+			to_download.push_back({ node->shadow_only ? 2.0 * pri : pri, (size_t)node->level, node });
 		}
 		std::sort(to_download.begin(), to_download.end(), [](const candidate_t &a, const candidate_t &b) {
 			// tiles containing the camera all have priority 0; coarse first there
@@ -1355,17 +1466,23 @@ struct earth_core_t {
 
 	static double smooth(double a, double b, double x) { x = fmin(1.0, fmax(0.0, (x - a) / (b - a))); return x * x * (3 - 2 * x); }
 
+	// straight up, east and the sun at the eye
+	void sunFrame(const Vector3d &eye, Vector3d &local_up, Vector3d &east, Vector3d &sun_dir) const {
+		local_up = eye.normalized();
+		east = Vector3d::UnitZ().cross(local_up);
+		if (east.norm() < 1e-6) east = Vector3d::UnitX(); else east.normalize();
+		Vector3d north = local_up.cross(east);
+		sun_dir = cos(sun_el) * (sin(sun_az) * east + cos(sun_az) * north) + sin(sun_el) * local_up;
+	}
+
 	// the atmosphere's colours this frame: the sun in the eye's local
 	// frame, the haze and the ground's tint from its height, and the
 	// horizon and limb the sky pass draws
 	void setAtmosphere(frame_t &f) {
 		auto &eye = f.eye;
 		auto planet_radius = planetRadius();
-		Vector3d local_up = eye.normalized();
-		Vector3d east = Vector3d::UnitZ().cross(local_up);
-		if (east.norm() < 1e-6) east = Vector3d::UnitX(); else east.normalize();
-		Vector3d north = local_up.cross(east);
-		Vector3d sun_dir = cos(sun_el) * (sin(sun_az) * east + cos(sun_az) * north) + sin(sun_el) * local_up;
+		Vector3d local_up, east, sun_dir;
+		sunFrame(eye, local_up, east, sun_dir);
 		auto low = 1.0 - smooth(0.0, 25.0 * M_PI / 180.0, sun_el); // 1 at the horizon, 0 at 25° up
 		auto day = smooth(-8.0 * M_PI / 180.0, 3.0 * M_PI / 180.0, sun_el); // 0 at night, 1 by day
 		auto bright = 0.1 + 0.9 * day;
@@ -1392,19 +1509,26 @@ struct earth_core_t {
 		f.horizon_dip = dip; f.sky_amount = sky_amount; f.limb = fmax(limb, 1e-3);
 	}
 
-	struct draw_t { rocktree_t::node_t *node; uint8_t self_mask; uint32_t stale_mask; };
+	// a node in the colour pass (color) and the shadow pass, each with its
+	// own octant mask (0xff: not in that pass)
+	struct draw_t { rocktree_t::node_t *node; uint8_t self_mask, shadow_mask; bool color; uint32_t stale_mask; };
 
 	// what this frame draws: the downloaded part of the potential set, read
 	// children first so that a node's octant mask (the octants a drawn
-	// child covers) is complete by the time the node comes up. buffers
-	// whatever isn't on the gpu yet, and refreshes drawn_nodes
+	// child covers) is complete by the time the node comes up. a caster
+	// kept only for the shadow map covers its parent's octant there but
+	// not in the colour pass, which would be left with a hole. buffers
+	// whatever isn't on the gpu yet, and refreshes drawn_nodes (the colour
+	// pass's)
 	std::vector<draw_t> buildDrawList(render_ctx_t &ctx, const frame_t &f) {
 		// 8-bit octant mask flags of nodes, filled in from the children
-		for (auto node : potential_nodes) node->mask = 0;
+		for (auto node : potential_nodes) node->mask = node->shadow_mask = 0;
 
 		// potential-set membership, only needed for lod debug tinting
 		std::unordered_set<rocktree_t::node_t *> potential_set;
-		if (debug_lod) potential_set.insert(potential_nodes.begin(), potential_nodes.end());
+		if (debug_lod)
+			for (auto node : potential_nodes)
+				if (!node->shadow_only) potential_set.insert(node);
 
 		// for leaving the export rect's off-screen nodes out (below)
 		auto frustum_planes = getFrustumPlanes(f.viewprojection);
@@ -1422,23 +1546,34 @@ struct earth_core_t {
 
 
 			// set octant mask of previous node
-			if (node->up) node->up->mask |= 1 << node->octant;
+			if (node->up) {
+				node->up->shadow_mask |= 1 << node->octant;
+				if (!node->shadow_only) node->up->mask |= 1 << node->octant;
+			}
 
-			// skip if node is masked completely
-			auto self_mask = node->mask;
-			if (self_mask == 0xff) continue;
+			// skip if node is masked completely (the shadow mask covers
+			// at least what the colour mask does)
+			auto color = !node->shadow_only;
+			auto self_mask = color ? node->mask : (uint8_t)0xff;
+			auto shadow_mask = node->shadow_mask;
+			if (shadow_mask == 0xff) continue;
 			// a tile too coarse for the tunnel to roll leaves a hole (see
 			// tunnelTooCoarse). the parent's mask bit is already set above,
 			// so no ancestor fills the hole with its own slab
 			if (tube.tunnelTooCoarse(node)) continue;
 			// the export rect's nodes are wanted off screen too, but only
 			// to be resident: drawing them there is thousands of draw calls
-			// for nothing. (outside tube mode — rolled, a node's place on
-			// screen isn't its obb's)
+			// for nothing, unless they can cast into the map. (outside tube
+			// mode — rolled, a node's place on screen isn't its obb's)
 			if (node->export_walk_ms > 0 && !tube.on
-				&& obb_frustum_outside == classifyObbFrustum(&node->obb, frustum_planes)) continue;
+				&& obb_frustum_outside == classifyObbFrustum(&node->obb, frustum_planes)) {
+				if (!caster_planes_live
+					|| obb_frustum_outside == classifyObbFrustum(&node->obb, caster_planes)) continue;
+				color = false;
+			}
 
-			drawn_nodes.push_back({ node, self_mask });
+			if (color && self_mask != 0xff) drawn_nodes.push_back({ node, self_mask });
+			else color = false;
 
 			// octants where a finer tile is wanted but not drawn, and why:
 			// three bits per octant saying where that tile's request is
@@ -1469,7 +1604,7 @@ struct earth_core_t {
 			}
 			for (auto &mesh : node->meshes)
 				if (!mesh.buffered) { bufferMesh(mesh, ctx); uploads_this_frame++; }
-			draws.push_back({ node, self_mask, stale_mask });
+			draws.push_back({ node, self_mask, shadow_mask, color, stale_mask });
 		}
 		return draws;
 	}
@@ -1485,78 +1620,102 @@ struct earth_core_t {
 	};
 
 	// --- sun shadows -------------------------------------------------
-	// a depth map from the sun over what is drawn, fitted to the near
-	// part of the view: the frustum from the near plane out to a few
-	// times the distance to the terrain under the crosshair. the box is
-	// square in the sun's frame, its size quantized and its centre
-	// snapped to whole texels, so the map doesn't crawl as the camera
-	// moves; depth runs from 8 km toward the sun (the casters: towers,
-	// ridges) to just past the frustum. nothing changed since the last
-	// map (a still camera, no new tiles, the same sun) and it is reused
-	shadow_t shadowPass(render_ctx_t &ctx, const frame_t &f, const camera_t &cam,
-			const std::vector<draw_t> &draws) {
-		auto &eye = f.eye, &direction = f.direction, &right = f.right, &cam_up = f.cam_up;
+	// a depth map from the sun over the casters (the walk keeps what can
+	// shade the view's surface, on screen or not: see casterPlanes),
+	// fitted to the near part of the view: the frustum from the near plane out to a few times the
+	// distance to the terrain under the crosshair. the box is square in
+	// the sun's frame, its size quantized and its centre snapped to whole
+	// texels, so the map doesn't crawl as the camera moves; depth runs
+	// from 8 km toward the sun (the casters: towers, ridges) to just past
+	// the frustum. nothing changed since the last map (a still camera, no
+	// new tiles, the same sun) and it is reused
+	bool shadowsLive() const { return shadows_on && !tube.on && sun_el > 0.5 * M_PI / 180.0; }
+
+	// the box for this frame's camera and sun: for a glamour sample
+	// (jittered) or, for the walk, the unmoved camera's
+	shadow_fit_t shadowFit(const frame_t &f, const camera_t &cam, bool sample) {
+		shadow_fit_t s;
+		s.live = shadowsLive();
+		if (!s.live) return s;
+		if (shadow_focus <= 0) shadow_focus = fmax(1.0, centerDistanceMesh(cam));
+		auto &eye = sample ? f.eye : f.key_eye, &direction = sample ? f.direction : f.key_direction;
+		auto &right = sample ? f.right : f.key_right, &cam_up = sample ? f.cam_up : f.key_up;
 		auto near = f.near, far = f.far, ortho_half_extent = f.ortho_half_extent;
 		auto aspect_ratio = f.aspect_ratio;
-		auto &local_up = f.local_up, &east = f.east, &sun_dir = f.sun_dir;
-		auto shadows_live = shadows_on && !tube.on && sun_el > 0.5 * M_PI / 180.0;
+		// (the lens offset moves the eye's frame a hair, which mustn't
+		// move the walk's box)
+		Vector3d local_up = f.local_up, east = f.east, L = f.sun_dir;
+		if (!sample) sunFrame(eye, local_up, east, L);
+		Vector3d sx = local_up.cross(L);
+		if (sx.norm() < 1e-6) sx = east; else sx.normalize();
+		if (sample && (glamour.sun_x != 0 || glamour.sun_y != 0)) {
+			L = (L + sx * glamour.sun_x + L.cross(sx) * glamour.sun_y).normalized();
+			sx = local_up.cross(L);
+			if (sx.norm() < 1e-6) sx = east; else sx.normalize();
+		}
+		Vector3d sy = L.cross(sx);
+		auto reach = fmin(far, fmin(40000.0, fmax(1000.0, 2.5 * shadow_focus)));
+		reach = pow(2.0, ceil(log2(reach) * 4.0) / 4.0); // quantized: a small zoom doesn't refit
+		std::vector<Vector3d> corners;
+		if (cam.ortho) {
+			auto hh = ortho_half_extent, hw = ortho_half_extent * aspect_ratio;
+			for (auto d : { fmax(0.0, shadow_focus - reach), shadow_focus + reach })
+				for (auto i : { -1.0, 1.0 }) for (auto j : { -1.0, 1.0 })
+					corners.push_back(eye + direction * d + right * (i * hw) + cam_up * (j * hh));
+		} else {
+			auto t = tan(cam.fov / 2.0);
+			for (auto d : { fmax(1.0, (double)near), reach })
+				for (auto i : { -1.0, 1.0 }) for (auto j : { -1.0, 1.0 })
+					corners.push_back(eye + direction * d + right * (i * d * t * aspect_ratio) + cam_up * (j * d * t));
+		}
+		double x0 = INFINITY, x1 = -INFINITY, y0 = INFINITY, y1 = -INFINITY, z0 = INFINITY, z1 = -INFINITY;
+		for (auto &c : corners) {
+			x0 = fmin(x0, c.dot(sx)); x1 = fmax(x1, c.dot(sx));
+			y0 = fmin(y0, c.dot(sy)); y1 = fmax(y1, c.dot(sy));
+			z0 = fmin(z0, c.dot(L)); z1 = fmax(z1, c.dot(L));
+		}
+		auto half = 0.5 * fmax(x1 - x0, y1 - y0);
+		half = pow(2.0, ceil(log2(half) * 8.0) / 8.0);
+		s.texel_m = 2.0 * half / shadow_size;
+		auto jx = sample ? glamour.shadow_x : 0.0, jy = sample ? glamour.shadow_y : 0.0;
+		auto cx = (floor(0.5 * (x0 + x1) / s.texel_m) + jx) * s.texel_m;
+		auto cy = (floor(0.5 * (y0 + y1) / s.texel_m) + jy) * s.texel_m;
+		// the map's origin: the box's centre across the sun, and along it
+		// the frustum's most sunward point. depth runs along -L from there
+		s.O = sx * cx + sy * cy + L * z1;
+		s.L = L; s.sx = sx; s.sy = sy;
+		s.half = half;
+		s.far = (z1 - z0) + 50.0;
+		s.lo = Vector3d(x0, y0, z0); s.hi = Vector3d(x1, y1, z1);
+		s.depth = cam.ortho ? shadow_focus + reach : reach;
+		return s;
+	}
+
+	shadow_t shadowPass(render_ctx_t &ctx, const frame_t &f, const camera_t &cam,
+			const std::vector<draw_t> &draws) {
+		auto shadows_live = shadowsLive();
 		float shadow_box_f[4] = {1, 1, 0, 1};
 		Matrix4d sun_view = Matrix4d::Identity();
 		double shadow_texel_m = 1;
 		if (shadows_live) {
-			if (!walk_reused || shadow_focus <= 0)
-				shadow_focus = fmax(1.0, centerDistanceMesh(cam));
-			Vector3d L = sun_dir;
-			Vector3d sx = local_up.cross(L);
-			if (sx.norm() < 1e-6) sx = east; else sx.normalize();
-			if (glamour.sun_x != 0 || glamour.sun_y != 0) {
-				L = (L + sx * glamour.sun_x + L.cross(sx) * glamour.sun_y).normalized();
-				sx = local_up.cross(L);
-				if (sx.norm() < 1e-6) sx = east; else sx.normalize();
-			}
-			Vector3d sy = L.cross(sx);
-			auto reach = fmin(far, fmin(40000.0, fmax(1000.0, 2.5 * shadow_focus)));
-			reach = pow(2.0, ceil(log2(reach) * 4.0) / 4.0); // quantized: a small zoom doesn't refit
-			std::vector<Vector3d> corners;
-			if (cam.ortho) {
-				auto hh = ortho_half_extent, hw = ortho_half_extent * aspect_ratio;
-				for (auto d : { fmax(0.0, shadow_focus - reach), shadow_focus + reach })
-					for (auto i : { -1.0, 1.0 }) for (auto j : { -1.0, 1.0 })
-						corners.push_back(eye + direction * d + right * (i * hw) + cam_up * (j * hh));
-			} else {
-				auto t = tan(cam.fov / 2.0);
-				for (auto d : { fmax(1.0, (double)near), reach })
-					for (auto i : { -1.0, 1.0 }) for (auto j : { -1.0, 1.0 })
-						corners.push_back(eye + direction * d + right * (i * d * t * aspect_ratio) + cam_up * (j * d * t));
-			}
-			double x0 = INFINITY, x1 = -INFINITY, y0 = INFINITY, y1 = -INFINITY, z0 = INFINITY, z1 = -INFINITY;
-			for (auto &c : corners) {
-				x0 = fmin(x0, c.dot(sx)); x1 = fmax(x1, c.dot(sx));
-				y0 = fmin(y0, c.dot(sy)); y1 = fmax(y1, c.dot(sy));
-				z0 = fmin(z0, c.dot(L)); z1 = fmax(z1, c.dot(L));
-			}
-			auto half = 0.5 * fmax(x1 - x0, y1 - y0);
-			half = pow(2.0, ceil(log2(half) * 8.0) / 8.0);
-			shadow_texel_m = 2.0 * half / shadow_size;
-			auto cx = (floor(0.5 * (x0 + x1) / shadow_texel_m) + glamour.shadow_x) * shadow_texel_m;
-			auto cy = (floor(0.5 * (y0 + y1) / shadow_texel_m) + glamour.shadow_y) * shadow_texel_m;
-			auto cz = z1;
-			// the map's origin: the box's centre across the sun, and along it
-			// the frustum's most sunward point. depth runs along -L from there
-			Vector3d O = sx * cx + sy * cy + L * cz;
+			if (!walk_reused) shadow_focus = fmax(1.0, centerDistanceMesh(cam));
+			auto s = shadowFit(f, cam, true);
+			auto &L = s.L, &sx = s.sx, &sy = s.sy, &O = s.O;
+			auto half = s.half;
+			shadow_texel_m = s.texel_m;
 			for (int k = 0; k < 3; k++) { sun_view(0, k) = sx[k]; sun_view(1, k) = sy[k]; sun_view(2, k) = L[k]; }
 			sun_view(0, 3) = -sx.dot(O); sun_view(1, 3) = -sy.dot(O); sun_view(2, 3) = -L.dot(O);
-			auto shadow_near = -8000.0, shadow_far = (z1 - z0) + 50.0;
 			shadow_box_f[0] = shadow_box_f[1] = (float)half;
-			shadow_box_f[2] = (float)shadow_near; shadow_box_f[3] = (float)shadow_far;
+			shadow_box_f[2] = (float)shadow_near; shadow_box_f[3] = (float)s.far;
 			auto stale = !walk_reused || uploads_this_frame > 0 || (int)draws.size() != shadow_key_drawn
 				|| L != shadow_key_l || O != shadow_key_o || half != shadow_key_half;
 			if (stale) {
 				shadow_key_l = L; shadow_key_o = O; shadow_key_half = half; shadow_key_drawn = (int)draws.size();
 				renderShadowBegin(ctx, shadow_size, shadow_box_f);
 				for (auto &dr : draws) {
+					if (dr.shadow_mask == 0xff) continue;
 					Matrix4f mv = (sun_view * dr.node->matrix_globe_from_mesh).cast<float>();
-					renderShadowNode(ctx, mv.data(), dr.self_mask);
+					renderShadowNode(ctx, mv.data(), dr.shadow_mask);
 					for (auto &mesh : dr.node->meshes) renderShadowMesh(mesh);
 				}
 				renderShadowEnd(ctx);
@@ -1575,9 +1734,9 @@ struct earth_core_t {
 		sh.shade = (float)shade;
 		sh.texel_uv = (float)(1.0 / shadow_size);
 		sh.bias = (float)((0.3 + 0.5 * shadow_texel_m) / (shadow_box_f[3] - shadow_box_f[2]));
-		sh.up = (sun_view.block<3, 3>(0, 0) * local_up).cast<float>();
+		sh.up = (sun_view.block<3, 3>(0, 0) * f.local_up).cast<float>();
 		sh.rot = sun_view.block<3, 3>(0, 0).cast<float>();
-		sh.eye = transformPoint(sun_view, eye).cast<float>();
+		sh.eye = transformPoint(sun_view, f.eye).cast<float>();
 		return sh;
 	}
 
@@ -1589,6 +1748,7 @@ struct earth_core_t {
 		tube.setTubeUniforms(ctx, f.viewprojection);
 		renderSetShadow(ctx, sh.live, sh.box, sh.shade, sh.texel_uv, sh.bias, sh.up.data(), sh.rot.data(), sh.eye.data());
 		for (auto &dr : draws) {
+			if (!dr.color) continue;
 			auto node = dr.node;
 			auto self_mask = dr.self_mask;
 			auto stale_mask = dr.stale_mask;
@@ -1667,9 +1827,9 @@ struct earth_core_t {
 			// cpu work; this says whether anything is actually coming. a view
 			// that never completes with waiting=0 and inflight=0 is not slow,
 			// it is stuck: those nodes asked once and nothing answered
-			printf("tiles: want %d loaded %d waiting %d inflight %d downloading %d retrying %d"
+			printf("tiles: want %d (casters %d) loaded %d waiting %d inflight %d downloading %d retrying %d"
 				" · deepest level %d · bulks: blocked %d inflight %d started %d%s\n",
-				stat.nodes_wanted, stat.nodes_loaded, stat.nodes_stub,
+				stat.nodes_wanted, stat.nodes_shadow, stat.nodes_loaded, stat.nodes_stub,
 				(int)nodes_in_flight, stat.nodes_stuck, stat.nodes_failed,
 				stat.max_level, stat.bulk_blocked, (int)bulks_in_flight,
 				stat.bulks_started, scene_complete ? " · complete" : "");
@@ -1700,7 +1860,7 @@ struct earth_core_t {
 		// quotas (see evict); nothing is ever dropped on
 		// a clock
 		auto now_ms = ticksMs();
-		auto all_loaded = walk(f, cam, now_ms);
+		auto all_loaded = walk(f, cam, now_ms, shadowFit(f, cam, false));
 		auto t1 = ticksMs();
 		sec.bfs += t1 - t0;
 

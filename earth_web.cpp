@@ -448,6 +448,7 @@ struct EarthView {
 		o.set("nodesLodTested", (double)earth.avg.lod);
 		o.set("nodesWanted", earth.stat.nodes_wanted);
 		o.set("nodesLoaded", earth.stat.nodes_loaded);
+		o.set("nodesShadowOnly", earth.stat.nodes_shadow);
 		o.set("nodesDrawn", (int)earth.drawn_nodes.size());
 		o.set("sceneComplete", earth.scene_complete);
 		// the rest of the download picture (the 2s "tiles:" console line)
@@ -580,6 +581,7 @@ struct EarthView {
 		auto &a = ctx.accum;
 		a.on = glamour && !a.failed;
 		earth.glamour = {};
+		earth.sun_soft = a.on ? glamour_soft : 0.0;
 		if (a.on) {
 			auto n = a.samples;
 			if (n > 0 && n < glamour_samples) {

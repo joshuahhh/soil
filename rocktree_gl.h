@@ -27,6 +27,7 @@ struct frame_t {
 	float aspect_ratio = 1.6f;
 	Matrix4d viewprojection;
 	Matrix4d key_vp; // the unmoved camera, before the jitter: the walk's cache key
+	Vector3d key_eye, key_direction, key_right, key_up; // the unmoved camera's frame (no lens offset)
 	bool tube = false; // tube mode (see earth_tube.h)
 	bool debug_lod = false; // tint octants still waiting for a finer tile
 	// the miniature's sharp plane (meters) and the half-width of its sharp
