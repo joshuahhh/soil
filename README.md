@@ -249,9 +249,11 @@ GPS altitudes, easing between the two as the measurements land.
 The terrain is drawn under an atmosphere: a sky pass with the sun in it, and
 aerial perspective on the ground — what is far fades toward the haze, per
 channel, the red surviving the trip best, which is why distance goes
-blue-grey. **Y** opens the `sky` panel: `time` puts the sun by local solar
-time at the camera, or *follow the clock* takes it from the real one (the
-slider then shows where the clock has it, locked); `sky` and `sun tint`
+blue-grey. **Y** opens the `sky` panel: `time` and `date` put the sun by the
+clock and calendar at the camera, in its own time zone (daylight saving and
+all), or *follow the clock* takes them from the real one (the sliders then
+show where the clock has them, locked); below them, the zone the camera is
+in and the true solar time there; `sky` and `sun tint`
 switch those passes; `haze` switches the aerial perspective, its slider the
 visibility at sea level (5–320 km); `shadows` the sun shadows, its slider how
 dark the shade is; `occlusion` the ambient occlusion, its slider its weight. A switch that gates a slider stands in for the slider's

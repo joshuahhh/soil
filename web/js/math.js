@@ -78,7 +78,8 @@ const sunPosition = (date, lat, lon) => {
   const la = lat * rad;
   const el = Math.asin(Math.sin(la) * Math.sin(dec) + Math.cos(la) * Math.cos(dec) * Math.cos(ha));
   const az = Math.atan2(-Math.sin(ha), Math.cos(la) * Math.tan(dec) - Math.sin(la) * Math.cos(ha));
-  return { az: ((az / rad) + 360) % 360, el: el / rad };
+  // ha: the hour angle, 0 at solar noon, 15° an hour
+  return { az: ((az / rad) + 360) % 360, el: el / rad, ha: ((ha / rad) % 360 + 360) % 360 };
 };
 
 // --- the spine ------------------------------------------------------------

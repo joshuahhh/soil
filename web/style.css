@@ -76,6 +76,10 @@ body.glamourpanel #glamourpanel { display: flex; }
 .panel .row > .lbl { flex: 0 0 68px; }
 .panel .row span.amt { min-width: 44px; text-align: right; font-variant-numeric: tabular-nums; }
 .panel .off { opacity: .4; }
+/* derived from the controls above it, so quieter than they are */
+.panel .row.readout { font-size: 11px; opacity: .7; }
+#sunzone { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#sunsolar { font-variant-numeric: tabular-nums; }
 #lodpanel .row { gap: 4px 10px; }
 #lodpanel .row span { display: flex; align-items: center; gap: 4px; }
 .swatch { display: inline-block; width: 11px; height: 11px; border-radius: 2px; }

@@ -93,33 +93,51 @@
     </div>
     <div id="skypanel" class="panel">
       <div class="head"><span>sky</span><button class="x" id="skyclose" title="hide (Y)">✕</button></div>
-      <div class="row">
-        <span class="lbl" id="suntimelbl">time</span>
-        <input id="suntime" type="range" min="0" max="1439" step="5" title="the sun, by local solar time at the camera">
-        <span class="amt" id="sunamount"></span>
+      <div class="group">
+        <div class="row">
+          <label><input type="checkbox" id="sunclock">follow the clock</label>
+        </div>
+        <div class="row">
+          <span class="lbl">time</span>
+          <input id="suntime" type="range" min="0" max="1439" step="5" title="the sun, by the clock at the camera">
+          <span class="amt" id="sunamount"></span>
+        </div>
+        <div class="row">
+          <span class="lbl">date</span>
+          <input id="sundate" type="range" min="1" max="365" step="1" title="the sun, by the day of the year">
+          <span class="amt" id="sundateamount"></span>
+        </div>
+        <div class="row readout">
+          <span class="lbl">zone</span>
+          <span id="sunzone"></span>
+        </div>
+        <div class="row readout">
+          <span class="lbl">solar time</span>
+          <span id="sunsolar"></span>
+        </div>
       </div>
-      <div class="row">
-        <span class="lbl"></span>
-        <label><input type="checkbox" id="sunclock">follow the clock</label>
+      <div class="group">
+        <div class="row">
+          <label class="lbl"><input type="checkbox" id="skyon">sky</label>
+          <label><input type="checkbox" id="tinton">sun tint</label>
+        </div>
+        <div class="row">
+          <label class="lbl"><input type="checkbox" id="hazeon">haze</label>
+          <input id="vis" type="range" min="0" max="100" title="visibility: how far one can see at sea level">
+          <span class="amt" id="visamount"></span>
+        </div>
       </div>
-      <div class="row">
-        <label class="lbl"><input type="checkbox" id="skyon">sky</label>
-        <label><input type="checkbox" id="tinton">sun tint</label>
-      </div>
-      <div class="row">
-        <label class="lbl"><input type="checkbox" id="hazeon">haze</label>
-        <input id="vis" type="range" min="0" max="100" title="visibility: how far one can see at sea level">
-        <span class="amt" id="visamount"></span>
-      </div>
-      <div class="row">
-        <label class="lbl"><input type="checkbox" id="shadowson">shadows</label>
-        <input id="shade" type="range" min="0" max="100" title="how dark the shade is">
-        <span class="amt" id="shadeamount"></span>
-      </div>
-      <div class="row">
-        <label class="lbl"><input type="checkbox" id="occlon">occlusion</label>
-        <input id="occl" type="range" min="0" max="100" title="ambient occlusion: how much creases, street canyons and the feet of buildings darken">
-        <span class="amt" id="occlamount"></span>
+      <div class="group">
+        <div class="row">
+          <label class="lbl"><input type="checkbox" id="shadowson">shadows</label>
+          <input id="shade" type="range" min="0" max="100" title="how dark the shade is">
+          <span class="amt" id="shadeamount"></span>
+        </div>
+        <div class="row">
+          <label class="lbl"><input type="checkbox" id="occlon">occlusion</label>
+          <input id="occl" type="range" min="0" max="100" title="ambient occlusion: how much creases, street canyons and the feet of buildings darken">
+          <span class="amt" id="occlamount"></span>
+        </div>
       </div>
     </div>
     <div id="glamourpanel" class="panel">
