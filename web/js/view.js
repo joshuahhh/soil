@@ -8,6 +8,7 @@ import { refreshTunnel, setTunnel, tunnelState, restoreTunnel, tubeState, restor
 import { map, full3d, pickDebug, setPickDebug } from './map.js';
 import { debugSmooth, setDebugSmooth, setFollow, toggleFollow } from './path.js';
 import { sky, glamour, applySky, applyGlamour } from './sky.js';
+import { stl, setStl } from './stl.js';
 
 export { initView, mode, inTube, viewName, defineMode, setMode, ortho, hug, setHug, saveView,
   restoreView, keys, miniature, mipmaps, setMipmaps, clay, dragging };
@@ -76,6 +77,7 @@ const saveView = () => {
     lod: debugLod,
     sky, glamour,
     tube: tubeState(),
+    stl,
     tunnel: tunnelState(),
   });
 };
@@ -100,6 +102,7 @@ const restoreView = () => {
   const tubeRolled = !!(START.tube && START.tube.on);
   if (START.roll && !tubeRolled) view.setRoll(START.roll);
   if (restoreTube(START.tube) && START.roll) view.setRoll(START.roll);
+  if (START.stl && START.stl.on) setStl(true, true);
   restoreTunnel(START.tunnel, tubeRolled);
   // ?tunnel=<circumference m>, for the render tests
   if (TEST && QS.has('tunnel')) {
@@ -119,7 +122,7 @@ const typingIn = (t) => !!t && (t.tagName === 'TEXTAREA' || t.isContentEditable
   || t.tagName === 'SELECT'
   || (t.tagName === 'INPUT' && !['range', 'checkbox', 'color', 'button', 'radio'].includes(t.type)));
 const handled = new Set(['KeyW','KeyA','KeyS','KeyD','KeyQ','KeyE','KeyR','KeyF','KeyZ','KeyX','KeyG','KeyO','KeyC','KeyK','KeyL','KeyM','KeyT','KeyP','KeyV','KeyN','KeyB','KeyY','KeyI','KeyU',
-  'Space','ArrowLeft','ArrowRight','ArrowUp','ArrowDown','Minus','Equal','Digit0','Numpad0','Home','KeyH']);
+  'Space','ArrowLeft','ArrowRight','ArrowUp','ArrowDown','Minus','Equal','Digit0','Numpad0','Home','KeyH','Digit3']);
 let miniature = false; // the tilt-shift look (N)
 const setMiniature = (on) => { miniature = on; view.setMiniature(on, 0.015, 0.35); updateHint(); };
 let debugLod = false;
@@ -197,6 +200,7 @@ const initInput = () => {
       clearRect();
       updateHint();
     }
+    if (e.code === 'Digit3' && !e.repeat) setStl(!stl.on);
     // true: fly into the mouth; from outside, the roll mostly shows the
     // back of the sheet
     if (e.code === 'KeyT' && !e.repeat && tubeRect && mode !== 'tunnel') {

@@ -9,6 +9,7 @@ import { initIO, copyState, saveState, pasteState } from './io.js';
 import { map, marker, initMap } from './map.js';
 import { path, parseGpx, setPath, initPath } from './path.js';
 import { sky, glamour, applyGlamour, applySky, initSky } from './sky.js';
+import { initStl, stlDemo, saveStl } from './stl.js';
 
 // --- the test api ---------------------------------------------------------
 // window.__demo, window.__test (and window.__stats, in tiles.js) are an api:
@@ -19,6 +20,8 @@ const initTestApi = () => {
     glamour: (patch) => { Object.assign(glamour, patch); applyGlamour(); return { ...glamour }; },
     lod: (v) => { if (v != null) view.setLodScale(v); return view.getLodScale(); },
     tube: () => ({ rect: tubeRect, on: inTube(), body: rectShape === 'body', curl: S.curl }),
+    stl: stlDemo,
+    saveStl,
     body: (text) => text ? setBodyMesh(text) : view.bodyReady(),
     tunnel: (c) => { if (c != null) { S.tunnelC = c; view.setTunnelCircumference(c); refreshTunnel(); } return view.getTunnelInfo(); },
     path: () => path, loadGpx: (text) => setPath(parseGpx(text), true),
@@ -79,6 +82,7 @@ initMap();
 initHud();
 initView();
 initTube();
+initStl();
 initPath();
 initPhoto();
 initIO();

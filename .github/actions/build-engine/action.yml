@@ -20,22 +20,23 @@ runs:
         ~/emsdk/emsdk install ${{ inputs.emsdk-version }}
         ~/emsdk/emsdk activate ${{ inputs.emsdk-version }}
 
-    # emscripten builds its ports (sdl2 and friends) into the sdk's own cache
-    # dir on first use — ~21s per run otherwise. must come after the emsdk
-    # clone above, which would clobber the restored dir.
+    # emscripten builds its ports (sdl2 and friends, boost's headers for the
+    # stl export) into the sdk's own cache dir on first use — ~21s per run
+    # otherwise. must come after the emsdk clone above, which would clobber
+    # the restored dir.
     - name: cache emscripten ports
       uses: actions/cache@v6
       with:
         path: ~/emsdk/upstream/emscripten/cache
-        key: emcache-${{ inputs.emsdk-version }}-v1
+        key: emcache-${{ inputs.emsdk-version }}-v2
 
-    # eigen and protobuf. worth caching well beyond the download: setup.sh
-    # compiles libprotobuf to wasm, which is minutes.
+    # eigen, cgal and protobuf. worth caching well beyond the download:
+    # setup.sh compiles libprotobuf to wasm, which is minutes.
     - name: cache deps
       uses: actions/cache@v6
       with:
         path: deps
-        key: deps-eigen3.3.7-protobuf21.12-emsdk${{ inputs.emsdk-version }}-v1
+        key: deps-eigen3.3.7-protobuf21.12-cgal6.2-emsdk${{ inputs.emsdk-version }}-v1
 
     - name: setup deps
       shell: bash

@@ -4,6 +4,7 @@ import { saveView, miniature, mipmaps, clay, mode, inTube, viewName, ortho, hug 
 import { alignRefresh, photoShown } from './photo.js';
 import { tubeRect } from './tube.js';
 import { path } from './path.js';
+import { stl } from './stl.js';
 
 export { logScale, percent, bindRange, bindCheck, gate, updateSpeed, updateHint, toast,
   refreshRoll, initHud, keysOpen, showKeys, toggleKeys, showCut, toggleCutPanel };
@@ -77,7 +78,7 @@ const updateHint = () => {
     mipmaps ? '' : 'mipmaps off',
     miniature ? 'miniature' : '',
     clay ? 'clay' : '',
-    !inTube() && tubeRect ? 'rect drawn (T rolls it into a tube, B wraps it on a body)' : '',
+    !inTube() && tubeRect && !stl.on ? 'rect drawn (T rolls it into a tube, B wraps it on a body, 3 saves it as an stl)' : '',
   ].filter(Boolean).join(' · ');
   updateSpeed();
   refreshKeys();
@@ -192,10 +193,11 @@ const keysFor = () => {
     g.push(['photo', rows]);
   }
   const mapRows = [['click', 'teleport there'],
-    [K('shift') + ' drag', tubeRect ? 'draw a new tube rect' : 'draw a tube rect']];
+    [K('shift') + ' drag', stl.on ? 'pick the rect to export' : tubeRect ? 'draw a new tube rect' : 'draw a tube rect']];
   if (mode !== 'tube' && tubeRect) mapRows.push([K('T'), 'roll the tube up']);
   if (mode !== 'body' && tubeRect) mapRows.push([K('B'), 'wrap it on a body']);
   if (mode !== 'tube' && mode !== 'body' && tubeRect) mapRows.push([K('esc'), 'clear the rect']);
+  mapRows.push([K('3'), stl.on ? 'close the stl export' : tubeRect ? 'save the rect as an stl' : 'stl export']);
   if (mode !== 'follow' && mode !== 'tube' && mode !== 'body' && path)
     mapRows.push([K('V'), 'follow the path']);
   g.push(['map', mapRows]);

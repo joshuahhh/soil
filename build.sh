@@ -27,6 +27,16 @@ fi
 if [ crn/crn.cc -nt crn/crn.o ]; then
 	(cd crn && emcc -std=c++14 -O2 -c crn.cc -w)
 fi
+# the stl export's alpha wrap (earth_stl.h): cgal, a minute to compile, so
+# only when it changes. cgal's filtered predicates throw to fall back to
+# exact arithmetic, so it needs real exceptions (and the link below with
+# it); wasm can't set the fpu's rounding mode, which its interval arithmetic
+# otherwise relies on; and boost's multiprecision stands in for gmp
+if [ earth_stl.cpp -nt earth_stl.o ] || [ earth_stl.h -nt earth_stl.o ]; then
+	em++ -std=c++17 -O2 -pthread -fwasm-exceptions -c earth_stl.cpp -o earth_stl.o \
+		-I$EMSCRIPTEN_CGAL_INC -s USE_BOOST_HEADERS=1 \
+		-DCGAL_ALWAYS_ROUND_TO_NEAREST -DCGAL_DISABLE_GMP -DNDEBUG
+fi
 
 mkdir -p web
 cp coi-serviceworker.js web/
@@ -38,6 +48,7 @@ cp coi-serviceworker.js web/
 em++ earth_web.cpp -O2 -std=c++17 -Wno-deprecated-declarations -I. -Ideps/eigen \
 	${EARTH_PROFILE:+--profiling-funcs} \
 	-I$EMSCRIPTEN_PROTOBUF_SRC proto/rocktree.pb.o $EMSCRIPTEN_PROTOBUF_LIB crn/crn.o \
+	earth_stl.o -fwasm-exceptions \
 	-s MALLOC=mimalloc -Wno-pthreads-mem-growth \
 	-s FETCH=1 -s USE_PTHREADS=1 \
 	-s MAX_WEBGL_VERSION=2 -s MIN_WEBGL_VERSION=2 \

@@ -115,6 +115,185 @@ struct earth_core_t {
 		tube.engine.ground_radius_under = [this](const Vector3d &p) { return groundRadiusUnder(p); };
 	}
 
+	// --- stl export -----------------------------------------------------
+	// a geodetic rect whose terrain the page saves as a solid: its
+	// triangles go to the alpha wrap in earth_stl.h. while it is set the walk wants every node touching
+	// it down to export_mpt, wherever the camera is — the ground column's
+	// trick over an area — so the rect fills in at the detail the export
+	// asks for and stays resident (wanted nodes are never evicted). the
+	// rect's frame: x east, y north, equirectangular about its centre so
+	// its edges are exactly x = ±half_e, y = ±half_n; z the height above
+	// the planetoid sphere, which is the mesh's own datum
+	bool export_on = false;
+	double export_latc = 0, export_lonc = 0; // radians
+	double export_half_e = 0, export_half_n = 0;
+	double export_mpt = 1;
+	Vector3d export_up = Vector3d::UnitZ(), export_east = Vector3d::UnitX(), export_north = Vector3d::UnitY();
+	int export_epoch = 0; // bumped on every change, for the walk's cache key
+	// past this many nodes the walk stops descending for the export: a
+	// big rect at fine detail would otherwise want more tiles than the
+	// heap holds. the export then takes whatever level the cap allowed
+	static constexpr size_t export_node_cap = 3000;
+	// the last walk's nodes in the rect (indices into potential_nodes),
+	// and its tally of them: wanted, in, and whether the cap cut it short
+	std::vector<size_t> export_idx;
+	int stat_export_wanted = 0, stat_export_loaded = 0;
+	bool stat_export_capped = false;
+	double stat_export_mpt = 0; // the finest node the rect has, m per texel
+
+	void setExportRect(double lat0, double lon0, double lat1, double lon1, double mpt) {
+		export_on = true;
+		export_latc = (lat0 + lat1) / 2;
+		export_lonc = (lon0 + lon1) / 2;
+		auto R_p = planetoid && planetoid->downloaded ? (double)planetoid->radius : 6371010.0;
+		export_half_n = R_p * fabs(lat1 - lat0) / 2;
+		export_half_e = R_p * cos(export_latc) * fabs(lon1 - lon0) / 2;
+		export_mpt = fmax(0.01, mpt);
+		export_up = Vector3d(cos(export_latc) * cos(export_lonc), cos(export_latc) * sin(export_lonc), sin(export_latc));
+		export_east = Vector3d(-sin(export_lonc), cos(export_lonc), 0);
+		export_north = export_up.cross(export_east);
+		export_epoch++;
+	}
+	void clearExportRect() {
+		export_on = false;
+		export_idx.clear();
+		stat_export_wanted = stat_export_loaded = 0;
+		stat_export_capped = false;
+		export_epoch++;
+	}
+
+	// a tangent-plane test, loose by the node's own radius, so the
+	// equirectangular frame's departure from the plane over a few km
+	// doesn't matter; the height band is tubeRectTouches'
+	bool exportRectTouches(const OrientedBoundingBox &obb) const {
+		auto R_p = (double)planetoid->radius;
+		auto margin = obb.extents.norm();
+		auto h = obb.center.dot(export_up) - R_p;
+		return !(fabs(obb.center.dot(export_east)) > export_half_e + margin
+			|| fabs(obb.center.dot(export_north)) > export_half_n + margin
+			|| h > 9000 + margin || h < -1500 - margin);
+	}
+
+	// the draw's octant masks over the rect's nodes: a node's bit is set
+	// for each child octant that is downloaded and wanted, and its
+	// triangles with all three vertices in such octants are left out, as
+	// the draw leaves them out
+	std::unordered_map<rocktree_t::node_t *, uint8_t> exportMasks() const {
+		std::unordered_map<rocktree_t::node_t *, uint8_t> masks;
+		for (auto k : export_idx) {
+			auto node = potential_nodes[k];
+			if (node->dl_state != dl_state_downloaded || !node->up) continue;
+			masks[node->up] |= 1 << node->octant;
+		}
+		return masks;
+	}
+	// a globe point in the rect's frame (metres)
+	Vector3d exportLocal(const Vector3d &g) const {
+		auto R_p = (double)planetoid->radius;
+		auto r = g.norm();
+		auto dlon = atan2(g.y(), g.x()) - export_lonc;
+		if (dlon > M_PI) dlon -= 2 * M_PI;
+		if (dlon < -M_PI) dlon += 2 * M_PI;
+		return Vector3d(R_p * cos(export_latc) * dlon, R_p * (asin(g.z() / r) - export_latc), r - R_p);
+	}
+	// every triangle the draw would draw in the rect, widened by pad
+	// metres, a mesh at a time: mesh(loc) with the mesh's vertices in the
+	// rect's frame, then tri(a, b, c) for each of its triangles there,
+	// indices into loc. the levels overlap a little where a coarse
+	// triangle straddles an octant edge; the wrap (earth_stl.h) doesn't
+	// mind. strips wind every other triangle the other way, and a soup
+	// doesn't mind that either
+	template <typename MeshFn, typename TriFn>
+	void forExportTriangles(double pad, MeshFn mesh_fn, TriFn tri_fn) {
+		auto masks = exportMasks();
+		auto mx = export_half_e + pad, my = export_half_n + pad;
+		// the coarse ancestors' octants away from the rect are unmasked,
+		// and a triangle of theirs on the far side of the planet can
+		// straddle the frame's ±180° seam, its box then spanning
+		// everything. no triangle that belongs in the rect reaches 5 km
+		// past it
+		auto far = [&](const Vector3d &p) { return fabs(p.x()) > mx + 5000 || fabs(p.y()) > my + 5000; };
+		std::vector<Vector3d> loc;
+		for (auto k : export_idx) {
+			auto node = potential_nodes[k];
+			if (node->dl_state != dl_state_downloaded) continue;
+			auto mit = masks.find(node);
+			uint8_t mask = mit == masks.end() ? 0 : mit->second;
+			if (mask == 0xff) continue;
+			auto &m = node->matrix_globe_from_mesh;
+			for (auto &mesh : node->meshes) {
+				auto verts = mesh.vertices.data();
+				auto vcount = mesh.vertices.size() / 8;
+				loc.resize(vcount);
+				for (size_t v = 0; v < vcount; v++) {
+					auto q = verts + v * 8;
+					loc[v] = exportLocal((m * Vector4d(q[0], q[1], q[2], 1.0)).head<3>());
+				}
+				mesh_fn(loc);
+				for (size_t t = 2; t < mesh.indices.size(); t++) {
+					uint16_t a = mesh.indices[t-2], b = mesh.indices[t-1], c = mesh.indices[t];
+					if (a == b || b == c || a == c) continue; // strip degenerates
+					if (a >= vcount || b >= vcount || c >= vcount) continue;
+					if ((mask >> verts[(size_t)a * 8 + 3] & 1)
+						&& (mask >> verts[(size_t)b * 8 + 3] & 1)
+						&& (mask >> verts[(size_t)c * 8 + 3] & 1)) continue;
+					auto &pa = loc[a], &pb = loc[b], &pc = loc[c];
+					if (far(pa) || far(pb) || far(pc)) continue;
+					if (fmax(pa.x(), fmax(pb.x(), pc.x())) < -mx || fmin(pa.x(), fmin(pb.x(), pc.x())) > mx
+						|| fmax(pa.y(), fmax(pb.y(), pc.y())) < -my || fmin(pa.y(), fmin(pb.y(), pc.y())) > my) continue;
+					tri_fn(a, b, c);
+				}
+			}
+		}
+	}
+	// those triangles as a soup: xyz per vertex, three vertices per
+	// triangle. false when nothing is loaded
+	bool exportSoup(double pad, std::vector<float> &pos, std::vector<uint32_t> &tris) {
+		pos.clear();
+		tris.clear();
+		if (!ready() || !export_on) return false;
+		const std::vector<Vector3d> *loc = nullptr;
+		std::vector<int64_t> remap; // the mesh's vertices' places in pos, once used
+		forExportTriangles(pad, [&](const std::vector<Vector3d> &l) {
+			loc = &l;
+			remap.assign(l.size(), -1);
+		}, [&](uint16_t a, uint16_t b, uint16_t c) {
+			for (auto i : {a, b, c}) {
+				if (remap[i] < 0) {
+					remap[i] = (int64_t)(pos.size() / 3);
+					pos.push_back((float)(*loc)[i].x());
+					pos.push_back((float)(*loc)[i].y());
+					pos.push_back((float)(*loc)[i].z());
+				}
+				tris.push_back((uint32_t)remap[i]);
+			}
+		});
+		return !tris.empty();
+	}
+	// the rect's lowest and highest point (metres above the sphere) and
+	// the area of its surface (m², walls and all, overlaps counted twice):
+	// what the model's height and the wrap's work come from. false when
+	// nothing is loaded
+	bool exportRelief(double &lo, double &hi, double &area) {
+		lo = INFINITY;
+		hi = -INFINITY;
+		area = 0;
+		if (!ready() || !export_on) return false;
+		const std::vector<Vector3d> *loc = nullptr;
+		auto in = [&](const Vector3d &p) { return fabs(p.x()) <= export_half_e && fabs(p.y()) <= export_half_n; };
+		forExportTriangles(0, [&](const std::vector<Vector3d> &l) { loc = &l; },
+			[&](uint16_t a, uint16_t b, uint16_t c) {
+			auto &pa = (*loc)[a], &pb = (*loc)[b], &pc = (*loc)[c];
+			for (auto p : {&pa, &pb, &pc}) {
+				if (!in(*p)) continue;
+				lo = fmin(lo, p->z());
+				hi = fmax(hi, p->z());
+			}
+			if (in((pa + pb + pc) / 3)) area += 0.5 * (pb - pa).cross(pc - pa).norm();
+		});
+		return lo <= hi;
+	}
+
 	// download slots in flight, held from request through decode; the cap
 	// needs to stay comfortably above the decode pool's thread count
 	std::atomic<int> nodes_in_flight{0};
@@ -164,17 +343,18 @@ struct earth_core_t {
 	int walk_bulk_count = 0, walk_bulk_blocked = 0;
 	bool walk_cache_valid = false;
 	// what the cached walk was made from: the unmoved camera's
-	// view-projection and eye, the viewport, the tree, the lod scale and
-	// whether the ground column was on
+	// view-projection and eye, the viewport, the tree, the lod scale,
+	// whether the ground column was on and the export rect
 	struct walk_key_t {
 		Matrix4d vp = Matrix4d::Zero();
 		Vector3d eye = Vector3d::Zero();
-		int w = 0, h = 0, epoch = -1;
+		int w = 0, h = 0, epoch = -1, export_epoch = -1;
 		double lod = 0;
 		bool column = false;
 		bool operator==(const walk_key_t &o) const {
 			return epoch == o.epoch && w == o.w && h == o.h && lod == o.lod
-				&& column == o.column && eye == o.eye && vp == o.vp;
+				&& column == o.column && export_epoch == o.export_epoch
+				&& eye == o.eye && vp == o.vp;
 		}
 	};
 	walk_key_t walk_key;
@@ -735,7 +915,7 @@ struct earth_core_t {
 		// is last frame's walk still the answer? (see the members)
 		auto epoch = g_tree_epoch.load();
 		auto cacheable = !tube.on && !tube.tunnel_on;
-		walk_key_t key = { f.key_vp, cam.eye, width, height, epoch, lod_scale, ground_column_on };
+		walk_key_t key = { f.key_vp, cam.eye, width, height, epoch, export_epoch, lod_scale, ground_column_on };
 		auto reuse = cacheable && walk_cache_valid && walk_key == key;
 		walk_reused = reuse;
 		if (reuse) {
@@ -773,9 +953,21 @@ struct earth_core_t {
 		auto potential_bulk_count = 0;
 		bool all_loaded = true;
 
+		// the export's descent, closed for good once the cap is in sight:
+		// a level of the rect is about four times the one above it (it is
+		// a surface, so mostly four of the eight children have data)
+		auto export_floor_open = export_on;
+		size_t export_count = 0, export_level_count = 0;
+		stat_export_capped = false;
+
 		// node culling and level of detail using breadth-first search
 		for (;;) {
 			auto level_pot_start = potential_nodes.size();
+			if (export_floor_open && export_count + 4 * export_level_count > export_node_cap) {
+				export_floor_open = false;
+				stat_export_capped = true;
+			}
+			export_level_count = 0;
 			for(auto cur : valid) {
 				auto bulk = cur ? cur->parent : planetoid->root_bulk;
 				auto children = cur ? cur->children : bulk->children;
@@ -826,6 +1018,8 @@ struct earth_core_t {
 					// camera regardless of where the view points
 					auto in_column = ground_column_on
 						&& rayHitsObb(col_origin, col_dir, node->obb, INFINITY);
+					// the export rect, likewise wanted whatever the view
+					auto in_export = export_on && exportRectTouches(node->obb);
 					auto tn = tube.walkNode(node->obb);
 					// tube mode culls against the rect, not the view: the
 					// whole slab is drawn wherever the camera looks. body
@@ -835,7 +1029,7 @@ struct earth_core_t {
 					// wrapped) or is in view (drawn flat); a straddler is
 					// drawn both ways
 					auto in_view = false;
-					if (in_column) {
+					if (in_column || in_export) {
 					} else if (tube.on && !tube.body) {
 						if (!tn.in_rect) continue;
 					} else {
@@ -851,11 +1045,15 @@ struct earth_core_t {
 					// the roll (below), with an unconditional floor (see
 					// walkFloor)
 					auto tube_floor = tube.walkFloor(node, tn);
+					// the export's floor: down to its detail, finest in
+					// (export_mpt / 2, export_mpt]
+					auto export_floor = in_export && export_floor_open
+						&& node->meters_per_texel > export_mpt * 0.5;
 					auto tube_want = 1e30; // floor/column: never shed
 					// the download order's default (tube mode sets its own: see walkDistance)
 					node->sched_pri = fmax(0.0, (node->obb.center - eye).norm()
 						- node->obb.extents.norm()) / (2 * node->obb.extents.norm());
-					if (!in_column && !tube_floor) {
+					if (!in_column && !tube_floor && !export_floor) {
 						auto texels_per_meter = 1.0f / node->meters_per_texel;
 						auto wh = width < height ? width : height;
 						double r;
@@ -902,9 +1100,11 @@ struct earth_core_t {
 					next_valid.push_back(node);
 					if (tube.on) next_want.push_back(tube_want);
 
+					if (in_export) { export_count++; export_level_count++; }
 					if (node->can_have_data) {
 						if (node->last_wanted_ms != prev_walk_ms) node->first_wanted_ms = now_ms;
 						node->last_wanted_ms = now_ms;
+						node->export_walk_ms = in_export ? now_ms : 0;
 						potential_nodes.push_back(node);
 						if (tube.on) potential_want.push_back(tube_want);
 					}
@@ -919,6 +1119,11 @@ struct earth_core_t {
 			next_valid.clear();
 			next_want.clear();
 		}
+		// (after the tube's trim, which reorders potential_nodes)
+		export_idx.clear();
+		if (export_on)
+			for (size_t i = 0; i < potential_nodes.size(); i++)
+				if (potential_nodes[i]->export_walk_ms == now_ms) export_idx.push_back(i);
 		walk_bulk_count = potential_bulk_count;
 		walk_bulk_blocked = stat.bulk_blocked;
 		walk_cache_valid = cacheable;
@@ -1015,6 +1220,15 @@ struct earth_core_t {
 			printf("timing: sched at=%.0f stubs=%zu started=%d inflight=%d pot=%zu\n",
 				now_ms, to_download.size(), started, (int)nodes_in_flight, potential_nodes.size());
 		scene_complete = all_loaded;
+		stat_export_wanted = (int)export_idx.size();
+		stat_export_loaded = 0;
+		stat_export_mpt = 0;
+		for (auto k : export_idx) {
+			auto node = potential_nodes[k];
+			if (node->dl_state != dl_state_downloaded) continue;
+			stat_export_loaded++;
+			if (stat_export_mpt <= 0 || node->meters_per_texel < stat_export_mpt) stat_export_mpt = node->meters_per_texel;
+		}
 	}
 
 	// downloaded nodes form an lru cache with a byte quota: nothing is evicted
@@ -1184,13 +1398,16 @@ struct earth_core_t {
 	// children first so that a node's octant mask (the octants a drawn
 	// child covers) is complete by the time the node comes up. buffers
 	// whatever isn't on the gpu yet, and refreshes drawn_nodes
-	std::vector<draw_t> buildDrawList(render_ctx_t &ctx) {
+	std::vector<draw_t> buildDrawList(render_ctx_t &ctx, const frame_t &f) {
 		// 8-bit octant mask flags of nodes, filled in from the children
 		for (auto node : potential_nodes) node->mask = 0;
 
 		// potential-set membership, only needed for lod debug tinting
 		std::unordered_set<rocktree_t::node_t *> potential_set;
 		if (debug_lod) potential_set.insert(potential_nodes.begin(), potential_nodes.end());
+
+		// for leaving the export rect's off-screen nodes out (below)
+		auto frustum_planes = getFrustumPlanes(f.viewprojection);
 
 		drawn_nodes.clear();
 		std::vector<draw_t> draws;
@@ -1214,6 +1431,12 @@ struct earth_core_t {
 			// tunnelTooCoarse). the parent's mask bit is already set above,
 			// so no ancestor fills the hole with its own slab
 			if (tube.tunnelTooCoarse(node)) continue;
+			// the export rect's nodes are wanted off screen too, but only
+			// to be resident: drawing them there is thousands of draw calls
+			// for nothing. (outside tube mode — rolled, a node's place on
+			// screen isn't its obb's)
+			if (node->export_walk_ms > 0 && !tube.on
+				&& obb_frustum_outside == classifyObbFrustum(&node->obb, frustum_planes)) continue;
 
 			drawn_nodes.push_back({ node, self_mask });
 
@@ -1489,7 +1712,7 @@ struct earth_core_t {
 		auto t3 = ticksMs();
 		sec.evict += t3 - t2;
 
-		auto draws = buildDrawList(ctx);
+		auto draws = buildDrawList(ctx, f);
 		auto sh = shadowPass(ctx, f, cam, draws);
 		drawTerrain(ctx, f, draws, sh);
 		if (sky_on) renderSkyDraw(ctx, f); // where the terrain left the far plane

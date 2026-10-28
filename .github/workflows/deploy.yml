@@ -1,7 +1,7 @@
 name: deploy
 # build the site from source and publish web/ to github pages as an artifact —
 # no build products ever land in git. deps are pinned: emsdk version here,
-# eigen/protobuf versions in setup.sh (cache key must track all three).
+# eigen/protobuf/cgal versions in setup.sh (cache key must track all four).
 # the page itself isn't built — index.html is served as written — so the
 # toolchain exists only to produce earth.js/earth.wasm, and a run that changes
 # neither skips it outright. see 'cache built engine'.

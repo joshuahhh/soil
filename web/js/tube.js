@@ -3,10 +3,11 @@ import { view, canvas } from './engine.js';
 import { saveView, mode, defineMode, setMode, inTube } from './view.js';
 import { updateHint, logScale, bindRange, toast } from './hud.js';
 import { map } from './map.js';
+import { stl, stlApply, setStl } from './stl.js';
 
 export { initTube, bodyPromise, setBodyMesh, refreshTunnel, tunnelClosing, curlTarget, endTunnel,
   setTunnel, tunnelState, restoreTunnel, tubeRect, tubePending, rectShape, rollRect, clearRect,
-  advanceTube, tubeState, restoreTube };
+  advanceTube, tubeState, restoreTube, setRectData };
 
 // --- the body's geometry image -------------------------------------------
 // a grid (u around the figure, v feet to head) of skin positions and
@@ -408,13 +409,15 @@ let tubeAxisEw = true;
 let tubePendingSince = 0;
 const normRect = (a, b) => [Math.min(a.lat, b.lat), Math.min(a.lng, b.lng),
   Math.max(a.lat, b.lat), Math.max(a.lng, b.lng)];
-// quotient-diagram arrows on the two glued edges, same direction on both
+// quotient-diagram arrows on the two glued edges, same direction on both;
+// none with the stl panel up, whose rect isn't one to glue
 const rectFC = (r) => {
   if (!r) return { type: 'FeatureCollection', features: [] };
   const feats = [{ type: 'Feature', properties: { kind: 'rect' },
     geometry: { type: 'Polygon', coordinates: [[
       [r[1], r[0]], [r[3], r[0]], [r[3], r[2]], [r[1], r[2]], [r[1], r[0]],
     ]] } }];
+  if (stl.on) return { type: 'FeatureCollection', features: feats };
   const latc = (r[0] + r[2]) / 2, lonc = (r[1] + r[3]) / 2;
   const cosLat = Math.cos(latc * Math.PI / 180);
   const tri = (pts) => feats.push({ type: 'Feature', properties: { kind: 'arrow' },
@@ -489,6 +492,7 @@ const rollRect = (shape, teleport) => {
 let tubePending = null; // null | 'fly' | 'roll'
 const tubeHooks = {
   enter: ({ teleport }) => {
+    if (stl.on) setStl(false); // the export is of the flat rect (stl.js)
     const r = tubeRect;
     view.setTubeBody(mode === 'body');
     view.setTubeRect(r[0], r[1], r[2], r[3], tubeAxisEw);
@@ -524,6 +528,7 @@ const clearRect = () => {
   rectShape = 'tube';
   if (inTube()) setMode('fly');
   setRectData(null);
+  stlApply();
 };
 // ground locks once the rect is covered at measurement resolution, well
 // before full res. after 20 s (a stuck download) force it with what's
@@ -591,7 +596,10 @@ const initTubeRect = () => {
     tubeRect = r;
     setRectData(r);
     updateHint(); // T and B mean something now
-    if (view.ready()) rollRect(rectShape, true);
+    // with the stl panel up, a new rect is the one to export, not one to
+    // roll
+    if (view.ready() && !stl.on) rollRect(rectShape, true);
+    stlApply();
   });
 };
 

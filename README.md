@@ -18,7 +18,7 @@ and renders in a split-screen demo next to a MapLibre slippy map.
 ./build.sh
 ```
 
-`setup.sh` downloads pinned releases of eigen and protobuf and compiles
+`setup.sh` downloads pinned releases of eigen, cgal and protobuf and compiles
 libprotobuf to wasm; it needs emscripten and curl. `build.sh` then produces
 `web/earth.js` + `web/earth.wasm` (modularized, pthreads). Serve `web/`:
 
@@ -469,6 +469,74 @@ unwrapped to its spot on the rect.
 Drop any `.obj` (y up, any scale) on the window and it replaces the figure,
 mid-flight included. G (the tube's wall hug) is off here: the walker is the
 cylinder's.
+
+#### STL export
+
+**3** opens the stl panel, which saves the rect as a closed solid for
+printing. Binary STL in millimetres, x east, y north, the base on z = 0. The
+panel sets the model's longer side, its detail, how much it's thickened, a
+vertical exaggeration, and the base's thickness under the lowest ground; the
+readout gives the scale, the rect's tile progress, and once everything is
+in, the model's height and about how long the wrap will take. While it runs
+the button cancels it, and the readout shows how far along it is.
+
+With the panel up, shift-drag picks the rect without rolling it — the drag
+is the export's then, and T and B still roll it. Closed, the drag rolls a
+tube as it always has.
+
+**The mesh, wrapped.** Google's tiles are a patchwork of levels that
+overlap, share no vertices across tile edges, and leave cracks between
+them, so they can't be stitched into a solid as they are. The export
+shrink-wraps them instead, with [CGAL's 3D alpha
+wrapping](https://doc.cgal.org/latest/Alpha_wrap_3/) ([earth_stl.h](earth_stl.h)):
+a ball of radius alpha (the panel's *detail*) is rolled over the triangles
+from outside, so a gap narrower than alpha is sealed and a wider one stays
+open, and the surface it leaves stands *thicken* off the triangles, so
+nothing comes out thinner than twice that. The output is closed, manifold,
+and doesn't cross itself, whatever the input was. Overhangs survive: tree
+canopies, the street under an overpass, a building's cantilevered top. The
+defaults (0.6 mm, 0.2 mm) are sized for a 0.4 mm FDM nozzle.
+
+The terrain is a sheet, not a solid, and wrapped on its own it would come
+out as a thin skin. So the triangles are clipped to the rect plus a margin
+of a few alpha, curtains drop from the clipped edge to a floor below the
+model, and the floor closes it; what the ball wraps is then a solid. After
+the wrap the solid is cut to the rect and the base's bottom, which throws
+the margin, curtains and floor away, so the sides are the wrap's real
+cross-section (a tower on the rect's edge shows its section) and the bottom
+is one plane. The cut can leave loose bits — a canopy whose trunk was
+outside — and only the largest piece is kept.
+
+It's slow: a 300 m block of downtown Seattle at 150 mm took two and a half
+minutes in the browser at the defaults (350k wrap points, the first 40 s of
+it CGAL setting up). The work goes as the area wrapped over
+alpha², walls included, and alpha finer than the tiles' own triangles buys
+little. It runs on a thread of its own. CGAL is compiled into the engine
+for this (`earth_stl.cpp`, built separately, since it's a minute to compile
+and needs wasm exceptions for its filtered predicates and round-to-nearest
+interval arithmetic, wasm having no rounding modes); `setup.sh` fetches it,
+and boost's headers come from emscripten's port. CGAL's alpha wrap is
+GPL-3.0-or-later (or a commercial licence), which then covers the build.
+
+While the panel is up the walk wants every node touching the rect down to
+the detail the wrap can use, whatever the camera is looking at — the ground
+column's trick over an area — so the rect fills in from wherever you are.
+That detail is a quarter of alpha per texel: a tile's vertices sit 4–5 of
+its texels apart at every level (measured over downtown seattle), so that
+puts a vertex about every alpha. A big rect at fine detail would want more
+tiles than the heap holds, so the descent stops at 3000 nodes and the
+readout says `(capped)`; a smaller rect or a coarser detail gets it back.
+The rect's nodes outside the view stay resident without being drawn.
+
+The triangles handed to the wrap are the ones the draw would draw: a node's
+triangles in octants its loaded children cover are left out. Heights are
+measured from the planetoid sphere, the mesh's own datum, so the earth's
+curvature is out of the model. `view.getExportSoup(padM)` returns the same
+soup, for looking at offline.
+
+Open water prints its floor. The mesh carries bathymetry under it — a rect
+in the middle of Elliott Bay comes out 40–90 m down, sloping toward the
+deep water, and the renderer's own picks agree.
 
 #### Render tests
 

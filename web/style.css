@@ -123,6 +123,10 @@ body.cut #cutpanel { display: flex; }
 #pathcolor::-webkit-color-swatch-wrapper { padding: 0; }
 #pathcolor::-webkit-color-swatch { border: 1px solid rgba(255,255,255,.4); border-radius: 3px; }
 #pathname { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+body.stl #stlpanel { display: flex; }
+/* the export's rect isn't rolled: no axis to flip */
+body.stl #axisbtn { display: none; }
+#stlstats { font-variant-numeric: tabular-nums; opacity: .85; white-space: pre-line; line-height: 1.4; }
 .panel .tip { font: 10px sans-serif; opacity: .55; line-height: 1.35; }
 .panel .group { display: flex; flex-direction: column; gap: 6px; min-height: 0;
                 padding: 6px; border-radius: 4px; background: rgba(255,255,255,.07); }

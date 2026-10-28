@@ -8,7 +8,7 @@ import { overlayBlend, applyOverlayBlend, setOverlay, saveAlign, clearPairs, ove
 import { setBodyMesh } from './tube.js';
 import { loadGpxFile, savePath } from './path.js';
 
-export { initIO, copyState, saveState, pasteState };
+export { initIO, copyState, saveState, pasteState, saveFile };
 
 // --- dropped files --------------------------------------------------------
 // counted: dragenter on a child fires before dragleave on its parent

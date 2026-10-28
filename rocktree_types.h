@@ -75,6 +75,10 @@ struct rocktree_t {
 		// walk — its distance through the roll over its size, pushed back
 		// when its rolled position can't be on screen (render thread only)
 		double sched_pri = 0;
+		// stl export: the walk that last wanted this node for the export
+		// rect (its timestamp), so the export can pick them back out of
+		// the wanted set (render thread only)
+		double export_walk_ms = 0;
 
 		// when the current unbroken run of being wanted began (profiling)
 		double first_wanted_ms = 0;

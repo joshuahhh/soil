@@ -26,6 +26,7 @@ using namespace Eigen;
 #include "rocktree_util.h"
 #include "earth_camera.h"
 #include "earth_core.h"
+#include "earth_stl.h"
 
 using emscripten::val;
 
@@ -81,6 +82,7 @@ struct EarthView {
 		0.25 * M_PI,
 	};
 	earth_core_t earth;
+	std::shared_ptr<stl_job_t> stl_job; // the stl export in progress or done
 	EMSCRIPTEN_WEBGL_CONTEXT_HANDLE gl = 0;
 	// the host's lod scale; the engine gets it times clay_lod in clay mode,
 	// where nothing but the mesh shows and its coarsening is plain to see.
@@ -244,6 +246,121 @@ struct EarthView {
 		o.set("nodesLoaded", earth.stat.nodes_loaded);
 		return o;
 	}
+	// stl export (see earth_core's and earth_stl.h): the rect to keep
+	// loaded, corners in degrees, and the detail to load it to (meters per
+	// texel)
+	void setExportRect(double lat0, double lon0, double lat1, double lon1, double mpt) {
+		earth.setExportRect(lat0 * M_PI / 180.0, lon0 * M_PI / 180.0,
+			lat1 * M_PI / 180.0, lon1 * M_PI / 180.0, mpt);
+	}
+	void clearExportRect() { earth.clearExportRect(); }
+	val getExportInfo() {
+		val o = val::object();
+		o.set("on", earth.export_on);
+		o.set("halfE", earth.export_half_e);
+		o.set("halfN", earth.export_half_n);
+		o.set("nodesWanted", earth.stat_export_wanted);
+		o.set("nodesLoaded", earth.stat_export_loaded);
+		o.set("capped", earth.stat_export_capped);
+		o.set("finestMpt", earth.stat_export_mpt);
+		return o;
+	}
+	// {lo, hi, area}: the rect's lowest and highest point, meters above
+	// the sphere, and its surface's area, m², or null while nothing is
+	// loaded
+	val getExportRelief() {
+		double lo, hi, area;
+		if (!earth.exportRelief(lo, hi, area)) return val::null();
+		val o = val::object();
+		o.set("lo", lo);
+		o.set("hi", hi);
+		o.set("area", area);
+		return o;
+	}
+	// the soup the wrap would get, unscaled (meters, the rect's frame), as
+	// {pos: Float32Array, tris: Uint32Array}: for looking at it offline
+	val getExportSoup(double pad_m) {
+		std::vector<float> pos;
+		std::vector<uint32_t> tris;
+		earth.exportSoup(pad_m, pos, tris);
+		val o = val::object();
+		o.set("pos", val::global("Float32Array").new_(emscripten::typed_memory_view(pos.size(), pos.data())));
+		o.set("tris", val::global("Uint32Array").new_(emscripten::typed_memory_view(tris.size(), tris.data())));
+		return o;
+	}
+	// start wrapping the rect into a solid, on a thread of its own: the
+	// model's scale (mm per ground meter), vertical exaggeration, base
+	// thickness, and the wrap's alpha and offset (mm). false if there's
+	// nothing loaded or one is already running. poll getStlStatus, then
+	// takeStl
+	bool startStl(double mm_per_m, double exag, double base, double alpha, double offset,
+			const std::string &header) {
+		if (stl_job && stl_job->state == stl_running) return false;
+		auto job = std::make_shared<stl_job_t>();
+		auto pad_m = stlPad(alpha, offset) / mm_per_m;
+		if (!earth.exportSoup(pad_m, job->pos, job->tris)) return false;
+		for (size_t i = 0; i < job->pos.size(); i += 3) {
+			job->pos[i] *= mm_per_m;
+			job->pos[i + 1] *= mm_per_m;
+			job->pos[i + 2] *= mm_per_m * exag;
+		}
+		job->half_x = earth.export_half_e * mm_per_m;
+		job->half_y = earth.export_half_n * mm_per_m;
+		job->base = base;
+		job->alpha = alpha;
+		job->offset = offset;
+		job->header = header;
+		printf("stl: wrapping %zu triangles, alpha %.3f mm, offset %.3f mm\n",
+			job->tris.size() / 3, alpha, offset);
+		if (!stlStart(job)) return false;
+		stl_job = job;
+		return true;
+	}
+	void cancelStl() {
+		if (stl_job) stl_job->cancel = true;
+	}
+	// {state: idle|running|done|failed|cancelled, phase: prep|wrap|cut|write,
+	// steiner, estimate, ...}: the wrap's progress is the points it has
+	// added against a rough ceiling on how many it will
+	val getStlStatus() {
+		val o = val::object();
+		if (!stl_job) {
+			o.set("state", std::string("idle"));
+			return o;
+		}
+		auto &j = *stl_job;
+		static const char *states[] = {"running", "done", "failed", "cancelled"};
+		static const char *phases[] = {"prep", "wrap", "cut", "write"};
+		auto state = j.state.load();
+		o.set("state", std::string(states[state]));
+		o.set("phase", std::string(phases[j.phase.load()]));
+		o.set("steiner", (double)j.steiner.load());
+		if (state == stl_running) {
+			o.set("estimate", (double)j.steiner_estimate);
+			return o;
+		}
+		o.set("faces", (double)j.faces);
+		o.set("closed", j.closed);
+		o.set("dropped", (double)j.dropped);
+		o.set("error", j.error);
+		o.set("msPrep", j.ms_prep);
+		o.set("msWrap", j.ms_wrap);
+		o.set("msCut", j.ms_cut);
+		return o;
+	}
+	// the finished stl's bytes as a fresh Uint8Array, and the job let go;
+	// null unless one is done
+	val takeStl() {
+		if (!stl_job || stl_job->state != stl_done) return val::null();
+		auto &b = stl_job->stl;
+		auto out = val::global("Uint8Array").new_(emscripten::typed_memory_view(b.size(), b.data()));
+		stl_job.reset();
+		return out;
+	}
+	void clearStl() {
+		if (stl_job && stl_job->state != stl_running) stl_job.reset();
+	}
+
 	// --- path overlay ---------------------------------------------------
 	// a dropped track: flat [lat, lon, ele, ...] triples in degrees/meters
 	// (a nan lat starts a new polyline, which is how a gpx's track segments
@@ -974,6 +1091,16 @@ EMSCRIPTEN_BINDINGS(earth) {
 		.function("setTunnelLength", &EarthView::setTunnelLength)
 		.function("getTunnelInfo", &EarthView::getTunnelInfo)
 		.function("getTubeInfo", &EarthView::getTubeInfo)
+		.function("setExportRect", &EarthView::setExportRect)
+		.function("clearExportRect", &EarthView::clearExportRect)
+		.function("getExportInfo", &EarthView::getExportInfo)
+		.function("getExportRelief", &EarthView::getExportRelief)
+		.function("getExportSoup", &EarthView::getExportSoup)
+		.function("startStl", &EarthView::startStl)
+		.function("cancelStl", &EarthView::cancelStl)
+		.function("getStlStatus", &EarthView::getStlStatus)
+		.function("takeStl", &EarthView::takeStl)
+		.function("clearStl", &EarthView::clearStl)
 		.function("setPath", &EarthView::setPath)
 		.function("clearPath", &EarthView::clearPath)
 		.function("setPathCursorIndex", &EarthView::setPathCursorIndex)

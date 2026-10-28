@@ -7,6 +7,7 @@ cd "$(dirname "$0")"
 
 EIGEN_VERSION=3.3.7
 PROTOBUF_VERSION=21.12 # protobuf's post-2022 versioning; cpp tarball says 3.21.12
+CGAL_VERSION=6.2
 
 mkdir -p deps
 
@@ -16,6 +17,15 @@ if [ ! -e deps/eigen/Eigen/Dense ]; then
 	curl -fL "https://gitlab.com/libeigen/eigen/-/archive/$EIGEN_VERSION/eigen-$EIGEN_VERSION.tar.gz" | tar xz -C deps
 	rm -rf deps/eigen
 	mv "deps/eigen-$EIGEN_VERSION" deps/eigen
+fi
+
+# --- cgal (header-only, just unpack): the stl export's alpha wrap. the
+# boost it needs is emscripten's own port (USE_BOOST_HEADERS in build.sh)
+if [ ! -e deps/cgal/include/CGAL/alpha_wrap_3.h ]; then
+	echo "setup: cgal $CGAL_VERSION"
+	curl -fL "https://github.com/CGAL/cgal/releases/download/v$CGAL_VERSION/CGAL-$CGAL_VERSION-library.tar.xz" | tar xJ -C deps
+	rm -rf deps/cgal
+	mv "deps/CGAL-$CGAL_VERSION" deps/cgal
 fi
 
 # --- protoc (prebuilt release binary for the host) --------------------------
