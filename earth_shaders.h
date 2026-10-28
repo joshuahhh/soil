@@ -693,7 +693,8 @@ void main() {
 		vec3 cr = cross(ddx, ddy);
 		vec3 n = dot(cr, cr) > 0.0025 * dot(ddx, ddx) * dot(ddy, ddy) ? normalize(cr)
 			: dot(v_nglobe, v_nglobe) > 1e-6 ? normalize(v_nglobe) : normalize(eye);
-		if (dot(n, pw) > 0.0) n = -n;
+		// toward the viewer: in ortho that's along the beam, not at the eye
+		if (dot(n, fog_planes.z > 0.5 ? cam[2] : pw) > 0.0) n = -n;
 		float key = max(dot(n, sun_dir), 0.0) * sun_vis;
 		float dome = 0.5 + 0.5 * dot(n, normalize(eye));
 		c = clay.rgb * tint * (0.8 * key + (0.2 + 0.25 * dome) * vec3(0.88, 0.95, 1.12));
