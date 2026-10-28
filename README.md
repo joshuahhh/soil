@@ -277,9 +277,10 @@ it — so the ground fades into the sky it is under. The sun itself is the
 NOAA low-precision position from the date, computed on the page.
 
 **Sun shadows** (the `shadows` row on the same panel) are a 4096² depth map rendered from the sun over the casters,
-fitted to the near part of the view — the frustum out to a couple of times
-the distance to the terrain under the crosshair, at most 40 km — with its
-size quantized and its centre snapped to whole texels, so it doesn't crawl
+fitted to the near part of the view — the frustum within a couple of times
+the distance to the terrain under the crosshair (a distance from the eye, so
+a wide lens doesn't splay the map out), at most 40 km, with a margin clear
+of the shader's fade at the map's edge — with its size quantized and its centre snapped to whole texels, so it doesn't crawl
 as the camera moves; it is re-rendered only when something changed (a still
 camera costs nothing). The terrain shader samples it with hardware pcf and a
 normal offset, and adds a facing term from the screen-space normal, relative

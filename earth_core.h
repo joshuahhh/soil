@@ -1624,7 +1624,7 @@ struct earth_core_t {
 	// --- sun shadows -------------------------------------------------
 	// a depth map from the sun over the casters (the walk keeps what can
 	// shade the view's surface, on screen or not: see casterPlanes),
-	// fitted to the near part of the view: the frustum from the near plane out to a few times the
+	// fitted to the near part of the view: the frustum from the near plane within a few times the
 	// distance to the terrain under the crosshair. the box is square in
 	// the sun's frame, its size quantized and its centre snapped to whole
 	// texels, so the map doesn't crawl as the camera moves; depth runs
@@ -1675,6 +1675,15 @@ struct earth_core_t {
 			x0 = fmin(x0, c.dot(sx)); x1 = fmax(x1, c.dot(sx));
 			y0 = fmin(y0, c.dot(sy)); y1 = fmax(y1, c.dot(sy));
 			z0 = fmin(z0, c.dot(L)); z1 = fmax(z1, c.dot(L));
+		}
+		// reach is a distance from the eye, not a depth: a wide lens's
+		// corners at that depth splay kilometres out, and the map's texels
+		// (and the lookup's normal offset) grew until near shadows went
+		if (!cam.ortho) {
+			auto ex = eye.dot(sx), ey = eye.dot(sy), ez = eye.dot(L);
+			x0 = fmax(x0, ex - reach); x1 = fmin(x1, ex + reach);
+			y0 = fmax(y0, ey - reach); y1 = fmin(y1, ey + reach);
+			z0 = fmax(z0, ez - reach); z1 = fmin(z1, ez + reach);
 		}
 		// the margin keeps the frustum clear of the shader's fade over the
 		// map's outer 4%, which the frustum's eye end touched as a zoom
