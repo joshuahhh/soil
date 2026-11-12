@@ -7,6 +7,7 @@ import { layoutOverlay, alignOn, updateMarkers, updateStatus, solving, solveStep
 import { tunnelClosing, curlTarget, endTunnel, tubePending, advanceTube, bodyPromise } from './tube.js';
 import { marker, setMarkerHeading, pickDebug, updatePickDebug, mapPointerDown, followMarker } from './map.js';
 import { pushPath, spine, buildSpine, followStep } from './path.js';
+import { updatePois } from './poi.js';
 
 export { Module, view, canvas, rightEl, resize, initEngine, frameCount, frameTiming };
 
@@ -152,6 +153,7 @@ const tick = (now) => {
     // every frame, so the ease converges after the camera stops
     if (S.following && !mapPointerDown) followMarker({ lat: m.lat, lng: m.lon }, dt);
     if (pickDebug) updatePickDebug();
+    updatePois(now);
 
     // a few solver steps a frame, so the camera visibly settles onto the fit
     if (alignOn) {

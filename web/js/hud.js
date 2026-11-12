@@ -5,6 +5,7 @@ import { alignRefresh, photoShown } from './photo.js';
 import { tubeRect } from './tube.js';
 import { path } from './path.js';
 import { stl } from './stl.js';
+import { poisOn } from './poi.js';
 
 export { logScale, percent, bindRange, bindCheck, gate, updateSpeed, updateHint, toast,
   refreshRoll, initHud, keysOpen, showKeys, toggleKeys, showCut, toggleCutPanel };
@@ -181,6 +182,7 @@ const keysFor = () => {
   viewRows.push([K('N'), miniature ? 'miniature off' : 'miniature (tilt-shift)']);
   viewRows.push([K('U'), clay ? 'textures' : 'clay: one colour, lit']);
   if (!ortho) viewRows.push([K('H'), 'near cut']);
+  viewRows.push([K('J'), poisOn ? 'hide wikipedia places' : 'wikipedia places']);
   viewRows.push([K('Y'), 'sky: time of day, haze, shadows']);
   viewRows.push([K('I'), 'glamour: refine a still frame']);
   viewRows.push([K('C L K M'), 'debug: pick · lod · smoothing · mipmaps']);

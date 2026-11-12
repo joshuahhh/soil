@@ -10,6 +10,7 @@ import { map, marker, initMap } from './map.js';
 import { path, parseGpx, setPath, initPath } from './path.js';
 import { sky, glamour, applyGlamour, applySky, initSky } from './sky.js';
 import { initStl, stlDemo, saveStl } from './stl.js';
+import { setPois, poiState, initPois } from './poi.js';
 
 // --- the test api ---------------------------------------------------------
 // window.__demo, window.__test (and window.__stats, in tiles.js) are an api:
@@ -28,6 +29,7 @@ const initTestApi = () => {
     clearTiles,
     align: () => ({ pairs, solving, dof: dofCount(), errs: lastErrs }),
     solve: startSolve,
+    pois: (on, find) => { if (on != null) setPois(on); return poiState(find); },
     copyState, pasteState, saveState };
 
   // not behind TEST, so it works from the devtools console too
@@ -87,4 +89,5 @@ initPath();
 initPhoto();
 initIO();
 initSky();
+initPois();
 initTestApi();

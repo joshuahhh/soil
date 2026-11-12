@@ -886,6 +886,36 @@ struct EarthView {
 		return o;
 	}
 
+	// the drawn mesh's altitude under a lat/lon (degrees), by a ray straight
+	// down from above every summit. no resolution gate, unlike
+	// groundRadiusUnder: a far label sits on the coarse mesh drawn there.
+	// nan when nothing drawn is under it
+	double groundAlt(double lat, double lon) {
+		if (!earth.ready()) return NAN;
+		Vector3d up = geoUp(lat * M_PI / 180.0, lon * M_PI / 180.0);
+		Vector3d hit;
+		if (earth.raycast(up * (planetRadius() + 10000.0), -up, hit) == earth_core_t::raycast_miss)
+			return NAN;
+		return hit.norm() - planetRadius();
+	}
+	// whether the drawn mesh stands between a point (degrees, meters) and the
+	// camera: toward the eye, or in ortho back along the boresight as far as
+	// the eye's plane
+	bool occluded(double lat, double lon, double alt) {
+		if (!earth.ready()) return false;
+		Vector3d p = geoUp(lat * M_PI / 180.0, lon * M_PI / 180.0) * (planetRadius() + alt);
+		Vector3d dir = -camera.direction;
+		double limit = (p - camera.eye).dot(camera.direction);
+		if (!camera.ortho) {
+			dir = camera.eye - p;
+			limit = dir.norm();
+			dir /= limit;
+		}
+		Vector3d hit;
+		if (!(limit > 0) || earth.raycast(p, dir, hit) == earth_core_t::raycast_miss) return false;
+		return (hit - p).norm() < limit;
+	}
+
 	// built-in flying controls; the host translates its pointer/keyboard
 	// events into this (yaw/pitch in radians for this frame). view_frame
 	// switches forward/back and raise/lower from ground-frame cruise/pedestal
@@ -1078,6 +1108,8 @@ EMSCRIPTEN_BINDINGS(earth) {
 		.function("panOrtho", &EarthView::panOrtho)
 		.function("pickCenter", &EarthView::pickCenter)
 		.function("pickNdc", &EarthView::pickNdc)
+		.function("groundAlt", &EarthView::groundAlt)
+		.function("occluded", &EarthView::occluded)
 		.function("planetRadius", &EarthView::planetRadius)
 		.function("setTubeRect", &EarthView::setTubeRect)
 		.function("setTubeEnabled", &EarthView::setTubeEnabled)

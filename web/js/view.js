@@ -9,6 +9,7 @@ import { map, full3d, pickDebug, setPickDebug } from './map.js';
 import { debugSmooth, setDebugSmooth, setFollow, toggleFollow } from './path.js';
 import { sky, glamour, applySky, applyGlamour } from './sky.js';
 import { stl, setStl } from './stl.js';
+import { poisOn, setPois, poiSettings } from './poi.js';
 
 export { initView, mode, inTube, viewName, defineMode, setMode, ortho, hug, setHug, saveView,
   restoreView, keys, miniature, mipmaps, setMipmaps, clay, dragging };
@@ -75,6 +76,7 @@ const saveView = () => {
     miniature, full3d,
     nearCut: view.getNearCut(),
     lod: debugLod,
+    pois: poiSettings(),
     sky, glamour,
     tube: tubeState(),
     stl,
@@ -121,7 +123,7 @@ const keys = {};
 const typingIn = (t) => !!t && (t.tagName === 'TEXTAREA' || t.isContentEditable
   || t.tagName === 'SELECT'
   || (t.tagName === 'INPUT' && !['range', 'checkbox', 'color', 'button', 'radio'].includes(t.type)));
-const handled = new Set(['KeyW','KeyA','KeyS','KeyD','KeyQ','KeyE','KeyR','KeyF','KeyZ','KeyX','KeyG','KeyO','KeyC','KeyK','KeyL','KeyM','KeyT','KeyP','KeyV','KeyN','KeyB','KeyY','KeyI','KeyU',
+const handled = new Set(['KeyW','KeyA','KeyS','KeyD','KeyQ','KeyE','KeyR','KeyF','KeyZ','KeyX','KeyG','KeyO','KeyC','KeyK','KeyL','KeyM','KeyT','KeyP','KeyV','KeyN','KeyB','KeyY','KeyI','KeyU','KeyJ',
   'Space','ArrowLeft','ArrowRight','ArrowUp','ArrowDown','Minus','Equal','Digit0','Numpad0','Home','KeyH','Digit3']);
 let miniature = false; // the tilt-shift look (N)
 const setMiniature = (on) => { miniature = on; view.setMiniature(on, 0.015, 0.35); updateHint(); };
@@ -167,6 +169,7 @@ const initInput = () => {
     if (e.code === 'Equal' && !e.repeat) { S.gain = Math.min(128, S.gain*2); updateHint(); }
     if (e.code === 'KeyN' && !e.repeat) setMiniature(!miniature);
     if (e.code === 'KeyU' && !e.repeat) setClay(!clay);
+    if (e.code === 'KeyJ' && !e.repeat) setPois(!poisOn);
     if (e.code === 'KeyO' && !e.repeat && setOrtho(!ortho)) updateHint();
     if (e.code === 'KeyG' && !e.repeat && setHug(!hug)) {
       if (hug) stopSolve(); // the two fight over altitude — see startSolve

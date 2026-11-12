@@ -91,6 +91,19 @@
         <span><i class="swatch" style="background:#ff30ff"></i>retrying</span>
       </div>
     </div>
+    <div id="poipanel" class="panel">
+      <div class="head"><span>places</span><button class="x" id="poioff" title="hide the places (J)">✕</button></div>
+      <div class="row">
+        <span class="lbl">nearby</span>
+        <input id="poialpha" type="range" min="0" max="100" title="nearby places first, or the famous ones however far">
+        <span class="amt">famous</span>
+      </div>
+      <div class="row">
+        <span class="lbl">density</span>
+        <input id="poidensity" type="range" min="0" max="100" title="how many labels, and how close they pack">
+        <span class="amt" id="poicount"></span>
+      </div>
+    </div>
     <div id="skypanel" class="panel">
       <div class="head"><span>sky</span><button class="x" id="skyclose" title="hide (Y)">✕</button></div>
       <div class="group">

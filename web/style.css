@@ -201,3 +201,21 @@ body.full3d .maplibregl-ctrl-top-left { left: 8px; }
 #axisbtn { position: fixed; left: 8px; bottom: 24px; z-index: 10; color: #fff;
            background: #1c1c1c; font: 12px sans-serif; padding: 6px 8px;
            border-radius: 4px; cursor: pointer; user-select: none; }
+
+/* --- wikipedia places (J) -------------------------------------------------- */
+/* each label is placed by its pole's foot; the flag flies off its top */
+#pois { position: absolute; inset: 0; z-index: 3; pointer-events: none; display: none; }
+body.pois #pois { display: block; }
+body.pois #poipanel { display: flex; }
+#pois .poi { position: absolute; left: 0; top: 0; font: 12px sans-serif; color: #fff;
+             text-decoration: none; opacity: 0; transition: opacity .25s; }
+#pois .poi.on { opacity: 1; }
+#pois .poi.on.behind { opacity: .6; }
+#pois .poi:not(.on) { visibility: hidden; transition: opacity .25s, visibility 0s .25s; }
+#pois .pole { position: absolute; left: -0.75px; bottom: 0; width: 1.5px; height: 18px;
+              background: rgba(255,255,255,.85); box-shadow: 0 0 2px rgba(0,0,0,.6); }
+#pois .flag { position: absolute; left: -0.75px; bottom: 18px; white-space: nowrap;
+              padding: 2px 5px; border-radius: 0 3px 3px 0; background: rgba(0,0,0,.55);
+              pointer-events: auto; }
+#pois .poi:hover { z-index: 1000 !important; }
+#pois .poi:hover .flag { background: rgba(0,0,0,.85); text-decoration: underline; }
