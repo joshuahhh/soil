@@ -206,8 +206,21 @@ const keysFor = () => {
   g.push(['session', [[K('⌘C ⌘V'), 'copy / paste the whole session'],
     [K('⌘S'), 'save it as a file'],
     ['drop a file', 'image → photo · .gpx → path · .obj → body · session .json → restore'], [K('?'), 'this']]]);
+  if (version) g.push(['version', versionRows(version)]);
   return g;
 };
+// version.json: written by ci for pages, served live by serve.py in dev.
+// refetched on each open so edits show up; absent elsewhere, so no section
+let version = null;
+const esc = (t) => t.replace(/[&<>"]/g, (c) => `&#${c.charCodeAt(0)};`);
+const versionRows = ({ commit, repo, dirty }) => {
+  const short = esc(commit.slice(0, 7));
+  const hash = repo ? `<a href="https://github.com/${esc(repo)}/commit/${esc(commit)}" target="_blank">${short}</a>` : short;
+  return [[`<code>${hash}</code>`, dirty ? 'uncommitted changes' : '']];
+};
+const fetchVersion = () => fetch('version.json', { cache: 'no-store' })
+  .then((r) => r.ok ? r.json() : null)
+  .then((v) => { version = v; refreshKeys(); }, () => {});
 let keysOpen = false, keysHtml = '';
 const renderKeys = () => {
   const html = keysFor().map(([title, rows]) =>
@@ -220,7 +233,7 @@ const renderKeys = () => {
 const refreshKeys = () => { if (keysOpen) renderKeys(); };
 const showKeys = (on) => {
   keysOpen = on;
-  if (on) renderKeys();
+  if (on) { renderKeys(); fetchVersion(); }
   document.body.classList.toggle('keys', on);
 };
 const toggleKeys = () => {

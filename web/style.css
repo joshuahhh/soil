@@ -186,6 +186,8 @@ body.keys #keys { display: block; }
 #keys table { border-collapse: collapse; }
 #keys td { padding: 1px 0; vertical-align: top; }
 #keys td:first-child { padding-right: 10px; white-space: nowrap; }
+#keys code { font: 11px monospace; }
+#keys a { color: inherit; }
 #keys kbd { font: 11px monospace; background: rgba(255,255,255,.15); padding: 0 4px;
             border-radius: 3px; }
 /* lifted out of #map (map.js) so it survives the collapse; above the divider (20) */

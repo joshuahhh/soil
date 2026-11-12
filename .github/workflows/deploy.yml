@@ -58,6 +58,12 @@ jobs:
       - name: stage the service worker
         run: cp coi-serviceworker.js web/
 
+      # the ? menu's version section (serve.py makes it live in dev). a fresh
+      # checkout, so nothing is uncommitted
+      - name: stamp the version
+        run: |
+          printf '{"commit":"%s","repo":"%s","dirty":false}' "$GITHUB_SHA" "$GITHUB_REPOSITORY" > web/version.json
+
       # runs on both paths on purpose: it's also the check that what came back
       # out of the cache is the pair of real artifacts
       - name: gate on artifact sizes
