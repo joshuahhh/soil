@@ -2,7 +2,7 @@ import { QS, START } from './config.js';
 import { view, canvas, rightEl } from './engine.js';
 import { D2R, ecefOf, poseBasis, vsub, vdot } from './math.js';
 import { mode, ortho, saveView } from './view.js';
-import { updateHint, bindRange, percent } from './hud.js';
+import { updateHint, bindRange } from './hud.js';
 
 export { poisOn, setPois, updatePois, poiSettings, poiState, initPois };
 
@@ -15,6 +15,10 @@ export { poisOn, setPois, updatePois, poiSettings, poiState, initPois };
 // 67, a park 2)
 const RINGS = [{ km: 0.8, n: 100 }, { km: 3, n: 60 }, { km: 12, n: 80 }, { km: 50, n: 100 },
   { km: 200, n: 100 }];
+// max: twice the rings, each asking for search's limit, 500. a city has
+// that many within a few km (622 within 3 km of seattle center), all round
+// the eye, of which the view sees a fifth
+const MAX_RINGS = [0.8, 1.5, 3, 6, 12, 25, 50, 100, 200].map((km) => ({ km, n: 500 }));
 // not places, or places whose coordinate is a centroid hundreds of km across
 const NOT_PLACES = ['Infobox company', 'Infobox event', 'Infobox civilian attack',
   'Infobox legislature', 'Infobox organization', 'Infobox U.S. county', 'Infobox U.S. state',
@@ -35,14 +39,17 @@ const MAX_POLE = 150; // m: the pole tested for occlusion, however tall it's dra
 const NEAR_BEHIND = 3000; // m
 const BEHIND_PENALTY = 1.2;
 const STEM = 18; // px of flagpole
+// at max density a flag with no room at STEM tries the taller poles too
+const MAX_LEVELS = 4;
 const DROP_KM = 400;
 
 let poisOn = false;
 // alpha: how fast a place's claim fades with distance (the nearby..famous
-// dial). density: how close labels may pack, and how many
+// dial). density: how close labels may pack, and how many; 'max' takes
+// every spot that's free
 const settings = { alpha: 0.7, density: 0.7 };
 const pois = new Map(); // pageid -> place
-const ringCell = RINGS.map(() => null); // the grid cell each ring last fetched
+const ringCell = new Map(); // km -> the grid cell (and n) that ring last fetched
 let fetching = false, retryAt = 0;
 
 const labelOf = (title) => title.replace(/ \(.*\)$/, '').replace(/,.*$/, '');
@@ -56,6 +63,8 @@ const cellFor = (ring, lat, lon) => {
   const i = Math.round(lat / dLat), j = Math.round(lon / dLon);
   return { key: `${i},${j}`, lat: +(i * dLat).toFixed(5), lon: +(j * dLon).toFixed(5) };
 };
+
+const rings = () => settings.density === 'max' ? MAX_RINGS : RINGS;
 
 const fetchRing = async (ring, cell) => {
   const r = ring.km < 1 ? `${Math.round(ring.km * 1000)}m` : `${ring.km}km`;
@@ -80,14 +89,15 @@ const fetchRing = async (ring, cell) => {
 };
 
 // one request at a time, nearest ring first
+const ringKey = (r, at) => `${r.n}@${cellFor(r, at.lat, at.lon).key}`;
 const maybeFetch = (at, now) => {
   if (fetching || now < retryAt) return;
-  const i = RINGS.findIndex((r, k) => ringCell[k] !== cellFor(r, at.lat, at.lon).key);
-  if (i < 0) return;
-  const cell = cellFor(RINGS[i], at.lat, at.lon);
+  const ring = rings().find((r) => ringCell.get(r.km) !== ringKey(r, at));
+  if (!ring) return;
+  const cell = cellFor(ring, at.lat, at.lon), key = ringKey(ring, at);
   fetching = true;
-  fetchRing(RINGS[i], cell).then(() => {
-    ringCell[i] = cell.key;
+  fetchRing(ring, cell).then(() => {
+    ringCell.set(ring.km, key);
     const cosLat = Math.cos(at.lat * D2R);
     for (const [id, poi] of pois) {
       const km = Math.hypot(poi.lat - at.lat, (poi.lon - at.lon) * cosLat) * 111.32;
@@ -156,7 +166,9 @@ const projector = (b, p, W, H) => {
   };
 };
 
-let countEl = null, lastCount = -1;
+let countEl = null, lastCount = '';
+// why the places near the view went unlabelled, last frame (poiState)
+let why = {};
 const updatePois = (now) => {
   if (!poisOn || !view.ready()) return;
   // the tube's and the tunnel's warps aren't projections
@@ -173,18 +185,23 @@ const updatePois = (now) => {
   // a place refines as it loads
   const due = [];
   const cands = [];
+  why = { offView: 0, noGround: 0, untested: 0, behindFar: 0, edge: 0, noRoom: 0, cap: 0 };
   for (const [id, poi] of pois) {
     const known = !Number.isNaN(poi.ground);
     const s = project(ecefOf({ lat: poi.lat, lon: poi.lon, alt: known ? poi.ground : 0 }));
-    if (!s || s.x < -W * 0.2 || s.x > W * 1.2 || s.y < -H * 0.2 || s.y > H * 1.2) continue;
+    if (!s || s.x < -W * 0.2 || s.x > W * 1.2 || s.y < -H * 0.2 || s.y > H * 1.2) { why.offView++; poi.why = 'offView'; continue; }
     if (now - poi.probedAt > (known ? 3000 : 1000)) due.push(poi);
-    if (!known) continue;
-    const score = Math.log(2 + poi.links) - settings.alpha * Math.log(Math.max(s.d, 300) / 1000)
-      + (shown.has(id) ? 0.4 : 0); // a shown label holds its spot
-    cands.push({ id, poi, s, score });
+    if (!known) { why.noGround++; poi.why = 'noGround'; continue; }
+    const worth = Math.log(2 + poi.links) - settings.alpha * Math.log(Math.max(s.d, 300) / 1000);
+    // a shown label holds its spot; only its order, not its size, or a label
+    // that grows once shown can lose its spot and blink
+    poi.at = { x: Math.round(s.x), y: Math.round(s.y), d: Math.round(s.d) };
+    cands.push({ id, poi, s, worth, score: worth + (shown.has(id) ? 0.4 : 0) });
   }
+  // max fetches several times the places, so it probes and tests at twice the rate
+  const rate = settings.density === 'max' ? 2 : 1;
   due.sort((a, c) => a.probedAt - c.probedAt);
-  for (const poi of due.slice(0, 8)) {
+  for (const poi of due.slice(0, 8 * rate)) {
     poi.probedAt = now;
     const g = view.groundAlt(poi.lat, poi.lon);
     // an early probe can come back kilometres underground, off the bottom
@@ -198,40 +215,68 @@ const updatePois = (now) => {
   // first; untested ones wait
   const stale = cands.filter((c) => now - c.poi.testedAt > 300)
     .sort((a, c) => a.poi.testedAt - c.poi.testedAt);
-  for (const c of stale.slice(0, 12)) {
+  for (const c of stale.slice(0, 12 * rate)) {
     c.poi.testedAt = now;
     c.poi.behind = view.occluded(c.poi.lat, c.poi.lon,
       c.poi.ground + Math.min(MAX_POLE, STEM * c.s.mPerPx));
   }
-  for (const c of cands) if (c.poi.behind) c.score -= BEHIND_PENALTY;
+  for (const c of cands) if (c.poi.behind) { c.score -= BEHIND_PENALTY; c.worth -= BEHIND_PENALTY; }
   cands.sort((a, c) => c.score - a.score);
 
-  // a label's whole footprint, pole included, so no pole runs through a flag
-  const pad = Math.round(30 * (1 - settings.density));
-  const maxShown = Math.round(15 + 100 * settings.density);
+  // the flag and its pole each take their box, so no pole runs through a
+  // flag but a flag may fly beside another's pole
+  const max = rate > 1;
+  const pad = max ? 0 : Math.round(30 * (1 - settings.density));
+  const maxShown = max ? Infinity : Math.round(15 + 100 * settings.density);
   const boxes = [];
+  const free = (b) => !boxes.some((o) => b[0] < o[2] && b[2] > o[0] && b[1] < o[3] && b[3] > o[1]);
   const next = new Set();
   for (const c of cands) {
-    if (next.size >= maxShown) break;
+    if (next.size >= maxShown) { why.cap = cands.length - cands.indexOf(c); break; }
     const { poi, s } = c;
-    if (poi.behind === null || (poi.behind && s.d > NEAR_BEHIND)) continue;
-    const px = Math.round(11 + Math.min(4, Math.max(0, c.score - 1)));
+    if (poi.behind === null) { why.untested++; poi.why = 'untested'; continue; }
+    if (poi.behind && s.d > NEAR_BEHIND) { why.behindFar++; poi.why = 'behindFar'; continue; }
+    const px = Math.round(11 + Math.min(4, Math.max(0, c.worth - 1)));
     const w = poi.label.length * px * 0.56 + 10, h = px + 6;
-    const box = [s.x - 2 - pad, s.y - STEM - h - pad, s.x + w + pad, s.y + pad];
-    if (box[0] + pad < 0 || box[2] - pad > W || box[1] + pad < 0 || box[3] - pad > H) continue;
-    if (boxes.some((o) => box[0] < o[2] && box[2] > o[0] && box[1] < o[3] && box[3] > o[1])) continue;
-    boxes.push(box);
+    if (s.y > H) { why.edge++; poi.why = 'edge'; continue; }
+    // each pole height in turn, the flag flying right of the pole, else left;
+    // a shown label tries its own first, so it doesn't hop
+    const tries = [];
+    for (let k = 1; k <= (max ? MAX_LEVELS : 1); k++) tries.push([k, 1], [k, -1]);
+    if (shown.has(c.id)) tries.unshift([poi.level, poi.side]);
+    let fit = null, offEdge = true;
+    for (const [k, side] of tries) {
+      const top = s.y - STEM * k;
+      if (top - h < 0) continue;
+      const x0 = side > 0 ? s.x - 2 : s.x - w, x1 = side > 0 ? s.x + w : s.x + 2;
+      if (x0 < 0 || x1 > W) continue;
+      offEdge = false;
+      const flag = [x0 - pad, top - h - pad, x1 + pad, top + pad];
+      const pole = [s.x - 2 - pad, top, s.x + 2 + pad, s.y + pad];
+      if (free(flag) && free(pole)) { fit = { k, side, flag, pole }; break; }
+    }
+    if (!fit) {
+      if (offEdge) { why.edge++; poi.why = 'edge'; } else { why.noRoom++; poi.why = 'noRoom'; }
+      continue;
+    }
+    boxes.push(fit.flag, fit.pole);
     next.add(c.id);
+    poi.level = fit.k;
+    poi.side = fit.side;
+    poi.why = 'shown';
     const el = poi.el || (poi.el = labelEl(poi));
+    el.style.setProperty('--stem', STEM * fit.k + 'px');
+    el.classList.toggle('left', fit.side < 0);
     el.style.transform = `translate(${s.x.toFixed(1)}px, ${s.y.toFixed(1)}px)`;
     el.style.fontSize = px + 'px';
-    el.style.zIndex = Math.round(c.score * 10) + 100; // nearer the front when it's worth more
+    el.style.zIndex = Math.round(c.worth * 10) + 100; // nearer the front when it's worth more
     el.classList.add('on');
     el.classList.toggle('behind', !!poi.behind);
   }
   for (const id of shown) if (!next.has(id)) { const poi = pois.get(id); if (poi && poi.el) poi.el.classList.remove('on'); }
   shown = next;
-  if (shown.size !== lastCount) { lastCount = shown.size; countEl.textContent = lastCount; }
+  const count = (max ? 'max ' : '') + shown.size;
+  if (count !== lastCount) { lastCount = count; countEl.textContent = count; }
 };
 
 const setPois = (on) => {
@@ -247,7 +292,7 @@ const poiSettings = () => ({ on: poisOn, ...settings });
 
 // for __demo and the tools
 const poiState = (find) => ({
-  on: poisOn, loaded: pois.size, rings: ringCell.slice(), ...settings,
+  on: poisOn, loaded: pois.size, rings: Object.fromEntries(ringCell), ...settings, why: { ...why },
   shown: [...shown].map((id) => { const p = pois.get(id); return { label: p.label, links: p.links }; }),
   // the places whose title matches, everything known about them
   ...(find ? { found: [...pois.values()].filter((p) => find.test(p.title))
@@ -259,12 +304,14 @@ const initPois = () => {
   countEl = document.getElementById('poicount');
   const saved = START.pois || {};
   if (Number.isFinite(saved.alpha)) settings.alpha = saved.alpha;
-  if (Number.isFinite(saved.density)) settings.density = saved.density;
+  if (Number.isFinite(saved.density) || saved.density === 'max') settings.density = saved.density;
   const refresh = [
     // left nearby (distance counts for a lot), right famous (it barely does)
     bindRange('poialpha', settings, 'alpha', { apply: saveView,
       scale: { from: (v) => 1.6 - 1.5 * v / 100, to: (a) => Math.round((1.6 - a) / 1.5 * 100) } }),
-    bindRange('poidensity', settings, 'density', { apply: saveView, scale: percent }),
+    // past 100 is max
+    bindRange('poidensity', settings, 'density', { apply: saveView, scale: {
+      from: (v) => v > 100 ? 'max' : v / 100, to: (x) => x === 'max' ? 120 : Math.round(x * 100) } }),
   ];
   for (const f of refresh) f();
   document.getElementById('poioff').addEventListener('click', () => { setPois(false); canvas.focus(); });

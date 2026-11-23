@@ -209,15 +209,24 @@ body.full3d .maplibregl-ctrl-top-left { left: 8px; }
 #pois { position: absolute; inset: 0; z-index: 3; pointer-events: none; display: none; }
 body.pois #pois { display: block; }
 body.pois #poipanel { display: flex; }
+/* a tick behind the density slider at 100, where max begins. the native
+   range ignores its own background, so the tick is on a wrapper. the thumb
+   (16px) travels inset by its half */
+#poipanel .notched { flex: 1; min-width: 0; display: flex; position: relative; }
+#poipanel .notched::before { content: ''; position: absolute; top: calc(50% - 5px); height: 10px; width: 2px;
+                             left: calc(8px + (100% - 16px) * 100 / 120 - 1px);
+                             background: rgba(255,255,255,.7); }
+#poipanel .notched input { position: relative; }
 #pois .poi { position: absolute; left: 0; top: 0; font: 12px sans-serif; color: #fff;
              text-decoration: none; opacity: 0; transition: opacity .25s; }
 #pois .poi.on { opacity: 1; }
 #pois .poi.on.behind { opacity: .6; }
 #pois .poi:not(.on) { visibility: hidden; transition: opacity .25s, visibility 0s .25s; }
-#pois .pole { position: absolute; left: -0.75px; bottom: 0; width: 1.5px; height: 18px;
+#pois .pole { position: absolute; left: -0.75px; bottom: 0; width: 1.5px; height: var(--stem, 18px);
               background: rgba(255,255,255,.85); box-shadow: 0 0 2px rgba(0,0,0,.6); }
-#pois .flag { position: absolute; left: -0.75px; bottom: 18px; white-space: nowrap;
+#pois .flag { position: absolute; left: -0.75px; bottom: var(--stem, 18px); white-space: nowrap;
               padding: 2px 5px; border-radius: 0 3px 3px 0; background: rgba(0,0,0,.55);
               pointer-events: auto; }
+#pois .poi.left .flag { left: auto; right: -0.75px; border-radius: 3px 0 0 3px; }
 #pois .poi:hover { z-index: 1000 !important; }
 #pois .poi:hover .flag { background: rgba(0,0,0,.85); text-decoration: underline; }
