@@ -14,7 +14,7 @@ export { path, parseGpx, pushPath, savePath, setPath, loadGpxFile, spine, buildS
 let path = null;   // { name, segs: [[{lat, lon, ele}, ...], ...], pts, km }
 const pathStyle = { color: '#ff7f0e', opacity: 0.9, width: 3, drape: true };
 const pathEls = {};
-for (const k of ['name', 'stats', 'progress', 'color', 'opacity', 'width', 'drape',
+for (const k of ['name', 'color', 'opacity', 'width', 'drape',
   'close', 'fit', 'go', 'follow'])
   pathEls[k] = document.getElementById('path' + k);
 
@@ -167,13 +167,6 @@ const refreshPathPanel = () => {
   if (!path) return;
   pathEls.name.textContent = path.name || 'path';
   pathEls.name.title = path.name || '';
-  pathEls.stats.textContent = `${path.pts} pts · ${path.km.toFixed(1)} km`
-    + (path.segs.length > 1 ? ` · ${path.segs.length} segments` : '')
-    + (path.saved === false ? ' · NOT SAVED' : '');
-  pathEls.stats.title = path.saved === false
-    ? "this track couldn't be written to the browser's storage (it's probably"
-      + ' full) — a reload will come back to whatever was stored before it'
-    : '';
 };
 
 // fresh: just dropped, so re-pick the drape default; a restore keeps the saved one
@@ -377,10 +370,6 @@ const followStep = (dt, slow) => {
   const ll = rawAt(spine, fol.s);
   setCursor(ll);
   view.setPathCursorIndex(ll.idx);
-  pathEls.progress.textContent = `${(fol.s / 1000).toFixed(2)} of `
-    + `${(spine.rawLen / 1000).toFixed(2)} km · `
-    + `${Math.round(100 * fol.s / Math.max(1, spine.rawLen))}%`
-    + (debugSmooth ? ` · smooth ${Math.round(aimWin)}/${Math.round(headWin)} m` : '');
   // but the camera aims down the smoothed copy, so it doesn't shake
   const aim = spineLatLon(spine, spineAt(spine, sSpine, aimSm));
   const lat = aim.lat * D2R, lon = aim.lon * D2R;
