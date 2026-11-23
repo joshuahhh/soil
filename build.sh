@@ -18,14 +18,19 @@ echo build: weblib
 if [ proto/rocktree.proto -nt proto/rocktree.pb.h ]; then
 	$EMSCRIPTEN_PROTOBUF_EXE --cpp_out=. proto/rocktree.proto
 fi
+# the compiles below are independent, so they run side by side (cgal's alone
+# is most of the time); pids collects them for the wait before the link.
 # the generated code runs on the decode threads, so it gets -pthread like the
 # engine and libprotobuf
+pids=
 if [ proto/rocktree.pb.cc -nt proto/rocktree.pb.o ]; then
 	em++ -std=c++17 -O2 -pthread -c proto/rocktree.pb.cc -o proto/rocktree.pb.o \
-		-I. -I$EMSCRIPTEN_PROTOBUF_SRC
+		-I. -I$EMSCRIPTEN_PROTOBUF_SRC &
+	pids="$pids $!"
 fi
 if [ crn/crn.cc -nt crn/crn.o ]; then
-	(cd crn && emcc -std=c++14 -O2 -c crn.cc -w)
+	(cd crn && emcc -std=c++14 -O2 -c crn.cc -w) &
+	pids="$pids $!"
 fi
 # the stl export's alpha wrap (earth_stl.h): cgal, a minute to compile, so
 # only when it changes. cgal's filtered predicates throw to fall back to
@@ -35,20 +40,25 @@ fi
 if [ earth_stl.cpp -nt earth_stl.o ] || [ earth_stl.h -nt earth_stl.o ]; then
 	em++ -std=c++17 -O2 -pthread -fwasm-exceptions -c earth_stl.cpp -o earth_stl.o \
 		-I$EMSCRIPTEN_CGAL_INC -s USE_BOOST_HEADERS=1 \
-		-DCGAL_ALWAYS_ROUND_TO_NEAREST -DCGAL_DISABLE_GMP -DNDEBUG
+		-DCGAL_ALWAYS_ROUND_TO_NEAREST -DCGAL_DISABLE_GMP -DNDEBUG &
+	pids="$pids $!"
 fi
+# EARTH_PROFILE=1 keeps function names in the wasm, so a browser cpu profile
+# (tools/loadprof.mjs --cpuprofile) names the engine's functions instead of
+# showing wasm-function[1234]. a little bigger, so not the default
+em++ earth_web.cpp -c -o earth_web.o -O2 -std=c++17 -pthread -fwasm-exceptions \
+	-Wno-deprecated-declarations -I. -Ideps/eigen -I$EMSCRIPTEN_PROTOBUF_SRC \
+	${EARTH_PROFILE:+--profiling-funcs} &
+pids="$pids $!"
+# wait on each, not bare `wait`, so a failed compile fails the build (set -e)
+for pid in $pids; do wait "$pid"; done
 
 mkdir -p web
 cp coi-serviceworker.js web/
 # em++, not emcc: from emscripten 6 emcc no longer links libc++ just because
 # the input is a .cpp, and the link fails on ostream/locale symbols
-# EARTH_PROFILE=1 keeps function names in the wasm, so a browser cpu profile
-# (tools/loadprof.mjs --cpuprofile) names the engine's functions instead of
-# showing wasm-function[1234]. a little bigger, so not the default
-em++ earth_web.cpp -O2 -std=c++17 -Wno-deprecated-declarations -I. -Ideps/eigen \
-	${EARTH_PROFILE:+--profiling-funcs} \
-	-I$EMSCRIPTEN_PROTOBUF_SRC proto/rocktree.pb.o $EMSCRIPTEN_PROTOBUF_LIB crn/crn.o \
-	earth_stl.o -fwasm-exceptions \
+em++ earth_web.o proto/rocktree.pb.o $EMSCRIPTEN_PROTOBUF_LIB crn/crn.o earth_stl.o \
+	-O2 -fwasm-exceptions ${EARTH_PROFILE:+--profiling-funcs} \
 	-s MALLOC=mimalloc -Wno-pthreads-mem-growth \
 	-s FETCH=1 -s USE_PTHREADS=1 \
 	-s MAX_WEBGL_VERSION=2 -s MIN_WEBGL_VERSION=2 \

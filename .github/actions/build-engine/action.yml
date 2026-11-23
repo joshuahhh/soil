@@ -1,7 +1,7 @@
 name: build the engine
 description: >
   compile earth_web.cpp into web/earth.js + web/earth.wasm with emscripten.
-  several steps and two caches of its own, but from the outside it is one
+  several steps and three caches of its own, but from the outside it is one
   step with one condition — which is the point: whether the engine needs
   building is a single decision, made by the caller.
 
@@ -38,10 +38,22 @@ runs:
         path: deps
         key: deps-eigen3.3.7-protobuf21.12-cgal6.2-emsdk${{ inputs.emsdk-version }}-v1
 
+    # a fresh checkout makes build.sh recompile every object, cgal's (most of
+    # the build) included; ccache, keyed on the sources and flags, hands back
+    # the ones that didn't change. emcc runs clang through EM_COMPILER_WRAPPER
+    - name: ccache
+      uses: hendrikmuhs/ccache-action@v1.2
+      with:
+        key: ccache-emsdk${{ inputs.emsdk-version }}
+
     - name: setup deps
       shell: bash
+      env:
+        EM_COMPILER_WRAPPER: ccache
       run: source ~/emsdk/emsdk_env.sh && ./setup.sh
 
     - name: build
       shell: bash
+      env:
+        EM_COMPILER_WRAPPER: ccache
       run: source ~/emsdk/emsdk_env.sh && ./build.sh

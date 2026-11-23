@@ -43,7 +43,7 @@ jobs:
           key: engine-emsdk${{ env.EMSDK_VERSION }}-${{ hashFiles('*.cpp', '*.h', 'crn/**', 'proto/**', 'build.sh', 'config_emscripten.sh', 'setup.sh') }}
 
       # ...and the one decision: is that cache entry usable, or does the
-      # engine need building? the build itself is several steps and two
+      # engine need building? the build itself is several steps and three
       # caches of its own, nested in .github/actions/build-engine so that it
       # is one step here and takes one condition. on a hit this job is
       # checkout, restore, upload.
